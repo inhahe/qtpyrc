@@ -11,3 +11,5 @@ This version is, I think, less developed than the second version, though I think
 There may be files included that aren't really necessary for the project.
 
 I'm posting these two projects so that people can contribute to them and do the work of making them fully fledged that I'm too lazy to do. =) Maybe someone can even bring together the best parts of both projects into one of these two projects or into a new project. (It would be sad if I'm not the owner of said new project, though. :)) 
+
+It uses t.i.p.irc, but I think I made some custom modifications to irc.py that the program relies on, hence the inclusion of irc.py in the repository. No idea if that violates Twisted's usage license.
