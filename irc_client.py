@@ -741,8 +741,8 @@ class IRCClient(asyncirc.IRCClient):
       if pending_key is not None:
         chan.key = pending_key
       self.channels[chnlower] = chan
-      # Replay saved history into the new channel window
-      _history_replay(chan.window, self.client.network, chname, chan_obj=chan)
+      # Defer history replay until the window is first activated
+      chan.window._deferred_replay = (self.client.network, chname, chan)
     ts = self._get_server_time()
     chan.window.addline_nick(["* ", (self.nickname,), " has joined %s" % chname], state.infoformat,
                             timestamp_override=ts)
