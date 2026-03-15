@@ -432,6 +432,19 @@ def build_toolbar(parent, entries=None):
   icon_sz = QSize(icon_size, icon_size)
   flow_widget = _FlowToolbarWidget(spacing=2)
 
+  # Compute hover/pressed colors from toolbar colors
+  cfg = state.config
+  fg = cfg.toolbar_fgcolor if cfg else QColor('#ffffff')
+  # Hover: semi-transparent foreground overlay
+  hover_bg = 'rgba(%d,%d,%d,40)' % (fg.red(), fg.green(), fg.blue())
+  pressed_bg = 'rgba(%d,%d,%d,80)' % (fg.red(), fg.green(), fg.blue())
+  btn_style = (
+      'QToolButton { border: none; padding: 2px; }'
+      'QToolButton:hover { background-color: %s; border-radius: 3px; }'
+      'QToolButton:pressed { background-color: %s; border-radius: 3px; }'
+      % (hover_bg, pressed_bg)
+  )
+
   for entry in entries:
     if entry[0] == 'linebreak':
       flow_widget.add_linebreak()
@@ -448,11 +461,17 @@ def build_toolbar(parent, entries=None):
       btn.setAutoRaise(True)
       if has_icon:
         btn.setIcon(icon)
+        btn.setStyleSheet(btn_style)
       else:
         btn.setText(tooltip)
         btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        fg = state.config.toolbar_fgcolor.name() if state.config else '#ffffff'
-        btn.setStyleSheet("color: %s;" % fg)
+        text_fg = cfg.toolbar_fgcolor.name() if cfg else '#ffffff'
+        btn.setStyleSheet(
+            'QToolButton { color: %s; border: none; padding: 2px; }'
+            'QToolButton:hover { background-color: %s; border-radius: 3px; }'
+            'QToolButton:pressed { background-color: %s; border-radius: 3px; }'
+            % (text_fg, hover_bg, pressed_bg)
+        )
       btn.clicked.connect(lambda checked, cmd=command: _exec_toolbar_command(cmd))
       flow_widget.add_button(btn)
 

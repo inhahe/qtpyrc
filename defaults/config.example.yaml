@@ -119,6 +119,16 @@ show_mode_prefix: false
 # Selection is cleared after copying.  Default: false.
 auto_copy_selection: false
 
+# Assign random colors to nicks in channel messages.
+# Each nick always gets the same color (based on hash).
+nick_colors:
+  enabled: false
+  # palette:              # custom palette (list of hex colors)
+  #   - "#cc0000"
+  #   - "#0066cc"
+  #   - "#009900"
+  #   # ... add as many as you like
+
 
 # ---------------------------------------------------------------------------
 # Typing notifications (IRCv3 +typing)

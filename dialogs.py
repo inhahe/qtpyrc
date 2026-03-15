@@ -8,6 +8,40 @@ from ruamel.yaml.comments import CommentedMap
 import math
 
 import state
+
+
+def install_input_focus_handler(dialog):
+  """Install Enter/Escape handling on all QLineEdit fields in a dialog.
+  Enter clears focus, Escape reverts and clears focus."""
+  app = QApplication.instance()
+  def _on_focus_changed(old, new):
+    if isinstance(new, QLineEdit) and dialog.isAncestorOf(new):
+      new._focus_saved_text = new.text()
+  def _event_filter(obj, event):
+    if event.type() == QEvent.Type.KeyPress:
+      w = dialog.focusWidget()
+      key = event.key()
+      if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+        if isinstance(w, (QLineEdit, QSpinBox, QDoubleSpinBox)):
+          w.clearFocus()
+          return True
+      elif key == Qt.Key.Key_Escape:
+        if isinstance(w, QLineEdit):
+          if hasattr(w, '_focus_saved_text'):
+            w.setText(w._focus_saved_text)
+          w.clearFocus()
+          return True
+    return False
+  # Store refs to prevent GC
+  dialog._input_focus_filter = _event_filter
+  dialog._input_focus_changed = _on_focus_changed
+  # Install
+  class _Filter(QObject):
+    def eventFilter(self, obj, event):
+      return _event_filter(obj, event)
+  dialog._input_filter_obj = _Filter(dialog)
+  dialog.installEventFilter(dialog._input_filter_obj)
+  app.focusChanged.connect(_on_focus_changed)
 from state import dbg, LOG_INFO, LOG_WARN
 from config import _qt_colors, _parse_color, _color_to_config
 
@@ -881,6 +915,7 @@ def show_color_picker(parent=None):
   mw = parent or (state.app.mainwin if state.app else None)
   dlg = QDialog(mw)
   dlg.setWindowTitle("Color Picker")
+  install_input_focus_handler(dlg)
   layout = QVBoxLayout(dlg)
   picker = ColorPickerWidget(parent=dlg)
   layout.addWidget(picker)
@@ -904,6 +939,7 @@ class FontPickerDialog(QDialog):
     super().__init__(parent)
     self.setWindowTitle("Font & Color Selection")
     self.resize(900, 650)
+    install_input_focus_handler(self)
     self._selected_family = current_family
     self._font_size = font_size
     self._fg_color = QColor(fg_color) if fg_color else QColor(0, 0, 0)

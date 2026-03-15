@@ -736,6 +736,18 @@ class AppConfig:
     self.show_mode_prefix = data.get('show_mode_prefix', False)
     self.auto_copy_selection = data.get('auto_copy_selection', False)
 
+    # Nick colors
+    nc = data.get('nick_colors') or {}
+    if isinstance(nc, bool):
+      nc = {'enabled': nc}
+    self.nick_colors_enabled = bool(nc.get('enabled', False))
+    self.nick_color_palette = nc.get('palette') or [
+      '#cc0000', '#0066cc', '#009900', '#9933cc', '#cc6600',
+      '#00999e', '#cc0066', '#6633cc', '#008844', '#aa4400',
+      '#2255aa', '#cc3399', '#337700', '#7744aa', '#006688',
+      '#994400', '#2266cc', '#880044', '#448800', '#663399',
+    ]
+
     typing = data.get('typing') or {}
     self.typing_send = typing.get('send', True)
     self.typing_show = typing.get('show', True)
