@@ -45,57 +45,87 @@ from toolbar import build_toolbar
 # ---------------------------------------------------------------------------
 
 def _build_app_stylesheet():
-  """Build a global stylesheet from config colors."""
+  """Build a minimal global stylesheet.
+
+  Only includes rules that *require* stylesheets (pseudo-states, borders,
+  padding). Basic colors are set via QPalette in _apply_palette() which
+  Qt handles much faster than stylesheet evaluation — important when 85+
+  channel windows are open.
+  """
   cfg = state.config
-  fg = cfg.fgcolor.name()
-  bg = cfg.bgcolor.name()
-  # Menu colors
   mfg = cfg.menu_fgcolor.name()
   mbg = cfg.menu_bgcolor.name()
   m_disabled = '#%02x%02x%02x' % (
     (cfg.menu_fgcolor.red() + cfg.menu_bgcolor.red()) // 2,
     (cfg.menu_fgcolor.green() + cfg.menu_bgcolor.green()) // 2,
     (cfg.menu_fgcolor.blue() + cfg.menu_bgcolor.blue()) // 2)
-  # Tree colors
-  tfg = cfg.tree_fgcolor.name()
-  tbg = cfg.tree_bgcolor.name()
-  # Nick list colors
-  nfg = cfg.nicklist_fgcolor.name()
-  nbg = cfg.nicklist_bgcolor.name()
-  parts = [
-    "QMainWindow { background-color: %s; color: %s; }" % (bg, fg),
-  ]
-  # Menu font
   menu_font = ''
   if cfg.menu_font_family:
     menu_font += "font-family: '%s'; " % cfg.menu_font_family
   if cfg.menu_font_size:
     menu_font += "font-size: %dpt; " % cfg.menu_font_size
-  parts.append("QMenuBar { background-color: %s; color: %s; padding: 0px; %s}" % (mbg, mfg, menu_font))
-  parts.append("QMenuBar::item { padding: 4px 8px; }")
-  parts.append("QMenuBar::item:selected { background-color: %s; color: %s; }" % (mfg, mbg))
-  parts.append("QMenu { background-color: %s; color: %s; border: 1px solid %s; padding: 2px; %s}" % (mbg, mfg, mfg, menu_font))
-  parts.append("QMenu::item { padding: 4px 12px; }")
-  parts.append("QMenu::item:disabled { color: %s; }" % m_disabled)
-  parts.append("QMenu::item:selected { background-color: %s; color: %s; }" % (mfg, mbg))
-  parts.append("QTextEdit { background-color: %s; color: %s; }" % (bg, fg))
-  # Tree font
-  tree_font = ''
-  if cfg.tree_font_family:
-    tree_font += "font-family: '%s'; " % cfg.tree_font_family
-  if cfg.tree_font_size:
-    tree_font += "font-size: %dpt; " % cfg.tree_font_size
-  parts.append("QTreeWidget { background-color: %s; color: %s; %s}" % (tbg, tfg, tree_font))
-  parts.append("QTreeWidget::item:selected { background-color: %s; color: %s; }" % (tfg, tbg))
-  # Nick list font
-  nicks_font = ''
-  if cfg.nicklist_font_family:
-    nicks_font += "font-family: '%s'; " % cfg.nicklist_font_family
-  if cfg.nicklist_font_size:
-    nicks_font += "font-size: %dpt; " % cfg.nicklist_font_size
-  parts.append("QListWidget#nicklist { background-color: %s; color: %s; %s}" % (nbg, nfg, nicks_font))
-  parts.append("QMdiArea { background-color: %s; }" % bg)
+  # Tree selection
+  tfg = cfg.tree_fgcolor.name()
+  tbg = cfg.tree_bgcolor.name()
+  parts = [
+    # Menu rules need pseudo-states — can't be done with QPalette
+    "QMenuBar { background-color: %s; color: %s; padding: 0px; %s}" % (mbg, mfg, menu_font),
+    "QMenuBar::item { padding: 4px 8px; }",
+    "QMenuBar::item:selected { background-color: %s; color: %s; }" % (mfg, mbg),
+    "QMenu { background-color: %s; color: %s; border: 1px solid %s; padding: 2px; %s}" % (mbg, mfg, mfg, menu_font),
+    "QMenu::item { padding: 4px 12px; }",
+    "QMenu::item:disabled { color: %s; }" % m_disabled,
+    "QMenu::item:selected { background-color: %s; color: %s; }" % (mfg, mbg),
+    # Tree selection needs pseudo-state
+    "QTreeWidget::item:selected { background-color: %s; color: %s; }" % (tfg, tbg),
+  ]
   return ' '.join(parts)
+
+
+def _apply_palette():
+  """Set application and widget colors via QPalette (fast path).
+
+  QPalette is the native Qt coloring mechanism and doesn't require
+  stylesheet rule matching on every paint event. This replaces the
+  stylesheet rules for QMainWindow, QTextEdit, QTreeWidget, QListWidget,
+  and QMdiArea colors.
+  """
+  from PySide6.QtGui import QPalette, QColor, QFont
+  cfg = state.config
+  # App-wide palette
+  pal = QApplication.instance().palette()
+  pal.setColor(QPalette.ColorRole.Window, QColor(cfg.bgcolor))
+  pal.setColor(QPalette.ColorRole.WindowText, QColor(cfg.fgcolor))
+  pal.setColor(QPalette.ColorRole.Base, QColor(cfg.bgcolor))
+  pal.setColor(QPalette.ColorRole.Text, QColor(cfg.fgcolor))
+  QApplication.instance().setPalette(pal)
+
+  mw = state.app.mainwin if state.app else None
+  if not mw:
+    return
+
+  # Tree widget palette
+  tree = getattr(mw, 'network_tree', None)
+  if tree:
+    tp = tree.palette()
+    tp.setColor(QPalette.ColorRole.Base, QColor(cfg.tree_bgcolor))
+    tp.setColor(QPalette.ColorRole.Text, QColor(cfg.tree_fgcolor))
+    tree.setPalette(tp)
+    tree_font = ''
+    if cfg.tree_font_family:
+      tree_font += "font-family: '%s'; " % cfg.tree_font_family
+    if cfg.tree_font_size:
+      tree_font += "font-size: %dpt; " % cfg.tree_font_size
+    if tree_font:
+      tree.setStyleSheet("QTreeWidget { %s }" % tree_font)
+    else:
+      tree.setStyleSheet('')
+
+  # Nick list palette (applied per-window in _refresh_all_window_fonts)
+  # Store as state for new windows to pick up
+  state._nicklist_palette = QPalette()
+  state._nicklist_palette.setColor(QPalette.ColorRole.Base, QColor(cfg.nicklist_bgcolor))
+  state._nicklist_palette.setColor(QPalette.ColorRole.Text, QColor(cfg.nicklist_fgcolor))
 
 
 def _refresh_all_window_fonts():
@@ -119,6 +149,8 @@ def _refresh_all_window_fonts():
       win.input.setFixedHeight(QFontMetrics(f).height() * lines + 10)
       if hasattr(win, 'nicklist'):
         win.nicklist.setFont(nf)
+        if hasattr(state, '_nicklist_palette'):
+          win.nicklist.setPalette(state._nicklist_palette)
 
 
 def _refresh_navigation(mw=None):
@@ -307,30 +339,77 @@ def update_main_title():
                        eval_ns={'state': state, '_v': variables})
   state.app.mainwin.setWindowTitle(title)
 
-def _refresh_window_titles():
-  """Re-expand title formats on all windows (custom and config-based)."""
+_title_refresh_windows = []  # flat list of all windows to refresh
+_title_refresh_index = 0     # current position in the stagger
+_title_stagger_timer = None
+
+
+def _rebuild_title_window_list():
+  """Rebuild the flat list of windows for staggered title refresh."""
+  global _title_refresh_windows, _title_refresh_index
+  wins = []
   if not state.clients:
+    _title_refresh_windows = wins
+    _title_refresh_index = 0
     return
-  from commands import expand_window_title
   for client in state.clients:
     if client.window:
-      if getattr(client.window, '_custom_title', None) is not None:
-        client.window.refresh_custom_title()
-      else:
-        fmt = state.config.title_server if client.connected else state.config.title_server_disconnected
-        client.window.setWindowTitle(expand_window_title(fmt, client.window))
+      wins.append(client.window)
     for chan in client.channels.values():
       if chan.window:
-        if getattr(chan.window, '_custom_title', None) is not None:
-          chan.window.refresh_custom_title()
-        else:
-          chan.update_title()
+        wins.append(chan.window)
     for query in client.queries.values():
       if query.window:
-        if getattr(query.window, '_custom_title', None) is not None:
-          query.window.refresh_custom_title()
-        else:
-          query.update_title()
+        wins.append(query.window)
+  _title_refresh_windows = wins
+  _title_refresh_index = 0
+
+
+def _refresh_window_titles():
+  """Start a staggered refresh of all window titles.
+
+  Instead of updating 85+ titles in one burst, spaces them out across
+  the full timer interval (one window per stagger tick) so the event
+  loop stays responsive.
+  """
+  global _title_stagger_timer, _title_refresh_index
+  _rebuild_title_window_list()
+  if not _title_refresh_windows:
+    return
+  if _title_stagger_timer:
+    _title_stagger_timer.stop()
+  # Spread updates across ~80% of the main timer interval
+  interval_ms = state.config.titlebar_interval * 1000 if state.config else 1000
+  n = len(_title_refresh_windows)
+  tick_ms = max(1, int(interval_ms * 0.8 / n))
+  _title_stagger_timer = QTimer()
+  _title_stagger_timer.timeout.connect(_title_stagger_tick)
+  _title_stagger_timer.start(tick_ms)
+
+
+def _title_stagger_tick():
+  """Update one window title per tick."""
+  global _title_refresh_index
+  if _title_refresh_index >= len(_title_refresh_windows):
+    if _title_stagger_timer:
+      _title_stagger_timer.stop()
+    return
+  win = _title_refresh_windows[_title_refresh_index]
+  _title_refresh_index += 1
+  from commands import expand_window_title
+  try:
+    if getattr(win, '_custom_title', None) is not None:
+      win.refresh_custom_title()
+    elif hasattr(win, 'channel') and win.channel:
+      win.channel.update_title()
+    elif hasattr(win, 'query') and win.query:
+      win.query.update_title()
+    elif hasattr(win, 'client') and win.client:
+      client = win.client
+      fmt = state.config.title_server if client.connected else state.config.title_server_disconnected
+      win.setWindowTitle(expand_window_title(fmt, win))
+  except RuntimeError:
+    pass  # widget deleted
 
 def _update_all_titles():
   """Refresh main titlebar and all window titles."""
@@ -396,46 +475,51 @@ def _bg_replay_tick():
     show_prefix = state.config.show_mode_prefix
     history = bg['chan_obj'].history if bg['chan_obj'] else None
 
-    for i in range(idx, end):
-      ts, etype, nick, text, prefix = rows[i]
-      ts_short = ts[11:16]
-      pn = (prefix + nick) if (show_prefix and prefix and nick) else nick
-      if etype == 'message':
-        window.addline_msg(pn, text, timestamp_override=ts_short)
-      elif etype == 'action':
-        window.addline_nick(["* ", (pn,), " %s" % text], state.actionformat,
-                            timestamp_override=ts_short)
-      elif etype == 'notice':
-        window.addline_nick(["-", (pn,), "- %s" % text], state.noticeformat,
-                            timestamp_override=ts_short)
-      elif etype == 'join':
-        window.addline_nick(["* ", (pn,), " has joined %s" % (text or chname)],
-                            state.infoformat, timestamp_override=ts_short)
-      elif etype == 'part':
-        window.addline_nick(["* ", (pn,), " has left %s" % (text or chname)],
-                            state.infoformat, timestamp_override=ts_short)
-      elif etype == 'quit':
-        window.addline_nick(["* ", (pn,), " has quit (%s)" % (text or "")],
-                            state.infoformat, timestamp_override=ts_short)
-      elif etype == 'kick':
-        window.addline(text or '', state.infoformat, timestamp_override=ts_short)
-      elif etype == 'nick':
-        window.addline_nick(["* ", (pn,), " is now known as ", (text or '?',)],
-                            state.infoformat, timestamp_override=ts_short)
-      elif etype == 'topic':
-        window.addline_nick(["* ", (pn,), " changed the topic to: %s" % (text or '')],
-                            state.infoformat, timestamp_override=ts_short)
-      elif etype == 'mode':
-        window.addline_nick(["* ", (pn,), " %s" % text], state.infoformat,
-                            timestamp_override=ts_short)
-      if history is not None:
-        from models import HistoryMessage
-        from datetime import datetime
-        try:
-          t = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
-        except Exception:
-          t = datetime.now()
-        history.append(HistoryMessage(None, nick, text, etype, prefix=prefix, time=t))
+    # Batch all insertions to suppress per-line document relayout
+    window.cur.beginEditBlock()
+    try:
+      for i in range(idx, end):
+        ts, etype, nick, text, prefix = rows[i]
+        ts_short = ts[11:16]
+        pn = (prefix + nick) if (show_prefix and prefix and nick) else nick
+        if etype == 'message':
+          window.addline_msg(pn, text, timestamp_override=ts_short)
+        elif etype == 'action':
+          window.addline_nick(["* ", (pn,), " %s" % text], state.actionformat,
+                              timestamp_override=ts_short)
+        elif etype == 'notice':
+          window.addline_nick(["-", (pn,), "- %s" % text], state.noticeformat,
+                              timestamp_override=ts_short)
+        elif etype == 'join':
+          window.addline_nick(["* ", (pn,), " has joined %s" % (text or chname)],
+                              state.infoformat, timestamp_override=ts_short)
+        elif etype == 'part':
+          window.addline_nick(["* ", (pn,), " has left %s" % (text or chname)],
+                              state.infoformat, timestamp_override=ts_short)
+        elif etype == 'quit':
+          window.addline_nick(["* ", (pn,), " has quit (%s)" % (text or "")],
+                              state.infoformat, timestamp_override=ts_short)
+        elif etype == 'kick':
+          window.addline(text or '', state.infoformat, timestamp_override=ts_short)
+        elif etype == 'nick':
+          window.addline_nick(["* ", (pn,), " is now known as ", (text or '?',)],
+                              state.infoformat, timestamp_override=ts_short)
+        elif etype == 'topic':
+          window.addline_nick(["* ", (pn,), " changed the topic to: %s" % (text or '')],
+                              state.infoformat, timestamp_override=ts_short)
+        elif etype == 'mode':
+          window.addline_nick(["* ", (pn,), " %s" % text], state.infoformat,
+                              timestamp_override=ts_short)
+        if history is not None:
+          from models import HistoryMessage
+          from datetime import datetime
+          try:
+            t = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
+          except Exception:
+            t = datetime.now()
+          history.append(HistoryMessage(None, nick, text, etype, prefix=prefix, time=t))
+    finally:
+      window.cur.endEditBlock()
 
     bg['index'] = end
 
@@ -455,7 +539,15 @@ def _bg_replay_tick():
 
 
 def _queue_bg_replay(window, network, chname, chan_obj):
-  """Add a window to the background replay queue."""
+  """Add a window to the background replay queue.
+
+  If background replay is disabled, just marks the window for deferred
+  replay (loads all at once when the user first switches to it).
+  """
+  if not state.config.history_bg_enabled:
+    # Deferred: load on first activation
+    window._deferred_replay = (network, chname, chan_obj)
+    return
   _bg_replay_queue.append((window, network, chname, chan_obj))
   _start_bg_replay()
 
@@ -992,6 +1084,7 @@ def makeapp(args):
   else:
     app.mainwin._toolbar = None
 
+  _apply_palette()
   _update_all_titles()
   # Poll on a timer since eval expressions in titlebar_format can reference
   # anything and we can't know which events should trigger updates.
