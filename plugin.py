@@ -209,6 +209,56 @@ class _Irc:
         from commands import docommand
         docommand(window, cmd, text)
 
+    # --- convenience methods ---
+
+    @staticmethod
+    def say(conn, target, message):
+        """Send a message to *target* (channel or nick) via *conn*."""
+        conn.say(target, message)
+
+    @staticmethod
+    def channel(window):
+        """Return the channel name or query nick for *window*, or ''."""
+        if hasattr(window, 'channel') and window.channel:
+            return window.channel.name
+        if hasattr(window, 'query') and window.query:
+            return window.query.nick
+        return ''
+
+    @staticmethod
+    def nicks(conn, channel):
+        """Return the set of nicks in *channel*, or an empty set."""
+        ch = conn.client.channels.get(conn.irclower(channel))
+        return set(ch.nicks) if ch else set()
+
+    @staticmethod
+    def me(conn):
+        """Return *conn*'s current nickname (alias for nick())."""
+        return conn.nickname
+
+    @staticmethod
+    def echo(window, text):
+        """Display *text* in *window* (no formatting)."""
+        window.addline(text)
+
+    @staticmethod
+    def error(window, text):
+        """Display *text* as a red system message in *window*."""
+        window.redmessage(text)
+
+    @staticmethod
+    def inputbox(prompt='', title='Input'):
+        """Show an input dialog and return the text (or '' if cancelled)."""
+        from PySide6.QtWidgets import QInputDialog, QApplication
+        parent = QApplication.activeWindow()
+        text, ok = QInputDialog.getText(parent, title, prompt or 'Enter value:')
+        return text.strip() if ok else ''
+
+    @staticmethod
+    def stdin(prompt=''):
+        """Read a line from stdin (blocks until input is provided)."""
+        return input(prompt)
+
     # --- /on hooks ---
 
     def on(self, event, name, pattern, command='', *, channel=None, network=None,

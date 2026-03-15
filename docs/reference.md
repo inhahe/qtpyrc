@@ -584,6 +584,19 @@ All methods below take `conn` (an IRCClient connection) as their first argument.
 | `ui_list` | `ui_list()` | Returns `[(path, description), ...]` for all registered UI paths |
 | `ui_tree` | `ui_tree()` | Returns a nested dict of the UI path hierarchy (leaf nodes have `'_desc'` key) |
 
+### Convenience Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `say` | `say(conn, target, message)` | Send a message to a channel or nick |
+| `channel` | `channel(window)` | Get the channel name or query nick for a window |
+| `nicks` | `nicks(conn, channel)` | Get the set of nicks in a channel |
+| `me` | `me(conn)` | Get conn's current nickname (alias for `nick()`) |
+| `echo` | `echo(window, text)` | Display text in a window |
+| `error` | `error(window, text)` | Display red system message in a window |
+| `inputbox` | `inputbox(prompt='', title='Input')` | Show input dialog, return text or '' |
+| `stdin` | `stdin(prompt='')` | Read a line from stdin (blocking) |
+
 ### Plugin Example
 
 ```python
