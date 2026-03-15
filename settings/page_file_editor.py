@@ -344,17 +344,11 @@ class FileEditorPage(QWidget):
         # --- bottom bar: restore defaults + save + reload ---
         bottom_bar = QHBoxLayout()
 
-        self._btn_restore_stub = QPushButton("Restore Stub")
-        self._btn_restore_stub.setToolTip("Replace file contents with a minimal stub (comment headers only)")
-        self._btn_restore_stub.clicked.connect(lambda: self._restore_template('stub'))
-        self._btn_restore_stub.setEnabled(False)
-        bottom_bar.addWidget(self._btn_restore_stub)
-
-        self._btn_restore_full = QPushButton("Restore Full Defaults")
-        self._btn_restore_full.setToolTip("Replace file contents with the full default template")
-        self._btn_restore_full.clicked.connect(lambda: self._restore_template('full'))
-        self._btn_restore_full.setEnabled(False)
-        bottom_bar.addWidget(self._btn_restore_full)
+        self._btn_restore = QPushButton("Restore Defaults")
+        self._btn_restore.setToolTip("Replace file contents with the default template")
+        self._btn_restore.clicked.connect(self._restore_defaults)
+        self._btn_restore.setEnabled(False)
+        bottom_bar.addWidget(self._btn_restore)
 
         bottom_bar.addStretch(1)
 
@@ -479,14 +473,12 @@ class FileEditorPage(QWidget):
                 btn.setStyleSheet("font-weight: bold;")
             else:
                 btn.setStyleSheet("")
-        # Enable restore buttons for files that have templates (not config)
+        # Enable restore button for files that have a default template (not config)
         if current_key and current_key != 'config':
-            from qtpyrc import _STUB_TEMPLATES, _DEFAULT_TEMPLATES
-            self._btn_restore_stub.setEnabled(current_key in _STUB_TEMPLATES)
-            self._btn_restore_full.setEnabled(current_key in _DEFAULT_TEMPLATES)
+            from qtpyrc import _DEFAULT_TEMPLATES
+            self._btn_restore.setEnabled(current_key in _DEFAULT_TEMPLATES)
         else:
-            self._btn_restore_stub.setEnabled(False)
-            self._btn_restore_full.setEnabled(False)
+            self._btn_restore.setEnabled(False)
 
     def _check_unsaved(self):
         """If there are unsaved changes, ask the user what to do.
@@ -681,27 +673,8 @@ class FileEditorPage(QWidget):
             d = os.path.dirname(path)
             if d and not os.path.isdir(d):
                 os.makedirs(d, exist_ok=True)
-            from qtpyrc import _STUB_TEMPLATES, _DEFAULT_TEMPLATES
-            has_full = key in _DEFAULT_TEMPLATES
-            if has_full:
-                msg = QMessageBox(self)
-                msg.setWindowTitle("New %s file" % key.title())
-                msg.setText("Create with empty stub or full defaults?")
-                btn_stub = msg.addButton("Empty Stub",
-                                         QMessageBox.ButtonRole.AcceptRole)
-                btn_full = msg.addButton("Full Defaults",
-                                         QMessageBox.ButtonRole.AcceptRole)
-                msg.addButton(QMessageBox.StandardButton.Cancel)
-                msg.exec()
-                clicked = msg.clickedButton()
-                if clicked == btn_full:
-                    template = _DEFAULT_TEMPLATES.get(key, '')
-                elif clicked == btn_stub:
-                    template = _STUB_TEMPLATES.get(key, '')
-                else:
-                    return None
-            else:
-                template = _STUB_TEMPLATES.get(key, '')
+            from qtpyrc import _DEFAULT_TEMPLATES, _resolve_template
+            template = _resolve_template(key) if key in _DEFAULT_TEMPLATES else ''
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(template)
 
@@ -860,23 +833,20 @@ class FileEditorPage(QWidget):
             return False
         return True
 
-    def _restore_template(self, which):
-        """Replace the editor contents with a template.
-        *which* is 'stub' for minimal headers or 'full' for full defaults."""
+    def _restore_defaults(self):
+        """Replace the editor contents with the default template."""
         key = self._current_quick_key()
         if not key:
             return
-        from qtpyrc import _STUB_TEMPLATES, _DEFAULT_TEMPLATES
-        source = _STUB_TEMPLATES if which == 'stub' else _DEFAULT_TEMPLATES
-        template = source.get(key)
+        from qtpyrc import _resolve_template
+        template = _resolve_template(key)
         if not template:
             return
-        label = "stub" if which == 'stub' else "full default"
         reply = QMessageBox.question(
-            self, "Restore %s" % label.title(),
-            "Replace the current contents with the %s %s template?\n\n"
+            self, "Restore Defaults",
+            "Replace the current contents with the default %s template?\n\n"
             "This will not save automatically — you can review the changes first."
-            % (label, key),
+            % key,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
             self.editor.setPlainText(template)

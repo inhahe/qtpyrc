@@ -840,7 +840,7 @@ def makeapp(args):
     _a.setToolTip('File not found: %s' % _ref_path)
   _ui['menu.help.reference'] = _a
   _desc['menu.help.reference'] = _d('Help', 'Reference Manual')
-  _example_path = os.path.join(_basedir, 'config.example.yaml')
+  _example_path = os.path.join(_basedir, 'defaults', 'config.example.yaml')
   _a = mnuhelp.addAction('&Config Reference', lambda p=_example_path: _show_doc_viewer(p))
   if not os.path.isfile(_example_path):
     _a.setEnabled(False)
@@ -1048,200 +1048,122 @@ _DEFAULT_ANCILLARY = [
     ('icons', True),
 ]
 
-# Minimal stubs for newly created files (comment headers only).
-_STUB_TEMPLATES = {
-    'config':    ('# qtpyrc configuration\n'
-                  '# See config.example.yaml for all available options.\n'),
-    'startup':   ('; qtpyrc startup commands\n'
-                  '; Each line is a /command or text. Lines starting with ; are comments.\n'),
-    'popups':    ('; Popup menus (mIRC-compatible format)\n'
-                  '; See docs/reference.md for syntax.\n\n'
-                  '[nicklist]\n\n[channel]\n\n[status]\n\n[query]\n\n[tab]\n'),
-    'toolbar':   ('; Toolbar buttons\n'
-                  '; Format: icon_name | Tooltip | /command\n'
-                  '; Use - for separator, --- for line break.\n'),
-    'variables': ('; Persistent user variables (/set)\n'
-                  '; Format: name = value\n'),
-}
+_STUB_CONFIG = ('# qtpyrc configuration\n'
+                '# See config.example.yaml for all available options.\n')
+
+def _read_default_file(name):
+  """Read a default file from the defaults/ directory."""
+  path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'defaults', name)
+  try:
+    with open(path, 'r', encoding='utf-8') as f:
+      return f.read()
+  except FileNotFoundError:
+    return None
+
+
+def _get_default_config():
+  """Build the default config.yaml from config.example.yaml.
+
+  Comments out the networks section (has bogus example values) and
+  replaces placeholder identity values.
+  """
+  example_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              'defaults', 'config.example.yaml')
+  try:
+    with open(example_path, 'r', encoding='utf-8') as f:
+      lines = f.readlines()
+  except FileNotFoundError:
+    # Fallback if config.example.yaml isn't available
+    return ('# qtpyrc configuration\n'
+            '# config.example.yaml not found — see docs for options.\n'
+            'popups_file: popups.ini\n'
+            'variables_file: variables.ini\n'
+            'toolbar_file: toolbar.ini\n'
+            'nick: qtpyrc_user\n'
+            'user: qtpyrc\n'
+            'realname: qtpyrc user\n')
+
+  result = []
+  in_networks = False
+  for line in lines:
+    stripped = line.rstrip('\n')
+    # Detect the networks section and comment it all out
+    if stripped == 'networks:':
+      in_networks = True
+      result.append('# Uncomment and edit to add your networks:\n')
+      result.append('#networks:\n')
+      continue
+    if in_networks:
+      # Still in networks section — everything indented or blank
+      if stripped and not stripped.startswith((' ', '#', '\t')):
+        in_networks = False  # hit a new top-level key
+      else:
+        # Comment out this line (preserve indentation)
+        if stripped.lstrip().startswith('#') or not stripped.strip():
+          result.append(line)
+        else:
+          result.append('#' + line)
+        continue
+
+    # Replace example identity values with generic defaults
+    if stripped.startswith('nick: ') and 'myuser' in stripped:
+      result.append('nick: qtpyrc_user\n')
+    elif stripped.startswith('  - myuser_'):
+      result.append('  - qtpyrc_user_\n')
+    elif stripped.startswith('  - myuser`'):
+      result.append('  - qtpyrc_user`\n')
+    elif stripped.startswith('user: ') and 'myuser' in stripped:
+      result.append('user: qtpyrc\n')
+    elif stripped.startswith('ident_username: ') and 'myuser' in stripped:
+      result.append('ident_username: qtpyrc\n')
+    elif stripped.startswith('nickname: ') and 'myuser' in stripped:
+      result.append('nickname: qtpyrc_user\n')
+    elif stripped.startswith('  family: Fixedsys'):
+      result.append('  family: Consolas\n')
+    elif stripped == '# Copy it to config.yaml and edit to taste.':
+      result.append('# Edit to taste.  See config.example.yaml for detailed documentation.\n')
+    elif stripped == '# Run with: python qtpyrc.py -c config.yaml':
+      continue  # skip this line
+    else:
+      result.append(line)
+
+  return ''.join(result)
+
 
 # Full default content for --init and "Restore Defaults".
+# All templates are loaded from files at runtime:
+#   config  — built from config.example.yaml by _get_default_config()
+#   popups  — defaults/popups.ini
+#   toolbar — defaults/toolbar.ini
+#   startup — defaults/startup.rc
+#   variables — defaults/variables.ini
 _DEFAULT_TEMPLATES = {
-    'config':  ('# qtpyrc configuration\n'
-                '# See config.example.yaml for all available options.\n'
-                '\n'
-                '# Files\n'
-                'popups_file: popups.ini\n'
-                'variables_file: variables.ini\n'
-                'toolbar_file: toolbar.ini\n'
-                'show_toolbar: true\n'
-                '\n'
-                '# Identity (set these before connecting)\n'
-                'nick: qtpyrc_user\n'
-                'user: qtpyrc\n'
-                'realname: qtpyrc user\n'
-                '\n'
-                '# Display\n'
-                'view_mode: tabbed\n'
-                'navigation: tabs\n'
-                'timestamps:\n'
-                '  display: HH:mm\n'
-                '\n'
-                '# Window title format. Uses {variables} and {eval("...")} expressions.\n'
-                '# Available variables: {me}, {network_key}, {network_label}, {channel}, {topic}\n'
-                '# Use _v dict in eval to safely reference variables (e.g. _v["topic"]).\n'
-                '# Leave blank or remove for the default format.\n'
-                'titlebar_format: >-\n'
-                "  qtpyrc{eval(\"' - ' + ', '.join(sorted('%s (%s)' % (c.network_key or c.network or c.hostname, c.conn.nickname) for c in state.clients if c.connected)) if any(c.connected for c in state.clients) else ''\")}{eval(\" ' - ' + (_v.get('network_label','') + '/' if _v.get('network_label') else '') + _v['channel'] + (': ' + _v['topic'] if _v.get('topic') else '') if _v.get('channel') else ''\")}\n"
-                '\n'
-                '# Networks\n'
-                '# networks:\n'
-                '#   libera:\n'
-                '#     server:\n'
-                '#       host: irc.libera.chat\n'
-                '#       port: 6697\n'
-                '#       tls: true\n'
-                '#     auto_connect: true\n'
-                '#     auto_join:\n'
-                "#       '#channel':\n"
-                ),
-    'startup': ('; qtpyrc startup commands\n'
-                '; Each line is a /command or text. Lines starting with ; are comments.\n'),
-    'popups':  ('; popups.ini - Right-click popup menus (mIRC-compatible syntax)\n'
-                ';\n'
-                '; Sections: [nicklist], [channel], [status], [query], [tab]\n'
-                ';\n'
-                '; Syntax:\n'
-                ';   Menu Item:/command                  \u2014 menu item that runs a command\n'
-                ';   Submenu Header                      \u2014 label with no command = submenu parent\n'
-                ';   .Child Item:/command                \u2014 child of previous submenu (dot = depth)\n'
-                ';   ..Grandchild:/command               \u2014 deeper nesting\n'
-                ';   -                                   \u2014 separator line\n'
-                ';\n'
-                '; Variables:\n'
-                ';   mIRC-style:\n'
-                ';     $nick, $me, $chan, $network, $server\n'
-                ';     $$1          \u2014 selected nick (required; cancels if empty)\n'
-                ';     $1           \u2014 selected nick (optional)\n'
-                ';     $?="prompt"  \u2014 ask for input (optional)\n'
-                ';     $$?="prompt" \u2014 ask for input (required; cancels if blank)\n'
-                ';     #            \u2014 current channel (bare # outside variables)\n'
-                ';\n'
-                ';   {variable}-style:\n'
-                ';     {nick}, {me}, {chan}, {network}, {server}\n'
-                ';\n'
-                '; Lines starting with ; are comments.\n'
-                '\n'
-                '[nicklist]\n'
-                'Whois:/whois $$1\n'
-                'Message:/query $$1\n'
-                'Invite:/invite $$1 $?="Channel to invite to:"\n'
-                '-\n'
-                'CTCP\n'
-                '.Ping:/ctcp $$1 PING\n'
-                '.Version:/ctcp $$1 VERSION\n'
-                '.Finger:/ctcp $$1 FINGER\n'
-                '.Time:/ctcp $$1 TIME\n'
-                '-\n'
-                'Control\n'
-                '.Op:/mode # +o $$1\n'
-                '.Deop:/mode # -o $$1\n'
-                '.Half-op:/mode # +h $$1\n'
-                '.De-halfop:/mode # -h $$1\n'
-                '.-\n'
-                '.Voice:/mode # +v $$1\n'
-                '.Devoice:/mode # -v $$1\n'
-                '.-\n'
-                '.Quiet:/mode # +q $$1\n'
-                '.Unquiet:/mode # -q $$1\n'
-                '.-\n'
-                '.Kick:/kick # $$1\n'
-                '.Kick (message):/kick # $$1 :$?="Kick reason:"\n'
-                '.Ban:/mode # +b $$1!*@*\n'
-                '.Kick+Ban:/mode # +b $$1!*@* | /kick # $$1\n'
-                '.Kick+Ban (message):/mode # +b $$1!*@* | /kick # $$1 :$?="Kick reason:"\n'
-                '-\n'
-                'Ignore:/ignore $$1\n'
-                'Unignore:/ignore -r $$1\n'
-                'Auto-op:/aop $$1\n'
-                'Remove Auto-op:/aop -r $$1\n'
-                '\n'
-                '[channel]\n'
-                'Names:/names #\n'
-                'Topic:/topic #\n'
-                '-\n'
-                'Part:/part #\n'
-                'Rejoin:/hop\n'
-                '\n'
-                '[status]\n'
-                'Lusers:/lusers\n'
-                'MOTD:/motd\n'
-                'Time:/time\n'
-                '-\n'
-                'List Channels:/list\n'
-                '\n'
-                '[query]\n'
-                'Whois:/whois $nick\n'
-                '-\n'
-                'CTCP\n'
-                '.Ping:/ctcp $nick PING\n'
-                '.Version:/ctcp $nick VERSION\n'
-                '.Finger:/ctcp $nick FINGER\n'
-                '.Time:/ctcp $nick TIME\n'
-                '\n'
-                '[tab]\n'
-                'Connect:/connect $network\n'
-                'Disconnect:/disconnect\n'
-                '-\n'
-                'Close:/close\n'),
-    'toolbar': ('; toolbar.ini - Toolbar button definitions\n'
-                ';\n'
-                '; Format:  icon | label | command\n'
-                '; Use - for a vertical separator, --- for a new row, ; for comments.\n'
-                ';\n'
-                '; Icons are looked up in the icons/ directory (as .svg, .png, or .ico),\n'
-                '; then fall back to built-in Qt icons (see list below).\n'
-                '; Leave icon blank for a text-only button:   | My Button | /mycommand\n'
-                '; Two-field shorthand also works:  My Button | /mycommand\n'
-                ';\n'
-                '; The command can be any /command, including menu actions like /settings,\n'
-                '; /tile, /cascade, /newserver, /away, etc.\n'
-                '; Commands support $?="prompt" for input dialogs.\n'
-                ';\n'
-                '; Variables: define with  name = value  and use as {name} in any field.\n'
-                '; Example:\n'
-                ';   mychan = #general\n'
-                ';   channel | Join {mychan} | /join {mychan}\n'
-                ';\n'
-                '; Bundled icons (in icons/ directory):\n'
-                ';   settings, editor, toggle_view, tile, cascade, away, back, new_server,\n'
-                ';   connect, disconnect, search, refresh, save, user, message, bell,\n'
-                ';   lock, channel, eraser, list, close, help, world, plus, door_enter, door_exit\n'
-                ';\n'
-                '; Most icons also have _alt1, _alt2, _alt3 variants you can swap in.\n'
-                '; To rename an alt:  rename  away_alt1.svg -> away.svg  (and move the old one)\n'
-                ';\n'
-                '; For thousands more free icons, browse:\n'
-                ';   https://tabler.io/icons\n'
-                '; Download any SVG and place it in the icons/ directory.\n'
-                '; Direct SVG download link format:\n'
-                ';   https://raw.githubusercontent.com/tabler/tabler-icons/main/icons/outline/<name>.svg\n'
-                '\n'
-                'settings    | Settings           | /settings\n'
-                'editor      | File Editor        | /settings editor\n'
-                '-\n'
-                'toggle_view | Toggle Tabbed/MDI  | /tabbed\n'
-                'tile        | Tile Windows       | /tile\n'
-                'cascade     | Cascade Windows    | /cascade\n'
-                '-\n'
-                'away        | Set Away           | /away $?="Away message (blank for default):"\n'
-                'back        | Set Back           | /away\n'
-                '-\n'
-                'new_server  | New Server Window  | /newserver\n'
-                '-\n'
-                'palette     | Color Picker       | /ui menu.tools.colorpicker\n'),
-    'variables': ('; Persistent user variables (/set)\n'
-                  '; Format: name = value\n'),
+    'config':    None,
+    'startup':   None,
+    'popups':    None,
+    'toolbar':   None,
+    'variables': None,
 }
+
+def _resolve_template(key):
+  """Lazily load a default template, caching in _DEFAULT_TEMPLATES."""
+  if _DEFAULT_TEMPLATES[key] is not None:
+    return _DEFAULT_TEMPLATES[key]
+  if key == 'config':
+    _DEFAULT_TEMPLATES[key] = _get_default_config()
+  else:
+    _file_map = {
+        'startup':   'startup.rc',
+        'popups':    'popups.ini',
+        'toolbar':   'toolbar.ini',
+        'variables': 'variables.ini',
+    }
+    content = _read_default_file(_file_map[key])
+    if content is None:
+      # Fallback to stub if default file is missing
+      content = ''
+    _DEFAULT_TEMPLATES[key] = content
+  return _DEFAULT_TEMPLATES[key]
 
 
 def init_default_files(directory, config_name='config.yaml', overwrite=None):
@@ -1277,7 +1199,7 @@ def init_default_files(directory, config_name='config.yaml', overwrite=None):
 
   # Config file
   config_path = os.path.join(directory, config_name)
-  _write_file(config_path, config_name, _DEFAULT_TEMPLATES['config'], 'config')
+  _write_file(config_path, config_name, _resolve_template('config'), 'config')
 
   # Ancillary files and directories
   for name, is_dir in _DEFAULT_ANCILLARY:
@@ -1290,7 +1212,7 @@ def init_default_files(directory, config_name='config.yaml', overwrite=None):
         created.append((name + '/', 'directory'))
     else:
       stem = os.path.splitext(name)[0]
-      content = _DEFAULT_TEMPLATES.get(stem, '')
+      content = _resolve_template(stem) if stem in _DEFAULT_TEMPLATES else ''
       if content:
         _write_file(path, name, content, 'file')
 
@@ -1482,7 +1404,7 @@ if __name__ == '__main__':
       print('Use --init to create a new config file.', file=sys.stderr)
       sys.exit(1)
     with open(configpath, 'w') as f:
-      f.write(_STUB_TEMPLATES['config'])
+      f.write(_STUB_CONFIG)
   state.config = loadconfig(configpath)
 
   # Apply --set overrides
