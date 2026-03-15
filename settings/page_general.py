@@ -91,16 +91,30 @@ class GeneralPage(QWidget):
         self.history_replay_queries.setToolTip("Lines of query history to reload when a query opens. 0 = disabled.\nNote: nicks can be reused by different people.")
         layout.addRow("Query history:", self.history_replay_queries)
 
+        self.bg_replay_enabled = QCheckBox()
+        self.bg_replay_enabled.setToolTip(
+            "Load history in the background after connecting.\n"
+            "When enabled, channels load history gradually so the UI stays responsive.\n"
+            "When disabled, history is loaded all at once when you first switch to a channel.")
+        layout.addRow("Background replay:", self.bg_replay_enabled)
+
         self.bg_chunk = QSpinBox()
         self.bg_chunk.setRange(10, 1000)
-        self.bg_chunk.setToolTip("Lines per background replay tick.\nHigher = faster loading but less responsive UI.")
-        layout.addRow("Replay chunk:", self.bg_chunk)
+        self.bg_chunk.setToolTip(
+            "How many lines to render per background tick.\n"
+            "Higher = channels load faster, but the UI may stutter during loading.")
+        layout.addRow("  Chunk size:", self.bg_chunk)
 
         self.bg_interval = QSpinBox()
-        self.bg_interval.setRange(10, 500)
+        self.bg_interval.setRange(10, 2000)
         self.bg_interval.setSuffix(" ms")
-        self.bg_interval.setToolTip("Milliseconds between background replay ticks.\nLower = faster loading but more CPU.")
-        layout.addRow("Replay interval:", self.bg_interval)
+        self.bg_interval.setToolTip(
+            "Pause between background replay chunks (in milliseconds).\n"
+            "Higher = smoother UI during loading, but channels take longer to fill.")
+        layout.addRow("  Chunk interval:", self.bg_interval)
+
+        self.bg_replay_enabled.toggled.connect(self.bg_chunk.setEnabled)
+        self.bg_replay_enabled.toggled.connect(self.bg_interval.setEnabled)
 
         _separator(layout, 'Flood Control')
         self.flood_burst = QSpinBox()
@@ -159,11 +173,15 @@ class GeneralPage(QWidget):
             self.history_replay_channels.setValue(int(hr.get('channels', data.get('backscroll_limit', 10000))))
             self.history_replay_queries.setValue(int(hr.get('queries', 0)))
         if isinstance(hr, dict):
+            self.bg_replay_enabled.setChecked(bool(hr.get('bg_enabled', True)))
             self.bg_chunk.setValue(int(hr.get('bg_chunk', 50)))
             self.bg_interval.setValue(int(hr.get('bg_interval', 50)))
         else:
+            self.bg_replay_enabled.setChecked(True)
             self.bg_chunk.setValue(50)
             self.bg_interval.setValue(50)
+        self.bg_chunk.setEnabled(self.bg_replay_enabled.isChecked())
+        self.bg_interval.setEnabled(self.bg_replay_enabled.isChecked())
         flood = data.get('flood') or {}
         self.flood_burst.setValue(int(flood.get('burst', 0) or 0))
         self.flood_rate.setValue(float(flood.get('rate', 0.0) or 0.0))
@@ -202,6 +220,7 @@ class GeneralPage(QWidget):
             data['history_replay'] = hr
         hr['channels'] = self.history_replay_channels.value()
         hr['queries'] = self.history_replay_queries.value()
+        hr['bg_enabled'] = self.bg_replay_enabled.isChecked()
         hr['bg_chunk'] = self.bg_chunk.value()
         hr['bg_interval'] = self.bg_interval.value()
         fb = self.flood_burst.value()

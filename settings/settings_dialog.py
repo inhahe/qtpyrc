@@ -630,7 +630,8 @@ class SettingsDialog(QDialog):
 
     def _apply_to_ui(self, data, visible_only=True):
         """Re-init config from data and refresh the running UI (no disk save)."""
-        from qtpyrc import (_build_app_stylesheet, _refresh_all_window_fonts,
+        from qtpyrc import (_build_app_stylesheet, _apply_palette,
+                            _refresh_all_window_fonts,
                             _get_message_colors, _recolor_chat_text,
                             _refresh_navigation)
         # Snapshot old message colors before reinit
@@ -641,6 +642,7 @@ class SettingsDialog(QDialog):
         _update_text_formats(self.config)
         from PySide6.QtWidgets import QApplication
         QApplication.instance().setStyleSheet(_build_app_stylesheet())
+        _apply_palette()
         _refresh_all_window_fonts()
         _refresh_navigation()
         _recolor_chat_text(old_colors, visible_only=visible_only)
