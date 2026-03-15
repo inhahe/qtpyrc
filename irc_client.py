@@ -741,8 +741,10 @@ class IRCClient(asyncirc.IRCClient):
       if pending_key is not None:
         chan.key = pending_key
       self.channels[chnlower] = chan
-      # Defer history replay until the window is first activated
+      # Defer history replay — background drip-feed, or immediate on activation
       chan.window._deferred_replay = (self.client.network, chname, chan)
+      from qtpyrc import _queue_bg_replay
+      _queue_bg_replay(chan.window, self.client.network, chname, chan)
     ts = self._get_server_time()
     chan.window.addline_nick(["* ", (self.nickname,), " has joined %s" % chname], state.infoformat,
                             timestamp_override=ts)
