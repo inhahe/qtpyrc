@@ -116,8 +116,8 @@ class _ColorRow(QWidget):
         if text == 'Custom...':
             self._pick()
         elif text == self._combo.itemText(0):
-            # Selected the default item — clear the line edit
-            self._combo.setCurrentText('')
+            # Selected the default item — show the hint text
+            self._combo.setCurrentIndex(0)
             self._update_swatch()
             self.colorChanged.emit()
 
@@ -324,8 +324,45 @@ def _connect_changed(page):
 # Sub-pages
 # ---------------------------------------------------------------------------
 
+class BaseColorsPage(QWidget):
+    """Global foreground/background colors used as defaults across the app."""
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QFormLayout(self)
+
+        self.fg_color = _ColorRow(default_hint='default: black')
+        layout.addRow("Foreground:", self.fg_color)
+
+        self.bg_color = _ColorRow(default_hint='default: white')
+        layout.addRow("Background:", self.bg_color)
+
+        _connect_changed(self)
+
+    def load_from_data(self, data):
+        font = data.get('font') or {}
+        colors = data.get('colors') or {}
+        fg = colors.get('foreground') or font.get('color') or font.get('fg_color', 'black')
+        bg = colors.get('background') or data.get('window_color') or font.get('bg_color', 'white')
+        self.fg_color.setText(str(fg))
+        self.bg_color.setText(str(bg))
+
+    def save_to_data(self, data):
+        font = _ensure_font(data)
+        # Remove legacy keys
+        for k in ('color', 'fg_color', 'bg_color'):
+            if k in font:
+                del font[k]
+        if 'window_color' in data:
+            del data['window_color']
+        colors = _ensure_colors(data)
+        _save_color_val(colors, 'foreground', self.fg_color)
+        _save_color_val(colors, 'background', self.bg_color)
+
+
 class ChatFontPage(QWidget):
-    """Chat window font, foreground/background, and message type colors."""
+    """Chat window font and message type colors."""
     changed = Signal()
 
     def __init__(self, parent=None):
@@ -337,12 +374,6 @@ class ChatFontPage(QWidget):
 
         self.size = _FontSizeCombo()
         layout.addRow("Font size:", self.size)
-
-        self.fg_color = _ColorRow(default_hint='default: black')
-        layout.addRow("Foreground:", self.fg_color)
-
-        self.bg_color = _ColorRow(default_hint='default: white')
-        layout.addRow("Background:", self.bg_color)
 
         self.system_color = _ColorRow(default_hint='default: red')
         layout.addRow("System:", self.system_color)
@@ -373,10 +404,6 @@ class ChatFontPage(QWidget):
         self.family.setCurrentFont(self.family.currentFont())
         self.family.setCurrentText(str(font.get('family', 'Fixedsys')))
         self.size.setValue(int(font.get('size', font.get('font', 15))))
-        fg = colors.get('foreground') or font.get('color') or font.get('fg_color', 'black')
-        bg = colors.get('background') or data.get('window_color') or font.get('bg_color', 'white')
-        self.fg_color.setText(str(fg))
-        self.bg_color.setText(str(bg))
         self.system_color.setText(str(colors.get('system', '')))
         self.info_color.setText(str(colors.get('info', '')))
         self.action_color.setText(str(colors.get('action', '')))
@@ -389,15 +416,7 @@ class ChatFontPage(QWidget):
         font = _ensure_font(data)
         font['family'] = self.family.currentText()
         font['size'] = self.size.value()
-        # Remove legacy keys
-        for k in ('color', 'fg_color', 'bg_color'):
-            if k in font:
-                del font[k]
-        if 'window_color' in data:
-            del data['window_color']
         colors = _ensure_colors(data)
-        _save_color_val(colors, 'foreground', self.fg_color)
-        _save_color_val(colors, 'background', self.bg_color)
         for key, widget in [('system', self.system_color), ('info', self.info_color),
                             ('action', self.action_color), ('notice', self.notice_color),
                             ('link', self.link_color),
