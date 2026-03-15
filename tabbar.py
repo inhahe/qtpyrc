@@ -78,8 +78,11 @@ class TabbedWorkspace(QWidget):
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(0)
 
-    # Tab bar area
-    self._tabbar_widget = QWidget(self)
+    # Tab bar area — override minimum size so it doesn't force a wide window
+    class _TabBarWidget(QWidget):
+      def minimumSizeHint(self):
+        return QSize(100, 0)
+    self._tabbar_widget = _TabBarWidget(self)
     self._tabbar_layout = QVBoxLayout(self._tabbar_widget)
     self._tabbar_layout.setContentsMargins(0, 0, 0, 0)
     self._tabbar_layout.setSpacing(0)
@@ -468,9 +471,11 @@ class TabbedWorkspace(QWidget):
     # Build row widgets
     for row in rows:
       row_widget = QWidget(self._tabbar_widget)
+      row_widget.setMinimumWidth(0)
       row_layout = QHBoxLayout(row_widget)
       row_layout.setContentsMargins(0, 0, 0, 0)
       row_layout.setSpacing(0)
+      row_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
 
       for item in row:
         if item is None:
