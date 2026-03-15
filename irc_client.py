@@ -640,7 +640,10 @@ class IRCClient(asyncirc.IRCClient):
                    'RPL_ISUPPORT'):
       text = ' '.join(params[1:])
       self.window.addline(text)
-      state.irclogger.log_server(self.client.network or self.client.hostname, text)
+      state.irclogger.log_server(self.client.network or getattr(self.client, 'hostname', '') or '', text)
+      if not self._in_playback_batch():
+        from link_preview import check_and_preview
+        check_and_preview(self.window, text)
     else:
       state.dbg(state.LOG_TRACE, "irc:", command, params)
 
@@ -667,6 +670,11 @@ class IRCClient(asyncirc.IRCClient):
                               timestamp_override=ts)
     if not self._in_playback_batch() and state.notifications:
       state.notifications.fire('notice', 'Notice from %s' % nick, message)
+    # Link previews for notices
+    if not self._in_playback_batch():
+      from link_preview import check_and_preview
+      target_win = self.client.channels[chnlower].window if chnlower in self.client.channels else self.window
+      check_and_preview(target_win, message)
 
   def action(self, user, channel, data):
     if is_ignored(user, self.client.network_key, channel):
@@ -844,6 +852,8 @@ class IRCClient(asyncirc.IRCClient):
       if state.notifications:
         if new_query:
           state.notifications.fire('new_query', 'Message from %s' % nick, message)
+      from link_preview import check_and_preview
+      check_and_preview(qwin, message)
 
   def chanmsg(self, user, channel, message):
     if is_ignored(user, self.client.network_key, channel):
@@ -875,6 +885,10 @@ class IRCClient(asyncirc.IRCClient):
             state.notifications.fire('highlight', '%s in %s' % (nick, channel), message)
       else:
         chan.window.set_activity(Window.ACTIVITY_MESSAGE)
+      # Link previews (skip during playback)
+      if not self._in_playback_batch():
+        from link_preview import check_and_preview
+        check_and_preview(chan.window, message)
 
   def userJoined(self, nickidhost, channel):
     uobj, nick, ident, host = self._parse_user(nickidhost)

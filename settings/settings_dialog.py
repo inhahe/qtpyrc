@@ -23,6 +23,8 @@ from settings.page_server import ServerPage
 from settings.page_sasl import SASLPage
 from settings.page_autojoin import AutoJoinPage
 from settings.page_lists import ListsPage
+from settings.page_plugin_config import PluginConfigPage
+from settings.page_link_preview import LinkPreviewPage
 from settings.page_notifications import NotificationsPage
 from settings.page_scripts import ScriptsPage
 from settings.page_file_editor import FileEditorPage
@@ -253,6 +255,14 @@ class SettingsDialog(QDialog):
         scripts_page.load_from_data(self._data)
         self._add_page('scripts', 'Scripts / Plugins', scripts_page)
 
+        plugin_config_page = PluginConfigPage()
+        plugin_config_page.load_from_data(self._data)
+        self._add_page('plugin_config', 'Plugin Config', plugin_config_page)
+
+        link_preview_page = LinkPreviewPage()
+        link_preview_page.load_from_data(self._data)
+        self._add_page('link_preview', 'Link Previews', link_preview_page)
+
         # File editor page (handles config, startup, popups, toolbar, variables)
         config_path = os.path.abspath(self.config.path)
 
@@ -305,7 +315,9 @@ class SettingsDialog(QDialog):
             child.setData(0, ROLE_PAGE, pid)
         for pid, label in [('ident_server', 'Ident Server'),
                            ('logging', 'Logging'), ('notifications', 'Notifications'),
+                           ('link_preview', 'Link Previews'),
                            ('scripts', 'Scripts / Plugins'),
+                           ('plugin_config', 'Plugin Config'),
                            ('editor', 'File Editor')]:
             item = QTreeWidgetItem(self.tree, [label])
             item.setData(0, ROLE_PAGE, pid)

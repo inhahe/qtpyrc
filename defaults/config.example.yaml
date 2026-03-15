@@ -126,6 +126,24 @@ typing:
 
 
 # ---------------------------------------------------------------------------
+# Link Previews
+# ---------------------------------------------------------------------------
+# Show inline previews for URLs posted in channels/queries.
+# Fetches page title, description, and thumbnail from Open Graph meta tags.
+# Off by default for privacy (fetching URLs reveals your IP to the remote server).
+
+link_preview:
+  enabled: false           # set to true to enable inline previews
+  max_size: 65536          # max bytes to download per URL (only <head> is parsed)
+  timeout: 5.0             # seconds before giving up on a fetch
+  width: 400               # preview box width in pixels
+  height: 120              # preview box height in pixels
+  # proxy: socks5://127.0.0.1:9050  # route fetches through a proxy (hides your IP)
+                           # Supports http://, https://, socks5:// URLs.
+                           # Example for Tor: socks5://127.0.0.1:9050
+
+
+# ---------------------------------------------------------------------------
 # Notifications
 # ---------------------------------------------------------------------------
 # Each event can trigger a sound and/or a desktop notification.
@@ -230,6 +248,12 @@ flood:
 # ---------------------------------------------------------------------------
 # Font
 # ---------------------------------------------------------------------------
+# The Fixedsys Excelsior font (public domain) is included in the defaults/
+# directory.  To use it, install it on your system first:
+#   Windows: right-click the .ttf file in defaults/ → Install
+#   Linux:   cp defaults/*.ttf ~/.local/share/fonts/ && fc-cache
+#   macOS:   double-click the .ttf file → Install Font
+# If the font is not installed, qtpyrc will prompt you to pick a replacement.
 
 font:
   family: Fixedsys

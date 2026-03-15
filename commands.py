@@ -10,18 +10,45 @@ from config import (get_ignores, get_auto_ops,
 class Commands:
 
   def join(window, text):
-    params = text.split(None)
-    if 1 <= len(params) <= 2:
-      conn = window.client.conn
-      if conn:
-        # Mark as user-initiated so persist_autojoins only fires for /join
-        chnlower = conn.irclower(params[0] if params[0][0] in '#&!+' else '#' + params[0])
-        conn._user_joins.add(chnlower)
-        conn.join(*params)
+    args = text.split(None)
+    if not args:
+      window.redmessage('[Usage: /join [-n] <channel> [key]  or  /join <network>/<channel> [key]]')
+      return
+    # -n flag: don't parse network/ prefix (for channels with / in the name)
+    no_net = False
+    if args[0] == '-n':
+      no_net = True
+      args.pop(0)
+    if not args:
+      window.redmessage('[Usage: /join [-n] <channel> [key]]')
+      return
+    target = args[0]
+    key = args[1] if len(args) > 1 else None
+    client = window.client
+    # Check for network/channel syntax
+    if not no_net and '/' in target and not target.startswith(('#', '&', '!', '+')):
+      net_name, chan_part = target.split('/', 1)
+      found = _find_client(net_name)
+      if found:
+        client = found
+        target = chan_part
+    conn = client.conn if client else None
+    if conn:
+      chan_name = target if target[0:1] in '#&!+' else '#' + target
+      chnlower = conn.irclower(chan_name)
+      # If already in the channel, just switch to it
+      chan = conn.client.channels.get(chnlower)
+      if chan and chan.window:
+        state.app.mainwin.workspace.setActiveSubWindow(chan.window.subwindow)
+        return
+      # Mark as user-initiated so persist_autojoins only fires for /join
+      conn._user_joins.add(chnlower)
+      if key:
+        conn.join(chan_name, key)
       else:
-        window.redmessage('[Not connected]')
+        conn.join(chan_name)
     else:
-      window.redmessage('[Error: /join takes 1 or 2 parameters]')
+      window.redmessage('[Not connected]')
 
   def part(window, text):
     if window.type == "channel":
@@ -65,6 +92,8 @@ class Commands:
       if state.historydb:
         state.historydb.add(window.client.network, window.channel.name.lower(),
                             'message', window.client.conn.nickname, text)
+      from link_preview import check_and_preview
+      check_and_preview(window, text)
     elif window.type == "query":
       window.client.conn.say(window.remotenick, text)
       window.addline_msg(window.client.conn.nickname, text)
@@ -73,6 +102,8 @@ class Commands:
         state.historydb.add(window.client.network,
                             _query_history_key(window.query.nick, window.query.ident),
                             'message', window.client.conn.nickname, text)
+      from link_preview import check_and_preview
+      check_and_preview(window, text)
 
   def amsg(window, text):
     """Send a message to all open channels on the current network."""
@@ -1036,6 +1067,51 @@ class Commands:
     from qtpyrc import _close_window
     _close_window(target, force=force)
 
+  def window(window, text):
+    """Switch to a window.  /window <target>  or  /window <network>/<target>
+    target can be a channel name, query nick, or 'server'.
+    Use -n to disable network/ parsing (for targets with / in the name).
+    With just a network name, switches to its server window."""
+    args = text.split()
+    if not args:
+      window.redmessage('[Usage: /window [-n] <target>  or  /window <network>/<target>]')
+      return
+    no_net = False
+    if args[0] == '-n':
+      no_net = True
+      args.pop(0)
+    if not args:
+      window.redmessage('[Usage: /window [-n] <target>]')
+      return
+    target = ' '.join(args)
+    # Check for network/target syntax
+    if not no_net and '/' in target:
+      net_name, tgt = target.split('/', 1)
+      client = _find_client(net_name)
+      if client:
+        if not tgt or tgt.lower() == 'server':
+          state.app.mainwin.workspace.setActiveSubWindow(client.window.subwindow)
+          return
+        w = _find_window(tgt, client)
+        if w:
+          state.app.mainwin.workspace.setActiveSubWindow(w.subwindow)
+        else:
+          window.redmessage('[No window: %s/%s]' % (net_name, tgt))
+        return
+    # No network/ prefix or unknown network — check if it's a network name
+    c = _find_client(target)
+    if c:
+      state.app.mainwin.workspace.setActiveSubWindow(c.window.subwindow)
+      return
+    # Search current network first, then all
+    w = _find_window(target, window.client)
+    if not w:
+      w = _find_window(target)
+    if w:
+      state.app.mainwin.workspace.setActiveSubWindow(w.subwindow)
+    else:
+      window.redmessage('[No window: %s]' % target)
+
   def alert(window, text):
     """Show a popup message box.  /alert [-t "title"] "message" """
     title = 'qtpyrc'
@@ -1480,6 +1556,17 @@ def _split_quoted(s):
       return s[1:end], s[end + 1:].lstrip()
   parts = s.split(None, 1)
   return (parts[0] if parts else '', parts[1] if len(parts) > 1 else '')
+
+
+def _find_client(name):
+  """Find a Client by network key, network name, or hostname (case-insensitive)."""
+  name_lower = name.lower()
+  for c in state.clients:
+    if (name_lower == (c.network_key or '').lower()
+        or name_lower == (c.network or '').lower()
+        or name_lower == (getattr(c, 'hostname', '') or '').lower()):
+      return c
+  return None
 
 
 def _find_window(name, client=None):

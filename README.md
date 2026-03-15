@@ -25,6 +25,7 @@ It should be cross-platform, but I haven't tested that yet either.
 - Font picker with live preview
 - mIRC color code rendering (16 + extended 99-color palette)
 - Searchable chat output (Ctrl+F) with regex support
+- Inline link previews with Open Graph thumbnails (opt-in, proxy support)
 
 **Configuration**
 - YAML config with 3-level cascading: global > network > server/channel

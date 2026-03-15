@@ -739,6 +739,17 @@ class AppConfig:
     self.typing_send = typing.get('send', True)
     self.typing_show = typing.get('show', True)
 
+    # Link previews
+    lp = data.get('link_preview') or {}
+    if isinstance(lp, bool):
+      lp = {'enabled': lp}
+    self.link_preview_enabled = bool(lp.get('enabled', False))
+    self.link_preview_max_size = int(lp.get('max_size', 65536))
+    self.link_preview_timeout = float(lp.get('timeout', 5.0))
+    self.link_preview_width = int(lp.get('width', 400))
+    self.link_preview_height = int(lp.get('height', 120))
+    self.link_preview_proxy = lp.get('proxy', '') or ''
+
     # Notifications
     notif = data.get('notifications') or {}
     # Global default sound: "beep", "none", or a .wav path
@@ -1040,6 +1051,14 @@ class UIState:
   def hex_uppercase(self, val):
     self._data['hex_uppercase'] = bool(val)
     self.save()
+
+  @property
+  def input_history(self):
+    return list(self._data.get('input_history') or [])
+
+  @input_history.setter
+  def input_history(self, history):
+    self._data['input_history'] = list(history)
 
   def save(self):
     try:
