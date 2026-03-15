@@ -46,26 +46,31 @@ class ScriptsPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         # --- Plugins section ---
-        pg = QGroupBox("Python Plugins")
-        pl = QFormLayout(pg)
+        self.plugins_group = pg = QGroupBox("Python Plugins")
+        pl = QVBoxLayout(pg)
+        pl.setContentsMargins(4, 4, 4, 4)
 
+        dir_row = QHBoxLayout()
+        self._plugins_dir_label = QLabel("Directory:")
+        dir_row.addWidget(self._plugins_dir_label)
         self.plugins_dir = QLineEdit()
         self.plugins_dir.setPlaceholderText("plugins%s (default)" % os.sep)
         self.plugins_dir.setToolTip(
             "Directory for Python plugins (relative to config file)")
-        self._plugins_dir_label = QLabel("Directory:")
-        pl.addRow(self._plugins_dir_label, self.plugins_dir)
+        dir_row.addWidget(self.plugins_dir)
+        pl.addLayout(dir_row)
 
         hint = QLabel("Checked = auto-loaded on startup.")
         hint.setStyleSheet("color: gray; font-size: 11px;")
-        pl.addRow(hint)
+        pl.addWidget(hint)
 
         self.plugins_list = self._make_reorderable_list()
         self.plugins_list.itemChanged.connect(
             lambda item: self._style_local_item(item))
-        pl.addRow(self.plugins_list)
+        pl.addWidget(self.plugins_list, 1)
 
         btns = QHBoxLayout()
         btn = QPushButton("Refresh")
@@ -92,29 +97,35 @@ class ScriptsPage(QWidget):
         btn.setToolTip("Move selected item down")
         btn.clicked.connect(lambda: self._move_item(self.plugins_list, 1))
         btns.addWidget(btn)
-        pl.addRow(btns)
+        pl.addLayout(btns)
 
-        layout.addWidget(pg)
+        # plugins_group is NOT added to this layout — it gets moved to the
+        # Plugins page by the settings dialog.
 
         # --- Command Scripts section ---
-        sg = QGroupBox("Command Scripts")
-        sl = QFormLayout(sg)
+        self.scripts_group = sg = QGroupBox("Command Scripts")
+        sl = QVBoxLayout(sg)
+        sl.setContentsMargins(4, 4, 4, 4)
 
+        dir_row2 = QHBoxLayout()
+        self._scripts_dir_label = QLabel("Directory:")
+        dir_row2.addWidget(self._scripts_dir_label)
         self.scripts_dir = QLineEdit()
         self.scripts_dir.setPlaceholderText("scripts%s (default)" % os.sep)
         self.scripts_dir.setToolTip(
             "Directory for command scripts (relative to config file)")
-        self._scripts_dir_label = QLabel("Directory:")
-        sl.addRow(self._scripts_dir_label, self.scripts_dir)
+        dir_row2.addWidget(self.scripts_dir)
+        sl.addLayout(dir_row2)
 
-        hint = QLabel("Checked = auto-run on startup.")
+        hint = QLabel("Checked = auto-run on startup. The startup script is set in\n"
+                      "config.yaml under scripts.startup (edit via File Editor).")
         hint.setStyleSheet("color: gray; font-size: 11px;")
-        sl.addRow(hint)
+        sl.addWidget(hint)
 
         self.scripts_list = self._make_reorderable_list()
         self.scripts_list.itemChanged.connect(
             lambda item: self._style_local_item(item))
-        sl.addRow(self.scripts_list)
+        sl.addWidget(self.scripts_list, 1)
 
         btns = QHBoxLayout()
         btn = QPushButton("Refresh")
@@ -141,9 +152,9 @@ class ScriptsPage(QWidget):
         btn.setToolTip("Move selected item down")
         btn.clicked.connect(lambda: self._move_item(self.scripts_list, 1))
         btns.addWidget(btn)
-        sl.addRow(btns)
+        sl.addLayout(btns)
 
-        layout.addWidget(sg)
+        layout.addWidget(sg, 1)
 
         # --- Editor selection ---
         editor_row = QHBoxLayout()

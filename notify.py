@@ -93,6 +93,8 @@ def show_sound_browser(select=False):
   dlg = QDialog(state.app.mainwin)
   dlg.setWindowTitle("System Sounds (%d)" % len(sounds))
   dlg.resize(420, 500)
+  from dialogs import install_input_focus_handler
+  install_input_focus_handler(dlg)
   layout = QVBoxLayout(dlg)
 
   # Search filter

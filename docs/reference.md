@@ -170,9 +170,13 @@ Examples:
 | `/on` | `/on -r [-p] <event> <name>` | Remove a hook (`-p` also removes from startup script) |
 | `/on` | `/on -l [event]` | List active hooks |
 | `/hooks` | `/hooks` | Alias for `/on -l` |
-| `/load` | `/load <script_name>` | Load a Python plugin script |
-| `/unload` | `/unload <script_name>` | Unload a Python plugin script |
-| `/scripts` | `/scripts` | List loaded Python plugin scripts |
+| `/plugin` | `/plugin <name>` | Load a Python plugin |
+| `/plugin` | `/plugin -u <name>` | Unload a plugin |
+| `/plugin` | `/plugin -r <name>` | Reload a plugin (unload + load) |
+| `/load` | `/load <name>` | Alias for `/plugin` |
+| `/unload` | `/unload <name>` | Alias for `/plugin -u` |
+| `/plugins` | `/plugins [-l or -a]` | List available plugins (-l loaded only, -a auto-load only) |
+| `/scripts` | `/scripts [-a]` | List available command scripts (`-a` auto-load) |
 | `/script` | `/script <filename>` | Run a command script (text file of /commands) |
 | `/play` | `/play <filename>` | Send a plain text file to the current window line by line |
 | `/alias` | `/alias [name] [command...]` | Define, show, or list command aliases |
@@ -565,7 +569,7 @@ All methods below take `conn` (an IRCClient connection) as their first argument.
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `on` | `on(event, name, pattern, command, *, channel=None, network=None, window=None)` | Register an event hook |
+| `on` | `on(event, name, pattern, command, *, channel=None, network=None, window=None)` | Register an event hook. `command` can be a string or callable `(vars, conn)` |
 | `remove_on` | `remove_on(event, name)` | Remove a hook by event and name |
 | `remove_all_hooks` | `remove_all_hooks()` | Remove all hooks registered through this instance |
 

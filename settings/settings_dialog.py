@@ -23,7 +23,7 @@ from settings.page_server import ServerPage
 from settings.page_sasl import SASLPage
 from settings.page_autojoin import AutoJoinPage
 from settings.page_lists import ListsPage
-from settings.page_plugin_config import PluginConfigPage
+from settings.page_plugin_config import SinglePluginConfigPage, get_plugin_names
 from settings.page_link_preview import LinkPreviewPage
 from settings.page_nick_colors import NickColorsPage
 from settings.page_notifications import NotificationsPage
@@ -56,8 +56,8 @@ SETTINGS_PAGES = [
     ('logging', 'logging', 'Logging', []),
     ('notifications', 'notifications', 'Notifications', []),
     ('linkpreview', 'link_preview', 'Link Previews', []),
-    ('scripts', 'scripts', 'Scripts / Plugins', []),
-    ('pluginconfig', 'plugin_config', 'Plugin Config', []),
+    ('scripts', 'scripts', 'Scripts', []),
+    ('pluginconfig', 'plugin_config', 'Plugins', []),
     ('editor', 'editor', 'File Editor', []),
 ]
 
@@ -190,6 +190,7 @@ class SettingsDialog(QDialog):
 
         self._build_global_pages()
         self._build_network_tree()
+        self._build_plugin_config_tree()
 
         self.tree.currentItemChanged.connect(self._on_tree_select)
         # Select first item
@@ -302,11 +303,20 @@ class SettingsDialog(QDialog):
         scripts_page = ScriptsPage()
         scripts_page.setup(config_dir)
         scripts_page.load_from_data(self._data)
-        self._add_page('scripts', 'Scripts / Plugins', scripts_page)
+        self._add_page('scripts', 'Scripts', scripts_page, stack_widget=scripts_page)
 
-        plugin_config_page = PluginConfigPage()
-        plugin_config_page.load_from_data(self._data)
-        self._add_page('plugin_config', 'Plugin Config', plugin_config_page)
+        # Plugins — show only the plugins section of the scripts page
+        # Scripts — show only the scripts section
+        self._plugin_config_pages = {}
+        # plugins_group was built by ScriptsPage but not added to its layout
+        pc_widget = QWidget()
+        pc_layout = QVBoxLayout(pc_widget)
+        pc_layout.setContentsMargins(0, 0, 0, 0)
+        pc_layout.addWidget(scripts_page.plugins_group, 1)
+        pc_layout.addWidget(QLabel("Select a plugin below for per-plugin settings."))
+        self._stack_widgets['plugin_config'] = pc_widget
+        self._pages['plugin_config'] = scripts_page  # save still goes through scripts_page
+        self.stack.addWidget(pc_widget)
 
         link_preview_page = LinkPreviewPage()
         link_preview_page.load_from_data(self._data)
@@ -469,6 +479,32 @@ class SettingsDialog(QDialog):
         item = _find(self.tree, page_id)
         if item:
             self.tree.setCurrentItem(item)
+
+    def _build_plugin_config_tree(self):
+        """Build Plugin Config parent node with per-plugin child pages."""
+        plugin_names = get_plugin_names(self._data)
+        if not plugin_names:
+            return
+        # Find the Plugin Config tree item
+        root = None
+        for i in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(i)
+            if item.data(0, ROLE_PAGE) == 'plugin_config':
+                root = item
+                break
+        if not root:
+            return
+        root.setExpanded(True)
+        for pname in plugin_names:
+            child = QTreeWidgetItem(root, [pname])
+            page_id = 'plugin_config_' + pname
+            child.setData(0, ROLE_PAGE, page_id)
+            page = SinglePluginConfigPage(pname)
+            page.load_from_data(self._data)
+            self._plugin_config_pages[pname] = page
+            self._pages[page_id] = page
+            self._stack_widgets[page_id] = page
+            self.stack.addWidget(page)
 
     def _on_tree_select(self, current, previous):
         if not current:
@@ -665,9 +701,28 @@ class SettingsDialog(QDialog):
         self._on_apply()
         self.accept()
 
+    def _has_unsaved_changes(self):
+        """Check if any settings have been modified from the original."""
+        self._collect_all()
+        return self._data != self._original_data
+
     def reject(self):
-        """Revert live preview changes on Cancel."""
+        """Revert live preview changes on Cancel/Ctrl+F4."""
         if not self._editor_page._check_unsaved():
             return
+        if self._has_unsaved_changes():
+            from PySide6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self, "Unsaved Changes",
+                "Settings have been modified. Save before closing?",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel)
+            if reply == QMessageBox.StandardButton.Save:
+                self._on_apply()
+                self.accept()
+                return
+            elif reply == QMessageBox.StandardButton.Cancel:
+                return
         self._apply_to_ui(self._original_data)
         super().reject()

@@ -777,6 +777,8 @@ class Window(QWidget):
     self.output.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
     _chatfont = QFont(state.config.fontfamily, state.config.fontheight)
     self.output.setFont(_chatfont)
+    # Set default document font explicitly
+    self.output.document().setDefaultFont(_chatfont)
     if state.config.backscroll_limit > 0:
       self.output.document().setMaximumBlockCount(state.config.backscroll_limit)
     self.vs = self.output.verticalScrollBar()
