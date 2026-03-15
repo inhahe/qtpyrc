@@ -318,6 +318,9 @@ colors:
     bar_bg: white          # tab bar empty area and blank screen
                            # (default: normal_bg, or skipped_bg if new_tab_state is skipped)
 
+  # Clickable link color.  Default: #0066cc (blue).
+  link: "#0066cc"
+
   # Search highlight (Ctrl+F).  Default: yellow background, black text.
   search_bg: yellow
   search_fg: black
