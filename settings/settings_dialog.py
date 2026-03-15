@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyle, QLineEdit, QComboBox, QSpinBox,
     QDoubleSpinBox, QAbstractSpinBox,
 )
-from PySide6.QtCore import Qt, QTimer, QEvent
+from PySide6.QtCore import Qt, QEvent
 from PySide6.QtGui import QShortcut, QKeySequence, QPalette, QColor, QPen, QBrush
 import copy
 from ruamel.yaml.comments import CommentedMap
@@ -13,9 +13,9 @@ import state
 
 from settings.page_general import GeneralPage
 from settings.page_identity import IdentityPage
-from settings.page_font import (ChatFontPage, TabFontPage, MenuFontPage,
-    TreeFontPage, NicklistFontPage, ToolbarFontPage, SettingsFontPage,
-    EditorFontPage)
+from settings.page_font import (BaseColorsPage, ChatFontPage, TabFontPage,
+    MenuFontPage, TreeFontPage, NicklistFontPage, ToolbarFontPage,
+    SettingsFontPage, EditorFontPage)
 from settings.page_ident_server import IdentServerPage
 from settings.page_logging import LoggingPage
 from settings.page_network import NetworkPage
@@ -139,6 +139,7 @@ class SettingsDialog(QDialog):
         # Deep copy the YAML data so we only write back on OK/Apply
         self._original_data = copy.deepcopy(config._data)
         self._data = copy.deepcopy(config._data)
+        self._applied = False  # True when Apply used without Save
 
         # --- layout ---
         main_layout = QHBoxLayout(self)
@@ -170,12 +171,18 @@ class SettingsDialog(QDialog):
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok |
-            QDialogButtonBox.StandardButton.Cancel |
-            QDialogButtonBox.StandardButton.Apply
+            QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(self._on_ok)
         buttons.rejected.connect(self.reject)
-        buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self._on_apply)
+        self._btn_apply = QPushButton("Apply")
+        self._btn_apply.setToolTip("Apply changes to the running UI (does not save to disk)")
+        buttons.addButton(self._btn_apply, QDialogButtonBox.ButtonRole.ApplyRole)
+        self._btn_apply.clicked.connect(self._on_apply)
+        self._btn_save_apply = QPushButton("Save && Apply")
+        self._btn_save_apply.setToolTip("Save to disk and apply changes")
+        buttons.addButton(self._btn_save_apply, QDialogButtonBox.ButtonRole.ApplyRole)
+        self._btn_save_apply.clicked.connect(self._on_save_and_apply)
         right.addWidget(buttons)
 
         main_layout.addLayout(right, 1)
@@ -197,11 +204,6 @@ class SettingsDialog(QDialog):
         if self.tree.topLevelItemCount():
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
 
-        # Debounce timer for live font/color preview
-        self._preview_timer = QTimer(self)
-        self._preview_timer.setSingleShot(True)
-        self._preview_timer.setInterval(150)
-        self._preview_timer.timeout.connect(self._do_font_preview)
 
 
     def _apply_colors(self):
@@ -261,23 +263,12 @@ class SettingsDialog(QDialog):
     def _build_global_pages(self):
         general = GeneralPage()
         self._add_page('general', 'General', general)
-        # Live-preview layout changes
-        general.input_lines.valueChanged.connect(self._on_font_page_changed)
-        general.navigation.currentTextChanged.connect(self._on_font_page_changed)
         self._add_page('identity', 'Identity', IdentityPage())
         self._add_page('lists', 'Lists', ListsPage())
-        # Font / Colors parent placeholder (not a real page — just a stack widget)
-        font_landing = QLabel("Select a category below to configure fonts and colors.")
-        font_landing.setWordWrap(True)
-        sw = QWidget()
-        wrapper = QVBoxLayout(sw)
-        wrapper.setContentsMargins(0, 0, 0, 0)
-        wrapper.addWidget(font_landing)
-        wrapper.addStretch(1)
-        self._stack_widgets['font_root'] = sw
-        self.stack.addWidget(sw)
+        # Font / Colors parent — base foreground/background colors
+        base_colors = BaseColorsPage()
+        self._add_page('font_root', 'Font / Colors', base_colors)
         # Font / Colors sub-pages
-        self._font_pages = []
         for pid, cls in [('font_chat', ChatFontPage), ('font_tab', TabFontPage),
                          ('font_menu', MenuFontPage), ('font_tree', TreeFontPage),
                          ('font_nicklist', NicklistFontPage),
@@ -285,16 +276,12 @@ class SettingsDialog(QDialog):
                          ('font_editor', EditorFontPage)]:
             page = cls()
             self._add_page(pid, '', page)
-            page.changed.connect(self._on_font_page_changed)
-            self._font_pages.append(page)
         self._add_page('ident_server', 'Ident Server', IdentServerPage())
         self._add_page('logging', 'Logging', LoggingPage())
         self._add_page('notifications', 'Notifications', NotificationsPage())
 
-        self._loading = True
         for pid, page in self._pages.items():
             page.load_from_data(self._data)
-        self._loading = False
 
         # Scripts / Plugins page
         import os
@@ -669,26 +656,21 @@ class SettingsDialog(QDialog):
         for client in state.clients:
             client.refresh_server_config()
 
-    def _on_font_page_changed(self):
-        """Live preview: debounce font/color changes."""
-        if getattr(self, '_loading', False):
-            return
-        self._preview_timer.start()
-
-    def _do_font_preview(self):
-        """Apply font/color changes to the running UI without saving to disk."""
-        self._pages['general'].save_to_data(self._data)
-        for page in self._font_pages:
-            page.save_to_data(self._data)
-        self._apply_to_ui(self._data)
-        # Refresh settings dialog's own font/colors
+    def _on_apply(self):
+        """Apply changes to the running UI without saving to disk."""
+        self._collect_all()
+        self._apply_to_ui(self._data, visible_only=False)
+        self._applied = True
+        # Refresh settings dialog's own appearance
         self._apply_colors()
         self._apply_tree_colors()
 
-    def _on_apply(self):
-        self._collect_all()
-        self._apply_to_ui(self._data, visible_only=False)
+    def _on_save_and_apply(self):
+        """Save to disk and apply changes to the running UI."""
+        self._on_apply()
         self.config.save()
+        self._original_data = copy.deepcopy(self._data)
+        self._applied = False  # saved — nothing to revert
         import popups
         popups.load()
         # Refresh network settings paths in the /ui registry
@@ -698,7 +680,7 @@ class SettingsDialog(QDialog):
     def _on_ok(self):
         if not self._editor_page._check_unsaved():
             return
-        self._on_apply()
+        self._on_save_and_apply()
         self.accept()
 
     def _has_unsaved_changes(self):
@@ -707,7 +689,7 @@ class SettingsDialog(QDialog):
         return self._data != self._original_data
 
     def reject(self):
-        """Revert live preview changes on Cancel/Ctrl+F4."""
+        """Handle Cancel/Ctrl+F4."""
         if not self._editor_page._check_unsaved():
             return
         if self._has_unsaved_changes():
@@ -719,10 +701,12 @@ class SettingsDialog(QDialog):
                 | QMessageBox.StandardButton.Discard
                 | QMessageBox.StandardButton.Cancel)
             if reply == QMessageBox.StandardButton.Save:
-                self._on_apply()
+                self._on_save_and_apply()
                 self.accept()
                 return
             elif reply == QMessageBox.StandardButton.Cancel:
                 return
-        self._apply_to_ui(self._original_data)
+        # Revert UI if Apply was used without Save
+        if self._applied:
+            self._apply_to_ui(self._original_data, visible_only=False)
         super().reject()
