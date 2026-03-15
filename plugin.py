@@ -259,6 +259,36 @@ class _Irc:
         """Read a line from stdin (blocks until input is provided)."""
         return input(prompt)
 
+    # --- plugin config ---
+
+    def get_config(self, plugin_name, key, default=None):
+        """Get a plugin config value.
+
+        Reads from ``plugins.<plugin_name>.<key>`` in the config YAML.
+        """
+        import state
+        plugins_data = state.config._data.get('plugins') or {}
+        plugin_data = plugins_data.get(plugin_name) or {}
+        return plugin_data.get(key, default)
+
+    def set_config(self, plugin_name, key, value):
+        """Set a plugin config value and save to disk.
+
+        Writes to ``plugins.<plugin_name>.<key>`` in the config YAML.
+        """
+        import state
+        from ruamel.yaml.comments import CommentedMap
+        plugins_data = state.config._data.get('plugins')
+        if plugins_data is None:
+            plugins_data = CommentedMap()
+            state.config._data['plugins'] = plugins_data
+        plugin_data = plugins_data.get(plugin_name)
+        if plugin_data is None:
+            plugin_data = CommentedMap()
+            plugins_data[plugin_name] = plugin_data
+        plugin_data[key] = value
+        state.config.save()
+
     # --- /on hooks ---
 
     def on(self, event, name, pattern, command='', *, channel=None, network=None,
@@ -375,7 +405,23 @@ class Callbacks:
 
     Return a truthy value from a callback to suppress the client's default
     handler for that event.
+
+    To declare configuration options, set a class-level ``config_fields`` list::
+
+        config_fields = [
+            ('enabled', bool, True, 'Enable this plugin'),
+            ('interval', int, 60, 'Check interval in seconds'),
+            ('api_key', str, '', 'API key'),
+        ]
+
+    Supported types: ``str``, ``int``, ``float``, ``bool``.
+    Values are stored under ``plugins.<name>:`` in the config YAML
+    and editable in Settings > Plugins > <name>.
+
+    Access values with ``irc.get_config('name', 'key', default)``.
     """
+
+    config_fields = []  # override in subclass
 
     def __init__(self, irc):
         """Called once when the plugin is loaded.

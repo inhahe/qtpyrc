@@ -597,6 +597,27 @@ All methods below take `conn` (an IRCClient connection) as their first argument.
 | `inputbox` | `inputbox(prompt='', title='Input')` | Show input dialog, return text or '' |
 | `stdin` | `stdin(prompt='')` | Read a line from stdin (blocking) |
 
+### Plugin Config Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `get_config` | `get_config(plugin_name, key, default=None)` | Get a plugin config value |
+| `set_config` | `set_config(plugin_name, key, value)` | Set a plugin config value and save |
+
+Plugins can declare config fields that appear in Settings > Plugin Config:
+
+```python
+class MyPlugin(plugin.Callbacks):
+    config_fields = [
+        ('enabled', bool, True, 'Enable this plugin'),
+        ('interval', int, 60, 'Check interval in seconds'),
+        ('api_key', str, '', 'API key for the service'),
+    ]
+```
+
+Supported types: `str`, `int`, `float`, `bool`. Values are stored under
+`plugins.<name>:` in the config YAML.
+
 ### Plugin Example
 
 ```python

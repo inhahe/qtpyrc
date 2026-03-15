@@ -1,8 +1,15 @@
 from PySide6.QtWidgets import (
     QWidget, QFormLayout, QCheckBox, QLineEdit, QComboBox,
-    QSpinBox, QDoubleSpinBox,
+    QSpinBox, QDoubleSpinBox, QLabel, QFrame,
 )
 from PySide6.QtCore import Qt
+
+
+def _separator(layout, text):
+    """Add a labeled separator line to a form layout."""
+    lbl = QLabel('<b>%s</b>' % text)
+    lbl.setStyleSheet('margin-top: 8px;')
+    layout.addRow(lbl)
 
 
 class GeneralPage(QWidget):
@@ -12,6 +19,7 @@ class GeneralPage(QWidget):
         super().__init__(parent)
         layout = QFormLayout(self)
 
+        _separator(layout, 'Interface')
         self.input_lines = QSpinBox()
         self.input_lines.setRange(1, 10)
         self.input_lines.setMaximumWidth(60)
@@ -47,6 +55,7 @@ class GeneralPage(QWidget):
         self.navigation.setToolTip("Show tabs bar, tree view, or both")
         layout.addRow("Navigation:", self.navigation)
 
+        _separator(layout, 'Behavior')
         self.close_on_kick = QCheckBox()
         self.close_on_kick.setToolTip("Close channel windows when kicked from a channel")
         layout.addRow("Close on kick:", self.close_on_kick)
@@ -59,6 +68,7 @@ class GeneralPage(QWidget):
         self.show_mode_prefix.setToolTip("Show mode prefixes (@, +, %, etc.) before nicks in messages, events, and the nick list")
         layout.addRow("Mode prefixes:", self.show_mode_prefix)
 
+        _separator(layout, 'History')
         self.backscroll_limit = QSpinBox()
         self.backscroll_limit.setRange(0, 1000000)
         self.backscroll_limit.setSpecialValueText("unlimited")
@@ -77,6 +87,7 @@ class GeneralPage(QWidget):
         self.history_replay_queries.setToolTip("Lines of query history to reload when a query opens. 0 = disabled.\nNote: nicks can be reused by different people.")
         layout.addRow("Query history:", self.history_replay_queries)
 
+        _separator(layout, 'Flood Control')
         self.flood_burst = QSpinBox()
         self.flood_burst.setRange(0, 50)
         self.flood_burst.setSpecialValueText("(default: 5)")
@@ -91,6 +102,7 @@ class GeneralPage(QWidget):
         self.flood_rate.setToolTip("Seconds between messages after burst is exhausted")
         layout.addRow("Flood rate:", self.flood_rate)
 
+        _separator(layout, 'Typing Notifications')
         self.typing_send = QCheckBox()
         self.typing_send.setToolTip("Send typing notifications to channels (IRCv3 +typing)")
         layout.addRow("Send typing:", self.typing_send)

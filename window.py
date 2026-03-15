@@ -404,6 +404,92 @@ class SearchBar(QWidget):
     super().keyPressEvent(event)
 
 
+class _HistoryPopup(QListWidget):
+  """Popup list showing input history, appears above the input field."""
+
+  picked = Signal(str)
+
+  def __init__(self, parent=None):
+    super().__init__(parent)
+    self.setWindowFlags(Qt.WindowType.Popup)
+    self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    self.setMaximumHeight(200)
+    self._last_key = ''
+    self._last_key_row = -1
+    self.itemActivated.connect(self._on_activated)
+    self.itemClicked.connect(self._on_activated)
+
+  def populate(self, history):
+    self.clear()
+    # Show most recent at the bottom (reverse order so bottom = newest)
+    for text in history:
+      item = QListWidgetItem(text.replace('\n', ' '))
+      item.setData(Qt.ItemDataRole.UserRole, text)
+      self.addItem(item)
+    if self.count():
+      self.setCurrentRow(self.count() - 1)
+      self.scrollToBottom()
+
+  def select_prev(self):
+    row = self.currentRow()
+    if row > 0:
+      self.setCurrentRow(row - 1)
+      self._preview()
+
+  def select_next(self):
+    row = self.currentRow()
+    if row < self.count() - 1:
+      self.setCurrentRow(row + 1)
+      self._preview()
+
+  def _preview(self):
+    item = self.currentItem()
+    if item:
+      self.picked.emit(item.data(Qt.ItemDataRole.UserRole))
+
+  def _on_activated(self, item):
+    self.picked.emit(item.data(Qt.ItemDataRole.UserRole))
+    self.hide()
+
+  def keyPressEvent(self, event):
+    key = event.key()
+    if key == Qt.Key.Key_Return:
+      item = self.currentItem()
+      if item:
+        self._on_activated(item)
+      return
+    if key == Qt.Key.Key_Escape:
+      self.hide()
+      return
+    if key == Qt.Key.Key_Up:
+      self.select_prev()
+      return
+    if key == Qt.Key.Key_Down:
+      self.select_next()
+      return
+    # Printable key — jump to next entry starting with that character
+    ch = event.text()
+    if ch and ch.isprintable():
+      ch_lower = ch.lower()
+      if ch_lower == self._last_key:
+        start = self._last_key_row + 1
+      else:
+        start = 0
+        self._last_key = ch_lower
+      # Search from start, wrapping around
+      for i in range(self.count()):
+        row = (start + i) % self.count()
+        item = self.item(row)
+        text = (item.data(Qt.ItemDataRole.UserRole) or '').lower()
+        if text.startswith(ch_lower):
+          self.setCurrentRow(row)
+          self._last_key_row = row
+          self._preview()
+          return
+    super().keyPressEvent(event)
+
+
 class Window(QWidget):
 
   def lineinput(self, text):
@@ -412,13 +498,51 @@ class Window(QWidget):
       # Avoid consecutive duplicates
       if not self.inputhistory or self.inputhistory[-1] != text:
         self.inputhistory.append(text)
+        # Cap and persist
+        _MAX_INPUT_HISTORY = 200
+        if len(self.inputhistory) > _MAX_INPUT_HISTORY:
+          self.inputhistory = self.inputhistory[-_MAX_INPUT_HISTORY:]
+        if state.ui_state:
+          state.ui_state.input_history = self.inputhistory
     self._history_index = -1
-    if text.startswith(state.config.cmdprefix):
-      from commands import docommand
-      docommand(self, *(text[len(state.config.cmdprefix):].split(" ", 1)))
-    else:
-      from commands import docommand
-      docommand(self, "say", text)
+    # Split multiline input into separate lines
+    lines = text.split('\n')
+    for line in lines:
+      line = line.rstrip('\r')
+      if not line:
+        continue
+      if line.startswith(state.config.cmdprefix):
+        from commands import docommand
+        docommand(self, *(line[len(state.config.cmdprefix):].split(" ", 1)))
+      else:
+        from commands import docommand
+        docommand(self, "say", line)
+
+  def _show_history_popup(self):
+    """Show the input history popup above the input field."""
+    if not self.inputhistory:
+      return
+    if not self._history_popup:
+      self._history_popup = _HistoryPopup()
+      self._history_popup.picked.connect(self._pick_history)
+    self._history_popup.populate(self.inputhistory)
+    # Position above the input field
+    pos = self.input.mapToGlobal(self.input.rect().topLeft())
+    w = self.input.width()
+    self._history_popup.setFixedWidth(w)
+    h = min(200, self._history_popup.sizeHintForRow(0) * min(self._history_popup.count(), 10) + 4)
+    self._history_popup.setFixedHeight(h)
+    self._history_popup.move(pos.x(), pos.y() - h)
+    self._history_popup.show()
+    self._history_popup.setFocus()
+
+  def _pick_history(self, text):
+    """Called when a history item is selected."""
+    self.input.setPlainText(text)
+    c = self.input.textCursor()
+    c.movePosition(c.MoveOperation.End)
+    self.input.setTextCursor(c)
+    self.input.setFocus()
 
   def _get_completable_nicks(self):
     """Return the set of nicks available for completion in this window."""
@@ -669,9 +793,10 @@ class Window(QWidget):
 
     self._build_layout()
 
-    self.inputhistory = []
+    self.inputhistory = list(state.ui_state.input_history) if state.ui_state else []
     self._history_index = -1
     self._history_saved = ''  # text in input before browsing history
+    self._history_popup = None
     # Nick tab-completion state
     self._comp_popup = None    # NickCompletionPopup instance
     self._comp_prefix = ''     # the text fragment being completed
@@ -1087,31 +1212,17 @@ class Window(QWidget):
         if self._start_tab_completion():
           return True
 
-      # Ctrl+Up/Down — input history
+      # Ctrl+Up — open/navigate input history popup
       if key == Qt.Key.Key_Up and (mods & Qt.KeyboardModifier.ControlModifier):
         if self.inputhistory:
-          if self._history_index == -1:
-            self._history_saved = obj.toPlainText()
-            self._history_index = len(self.inputhistory) - 1
-          elif self._history_index > 0:
-            self._history_index -= 1
-          obj.setPlainText(self.inputhistory[self._history_index])
-          # Move cursor to end
-          c = obj.textCursor()
-          c.movePosition(c.MoveOperation.End)
-          obj.setTextCursor(c)
+          if not self._history_popup or not self._history_popup.isVisible():
+            self._show_history_popup()
+          else:
+            self._history_popup.select_prev()
         return True
       if key == Qt.Key.Key_Down and (mods & Qt.KeyboardModifier.ControlModifier):
-        if self._history_index != -1:
-          if self._history_index < len(self.inputhistory) - 1:
-            self._history_index += 1
-            obj.setPlainText(self.inputhistory[self._history_index])
-          else:
-            self._history_index = -1
-            obj.setPlainText(self._history_saved)
-          c = obj.textCursor()
-          c.movePosition(c.MoveOperation.End)
-          obj.setTextCursor(c)
+        if self._history_popup and self._history_popup.isVisible():
+          self._history_popup.select_next()
         return True
 
       if key == Qt.Key.Key_Return:
