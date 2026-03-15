@@ -1196,9 +1196,32 @@ def init_default_files(directory, config_name='config.yaml', overwrite=None):
     for fname in os.listdir(bundled_icons):
       src = os.path.join(bundled_icons, fname)
       dst = os.path.join(target_icons, fname)
-      if os.path.isfile(src) and not os.path.isfile(dst):
-        shutil.copy2(src, dst)
-        created.append(('icons/' + fname, 'icon'))
+      if os.path.isfile(src):
+        if not os.path.isfile(dst):
+          shutil.copy2(src, dst)
+          created.append(('icons/' + fname, 'icon'))
+        elif ('icons/' + fname) not in overwrite:
+          skipped.append(('icons/' + fname, 'already exists'))
+
+  # Copy bundled plugins into the plugins/ directory
+  bundled_plugins = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'plugins')
+  target_plugins = os.path.join(directory, 'plugins')
+  if os.path.isdir(bundled_plugins):
+    for item in os.listdir(bundled_plugins):
+      src = os.path.join(bundled_plugins, item)
+      dst = os.path.join(target_plugins, item)
+      if os.path.isfile(src):
+        if not os.path.isfile(dst):
+          shutil.copy2(src, dst)
+          created.append(('plugins/' + item, 'plugin'))
+        elif ('plugins/' + item) not in overwrite:
+          skipped.append(('plugins/' + item, 'already exists'))
+      elif os.path.isdir(src):
+        if not os.path.isdir(dst):
+          shutil.copytree(src, dst)
+          created.append(('plugins/' + item + '/', 'plugin data'))
+        else:
+          skipped.append(('plugins/' + item + '/', 'already exists'))
 
   return created, skipped, overwritten
 
@@ -1524,31 +1547,56 @@ if __name__ == '__main__':
     quit()
   signal.signal(signal.SIGINT, _sigint_handler)
 
+  # Enable faulthandler to get tracebacks on segfaults
+  import faulthandler
+  _crash_log = os.path.join(os.path.dirname(os.path.abspath(state.config.path)), 'crash.log')
+  _crash_fh = open(_crash_log, 'a')
+  faulthandler.enable(file=_crash_fh)
+
+  # Log all exceptions to crash.log as well as stderr
+  def _log_exception(header, exc_type=None, exc_value=None, exc_tb=None):
+    import traceback
+    from datetime import datetime
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    msg = '[%s] %s\n' % (ts, header)
+    print(header, file=sys.stderr)
+    _crash_fh.write(msg)
+    if exc_type and exc_value:
+      traceback.print_exception(exc_type, exc_value, exc_tb)
+      traceback.print_exception(exc_type, exc_value, exc_tb, file=_crash_fh)
+    _crash_fh.flush()
+
   # Catch unhandled exceptions that would otherwise silently kill the window
   def _excepthook(exc_type, exc_value, exc_tb):
-    import traceback
-    print("*** Unhandled exception ***", file=sys.stderr)
-    traceback.print_exception(exc_type, exc_value, exc_tb)
+    _log_exception('*** Unhandled exception ***', exc_type, exc_value, exc_tb)
   sys.excepthook = _excepthook
 
   def _unraisable_hook(unraisable):
-    import traceback
-    print("*** Unraisable exception in %s ***" % (unraisable.object,), file=sys.stderr)
-    if unraisable.exc_value:
-      traceback.print_exception(type(unraisable.exc_value), unraisable.exc_value,
-                                unraisable.exc_value.__traceback__)
+    _log_exception('*** Unraisable exception in %s ***' % (unraisable.object,),
+                   type(unraisable.exc_value) if unraisable.exc_value else None,
+                   unraisable.exc_value,
+                   unraisable.exc_value.__traceback__ if unraisable.exc_value else None)
   sys.unraisablehook = _unraisable_hook
 
   def _async_exception_handler(loop, context):
     exc = context.get('exception')
     msg = context.get('message', 'Unhandled async exception')
-    print("*** %s ***" % msg, file=sys.stderr)
     if exc:
-      import traceback
-      traceback.print_exception(type(exc), exc, exc.__traceback__)
+      _log_exception('*** %s ***' % msg, type(exc), exc, exc.__traceback__)
     else:
-      print(context, file=sys.stderr)
+      _log_exception('*** %s: %s ***' % (msg, context))
   loop.set_exception_handler(_async_exception_handler)
+
+  # atexit: log if we're exiting without quit() being called
+  import atexit
+  def _atexit():
+    if not _quitting:
+      from datetime import datetime
+      ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+      _crash_fh.write('[%s] *** Unexpected exit (no quit() called) ***\n' % ts)
+      _crash_fh.flush()
+    _crash_fh.close()
+  atexit.register(_atexit)
 
   with loop:
     loop.run_forever()

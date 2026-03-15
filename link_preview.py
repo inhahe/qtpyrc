@@ -147,7 +147,8 @@ async def _fetch_head_stdlib(url, max_size=65536, timeout=5.0, proxy=''):
 
 
 async def _fetch_image(url, max_size=262144, timeout=5.0, proxy=''):
-    """Fetch image data from a URL. Returns bytes or None."""
+    """Fetch image data from a URL. Returns bytes or None.
+    Skips images larger than max_size to avoid truncated/corrupt downloads."""
     if _USE_AIOHTTP:
         import aiohttp
         try:
@@ -165,7 +166,15 @@ async def _fetch_image(url, max_size=262144, timeout=5.0, proxy=''):
                     ct = resp.headers.get('content-type', '')
                     if 'image/' not in ct:
                         return None
-                    return await resp.content.read(max_size)
+                    # Check Content-Length — skip if too large
+                    cl = resp.headers.get('content-length')
+                    if cl and int(cl) > max_size:
+                        return None
+                    data = await resp.content.read(max_size)
+                    # Verify we got the full image (not truncated)
+                    if cl and len(data) < int(cl):
+                        return None
+                    return data
         except Exception:
             return None
     else:
@@ -187,7 +196,13 @@ async def _fetch_image(url, max_size=262144, timeout=5.0, proxy=''):
                     ct = resp.headers.get('content-type', '')
                     if 'image/' not in ct:
                         return None
-                    return resp.read(max_size)
+                    cl = resp.headers.get('content-length')
+                    if cl and int(cl) > max_size:
+                        return None
+                    data = resp.read(max_size)
+                    if cl and len(data) < int(cl):
+                        return None
+                    return data
             except Exception:
                 return None
         loop = asyncio.get_event_loop()

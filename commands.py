@@ -85,15 +85,20 @@ class Commands:
     if window.type == "server":
       window.redmessage("[Error: Can't talk in a server window]")
     elif window.type == "channel":
-      window.client.conn.say(window.channel.name, text)
-      window.addline_msg(window.client.conn.nickname, text)
+      conn = window.client.conn
+      conn.say(window.channel.name, text)
+      window.addline_msg(conn.nickname, text)
       state.irclogger.log_channel(window.client.network, window.channel.name,
-                            "<%s> %s" % (window.client.conn.nickname, text))
+                            "<%s> %s" % (conn.nickname, text))
       if state.historydb:
         state.historydb.add(window.client.network, window.channel.name.lower(),
-                            'message', window.client.conn.nickname, text)
+                            'message', conn.nickname, text)
       from link_preview import check_and_preview
       check_and_preview(window, text)
+      # Dispatch to plugin chanmsg hooks for own messages
+      from plugins import _dispatch_to_plugins
+      user = '%s!%s@%s' % (conn.nickname, conn.username or '', '')
+      _dispatch_to_plugins('chanmsg', conn, (user, window.channel.name, text), {})
     elif window.type == "query":
       window.client.conn.say(window.remotenick, text)
       window.addline_msg(window.client.conn.nickname, text)
@@ -237,41 +242,121 @@ class Commands:
     window.client.conn.sendLine("INVITE %s %s" % (target, channel))
     window.addline("[Invited %s to %s]" % (target, channel))
 
-  def load(window, text):
-    name = text.strip()
-    if not name:
-      window.redmessage("[Error: /load requires a script name]")
+  def plugin(window, text):
+    """Plugin management.  /plugin <name> — load
+    /plugin -u <name> — unload
+    /plugin -r <name> — reload (unload + load)"""
+    args = text.split()
+    if not args:
+      window.redmessage("[Usage: /plugin [-u|-r] <name>]")
       return
+    flag = ''
+    if args[0] in ('-u', '-r'):
+      flag = args.pop(0)
+    if not args:
+      window.redmessage("[Usage: /plugin [-u|-r] <name>]")
+      return
+    name = args[0]
+    if not flag and name in state.activescripts:
+      window.redmessage('[Plugin "%s" is already loaded. Use /plugin -r %s to reload.]' % (name, name))
+      return
+    if flag in ('-u', '-r'):
+      # Unload
+      if name not in state.activescripts:
+        if flag == '-u':
+          window.redmessage("[Plugin \"%s\" is not loaded]" % name)
+          return
+      else:
+        old = state.activescripts.pop(name)
+        if hasattr(old, 'instance') and hasattr(old.instance, 'die'):
+          try:
+            old.instance.die()
+          except Exception:
+            traceback.print_exc()
+        elif hasattr(old, 'script') and hasattr(old.script, 'die'):
+          try:
+            old.script.die()
+          except Exception:
+            traceback.print_exc()
+        if flag == '-u':
+          window.redmessage("[Unloaded plugin: %s]" % name)
+          return
+        # -r: fall through to reload
     from plugins import load_script_by_name
     load_script_by_name(name, report_window=window)
 
+  load = plugin  # alias
+
   def unload(window, text):
-    name = text.strip()
-    if not name:
-      window.redmessage("[Error: /unload requires a script name]")
+    """Unload a Python plugin.  /unload <name>"""
+    Commands.plugin(window, '-u ' + text)
+
+  def plugins(window, text):
+    """List plugins.  /plugins [-l|-a] — -l loaded only, -a auto-load only."""
+    import os
+    flag = text.strip()
+    if flag == '-l':
+      if state.activescripts:
+        window.redmessage("[Loaded plugins: %s]" % ', '.join(sorted(state.activescripts.keys())))
+      else:
+        window.redmessage("[No plugins loaded]")
       return
-    if name not in state.activescripts:
-      window.redmessage("[Script \"%s\" is not loaded]" % name)
+    if flag == '-a':
+      plugins_cfg = state.config._data.get('plugins') or {}
+      auto = plugins_cfg.get('auto_load') or []
+      if auto:
+        window.redmessage("[Auto-load plugins: %s]" % ', '.join(str(a) for a in auto))
+      else:
+        window.redmessage("[No plugins in auto-load]")
       return
-    old = state.activescripts.pop(name)
-    if hasattr(old, 'instance') and hasattr(old.instance, 'die'):
-      try:
-        old.instance.die()
-      except Exception:
-        traceback.print_exc()
-    elif hasattr(old, 'script') and hasattr(old.script, 'die'):
-      try:
-        old.script.die()
-      except Exception:
-        traceback.print_exc()
-    window.redmessage("[Unloaded script: %s]" % name)
+    plugins_cfg = state.config._data.get('plugins') or {}
+    plugins_dir = plugins_cfg.get('dir', 'plugins')
+    if not os.path.isabs(plugins_dir):
+      plugins_dir = os.path.join(os.path.dirname(os.path.abspath(state.config.path)), plugins_dir)
+    available = []
+    if os.path.isdir(plugins_dir):
+      for f in sorted(os.listdir(plugins_dir)):
+        path = os.path.join(plugins_dir, f)
+        if f.endswith('.py') and not f.startswith('_'):
+          name = f[:-3]
+        elif os.path.isdir(path) and os.path.isfile(os.path.join(path, '__init__.py')):
+          name = f
+        else:
+          continue
+        loaded = '(loaded)' if name in state.activescripts else ''
+        available.append(name + (' ' + loaded if loaded else ''))
+    if available:
+      window.redmessage("[Plugins in %s:]" % plugins_dir)
+      for p in available:
+        window.redmessage("  %s" % p)
+    else:
+      window.redmessage("[No plugins in %s]" % plugins_dir)
 
   def scripts(window, text):
-    """List loaded scripts."""
-    if state.activescripts:
-      window.redmessage("[Loaded scripts: %s]" % ', '.join(sorted(state.activescripts.keys())))
+    """List command scripts.  /scripts [-a] — -a for auto-load only."""
+    import os
+    if text.strip() == '-a':
+      scripts_cfg = state.config._data.get('scripts') or {}
+      auto = scripts_cfg.get('auto_load') or []
+      startup = scripts_cfg.get('startup', '')
+      items = ([startup] if startup else []) + list(auto)
+      if items:
+        window.redmessage("[Auto-load scripts: %s]" % ', '.join(str(a) for a in items))
+      else:
+        window.redmessage("[No scripts in auto-load]")
+      return
+    scripts_cfg = state.config._data.get('scripts') or {}
+    scripts_dir = scripts_cfg.get('dir', 'scripts')
+    if not os.path.isabs(scripts_dir):
+      scripts_dir = os.path.join(os.path.dirname(os.path.abspath(state.config.path)), scripts_dir)
+    if os.path.isdir(scripts_dir):
+      files = sorted(f for f in os.listdir(scripts_dir) if not f.startswith('_'))
+      if files:
+        window.redmessage("[Scripts in %s: %s]" % (scripts_dir, ', '.join(files)))
+      else:
+        window.redmessage("[No scripts in %s]" % scripts_dir)
     else:
-      window.redmessage("[No scripts loaded]")
+      window.redmessage("[Scripts directory not found: %s]" % scripts_dir)
 
   def ignore(window, text):
     """Toggle or list ignores.  /ignore [-lrw] [mask] [#channel] [network]
@@ -1093,6 +1178,9 @@ class Commands:
           state.app.mainwin.workspace.setActiveSubWindow(client.window.subwindow)
           return
         w = _find_window(tgt, client)
+        # Fallback: try with # prepended
+        if not w and tgt[0:1] not in '#&!+':
+          w = _find_window('#' + tgt, client)
         if w:
           state.app.mainwin.workspace.setActiveSubWindow(w.subwindow)
         else:
@@ -1107,16 +1195,27 @@ class Commands:
     w = _find_window(target, window.client)
     if not w:
       w = _find_window(target)
+    # Fallback: try with # prepended
+    if not w and target[0:1] not in '#&!+':
+      w = _find_window('#' + target, window.client)
+      if not w:
+        w = _find_window('#' + target)
     if w:
       state.app.mainwin.workspace.setActiveSubWindow(w.subwindow)
     else:
       window.redmessage('[No window: %s]' % target)
 
   def help(window, text):
-    """Show help for a command.  /help [command]
-    Without arguments, lists all commands."""
+    """Show help for a command or topic.
+    /help              — list commands and topics
+    /help /command     — help for a slash command
+    /help topic        — help for a topic (events, variables, popups, plugin, etc.)
+    """
     import os, re
-    cmd = text.strip().lstrip(state.config.cmdprefix).lower()
+    raw = text.strip()
+    # If the user included the command prefix, force command lookup
+    force_command = raw.startswith(state.config.cmdprefix)
+    cmd = raw.lstrip(state.config.cmdprefix).lower()
     ref_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             'docs', 'reference.md')
     try:
@@ -1136,6 +1235,26 @@ class Commands:
       window.addline('[Commands: %s]' % ', '.join(cmds))
       window.addline('[Topics: events, variables, popups, plugin, objects, cli]')
       window.addline('[Use /help <command> or /help <topic> for details]')
+      return
+
+    # If user typed /help /command, try command lookup first
+    if force_command:
+      lines_found = []
+      for m in re.finditer(
+          r'^\| `/%s`\s*\|([^|]*)\|([^|]*)\|' % re.escape(cmd), ref, re.MULTILINE):
+        syntax = m.group(1).strip().strip('`').strip()
+        desc = m.group(2).strip()
+        lines_found.append((syntax, desc))
+      if lines_found:
+        for syntax, desc in lines_found:
+          window.addline('  %s — %s' % (syntax, desc))
+        section_pat = re.compile(
+            r'^##+ .*/%s\b.*$' % re.escape(cmd), re.MULTILINE | re.IGNORECASE)
+        m = section_pat.search(ref)
+        if m:
+          _show_help_section(window, ref, m.group(0), start_match=m)
+        return
+      window.redmessage('[No help for: /%s]' % cmd)
       return
 
     # Check for topic-based help — show compact lists

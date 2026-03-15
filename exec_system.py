@@ -24,6 +24,13 @@ def _timer_fire(name):
   window = info['window']
   command = info['command']
 
+  # Resolve window if None
+  if window is None:
+    sub = state.app.mainwin.workspace.activeSubWindow() if state.app else None
+    window = sub.widget() if sub else None
+  if window is None:
+    return
+
   # Execute the associated command string
   _exec_command_string(window, command)
 
@@ -287,8 +294,16 @@ def _dispatch_on_hooks(internal_event, conn, args):
       if hinfo.get('highlight_tab') and chan and conn:
         _highlight_event_window(conn, chan)
 
-      # Command execution
+      # Command execution — callable or string
       cmd = hinfo.get('command', '')
+      if callable(cmd):
+        try:
+          bare = {k.strip('{}'): str(v) for k, v in variables.items()}
+          cmd(bare, conn)
+        except Exception:
+          import traceback; traceback.print_exc()
+        fired = True
+        continue
       if cmd:
         # Find window for command execution
         window = hinfo.get('window')

@@ -117,8 +117,8 @@ class _Irc:
 
     @staticmethod
     def msg(conn, target, message):
-        """Send a PRIVMSG via *conn*."""
-        conn.say(target, message)
+        """Send a PRIVMSG via *conn*. Also echoes to the local window."""
+        _Irc.say(conn, target, message)
 
     @staticmethod
     def notice(conn, target, message):
@@ -213,8 +213,27 @@ class _Irc:
 
     @staticmethod
     def say(conn, target, message):
-        """Send a message to *target* (channel or nick) via *conn*."""
+        """Send a message to *target* (channel or nick) via *conn*.
+        Also echoes to the local window and saves to history."""
+        import state
         conn.say(target, message)
+        # Echo to local window
+        chnlower = conn.irclower(target)
+        chan = conn.client.channels.get(chnlower)
+        if chan and chan.window:
+            chan.window.addline_msg(conn.nickname, message)
+            # Save to history
+            if state.historydb:
+                state.historydb.add(conn.client.network, chnlower,
+                                    'message', conn.nickname, message)
+            state.irclogger.log_channel(conn.client.network, target,
+                                        '<%s> %s' % (conn.nickname, message))
+        else:
+            # Check queries
+            for qkey, q in conn.client.queries.items():
+                if conn.irclower(q.nick) == chnlower and q.window:
+                    q.window.addline_msg(conn.nickname, message)
+                    break
 
     @staticmethod
     def channel(window):
@@ -302,9 +321,11 @@ class _Irc:
             name:     Unique name for this hook (used for removal).
             pattern:  Wildcard pattern matched against the event's primary text
                       (message, nick, etc.).  Use ``'*'`` to match everything.
-            command:  Command string to execute when the hook fires.
-                      Variables like ``{nick}``, ``{channel}``, ``{message}``,
-                      ``{network}``, ``{me}`` are expanded before execution.
+            command:  Command string or callable.  Strings are executed as
+                      slash commands with ``{nick}``, ``{channel}``, etc.
+                      expanded.  Callables receive ``(variables_dict, conn)``
+                      where variables_dict has keys like ``'nick'``,
+                      ``'channel'``, ``'message'``, etc.
                       Optional if action flags are used.
             channel:  Optional channel filter (only fire in this channel).
             network:  Optional network filter (only fire on this network).

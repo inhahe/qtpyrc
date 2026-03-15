@@ -177,7 +177,8 @@ def load_script_by_name(name, report_window=None):
     return False
 
   # If already loaded, unload first
-  if name in state.activescripts:
+  _reloading = name in state.activescripts
+  if _reloading:
     old = state.activescripts.pop(name)
     if hasattr(old, 'instance') and hasattr(old.instance, 'die'):
       try:
@@ -205,9 +206,10 @@ def load_script_by_name(name, report_window=None):
     loaded = load_plugin(name, mod)
     if loaded:
       state.activescripts[name] = loaded
-      dbg(LOG_INFO, 'Loaded script: %s' % name)
+      verb = 'Reloaded' if _reloading else 'Loaded'
+      dbg(LOG_INFO, '%s plugin: %s' % (verb, name))
       if report_window:
-        report_window.redmessage("[Loaded script: %s]" % name)
+        report_window.redmessage("[%s plugin: %s]" % (verb, name))
       return True
     else:
       msg = 'Script "%s" has no Class or Script attribute' % name
@@ -380,7 +382,7 @@ _SCRIPT_HOOKS = frozenset({
 def _dispatch_to_plugins(name, conn, args, kwargs):
   """Call plugin hooks for event *name*.  Returns True if any suppressed."""
   from exec_system import _dispatch_on_hooks
-  for loaded in state.activescripts.values():
+  for sname, loaded in state.activescripts.items():
     if isinstance(loaded, LoadedPlugin):
       handler = getattr(loaded.instance, name, None)
       if handler:
