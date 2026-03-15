@@ -148,8 +148,8 @@ typing:
 
 link_preview:
   enabled: false           # set to true to enable inline previews
-  max_size: 65536          # max bytes to download per URL (only <head> is parsed)
-  timeout: 5.0             # seconds before giving up on a fetch
+  max_size: 262144         # max bytes to download per URL (only <head> is parsed)
+  timeout: 10.0            # seconds before giving up on a fetch
   width: 400               # preview box width in pixels
   height: 120              # preview box height in pixels
   # proxy: socks5://127.0.0.1:9050  # route fetches through a proxy (hides your IP)

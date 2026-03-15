@@ -600,6 +600,7 @@ All methods below take `conn` (an IRCClient connection) as their first argument.
 | `error` | `error(window, text)` | Display red system message in a window |
 | `inputbox` | `inputbox(prompt='', title='Input')` | Show input dialog, return text or '' |
 | `stdin` | `stdin(prompt='')` | Read a line from stdin (blocking) |
+| `dbg` | `dbg(level, *args)` | Write to console debug log. Levels: `irc.LOG_ERROR` (1), `irc.LOG_WARN` (2), `irc.LOG_INFO` (3), `irc.LOG_DEBUG` (4), `irc.LOG_TRACE` (5) |
 
 ### Plugin Config Methods
 

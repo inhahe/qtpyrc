@@ -364,12 +364,14 @@ def _expand_vars(s, variables, warn_unknown=False, pattern_label=None,
         try:
           result = eval(arg, {'__builtins__': __builtins__}, func_ns)
           return str(result) if result is not None else ''
-        except Exception:
+        except Exception as e:
+          state.dbg(state.LOG_WARN, '[config] eval(%r) failed: %s' % (arg, e))
           return ''
       elif name == 'stdin':
         try:
           return input(arg)
-        except Exception:
+        except Exception as e:
+          state.dbg(state.LOG_WARN, '[config] stdin(%r) failed: %s' % (arg, e))
           return ''
       elif name == 'input':
         try:
@@ -377,7 +379,8 @@ def _expand_vars(s, variables, warn_unknown=False, pattern_label=None,
           parent = QApplication.activeWindow()
           text, ok = QInputDialog.getText(parent, 'Input', arg or 'Enter value:')
           return text.strip() if ok else ''
-        except Exception:
+        except Exception as e:
+          state.dbg(state.LOG_WARN, '[config] input(%r) failed: %s' % (arg, e))
           return ''
     # 3. Unknown
     unknown.append(name)
@@ -435,8 +438,8 @@ def is_highlight(message, my_nick, network_key=None, channel=None):
       try:
         if _re.search(regex, message, flags):
           return True
-      except _re.error:
-        pass
+      except _re.error as e:
+        state.dbg(state.LOG_WARN, '[config] bad regex in pattern %r: %s' % (pat, e))
     else:
       # Plain string: case-insensitive substring match
       expanded = _expand_vars(pat, plain_vars,
@@ -759,8 +762,8 @@ class AppConfig:
     if isinstance(lp, bool):
       lp = {'enabled': lp}
     self.link_preview_enabled = bool(lp.get('enabled', False))
-    self.link_preview_max_size = int(lp.get('max_size', 65536))
-    self.link_preview_timeout = float(lp.get('timeout', 5.0))
+    self.link_preview_max_size = int(lp.get('max_size', 262144))
+    self.link_preview_timeout = float(lp.get('timeout', 10.0))
     self.link_preview_width = int(lp.get('width', 400))
     self.link_preview_height = int(lp.get('height', 120))
     self.link_preview_proxy = lp.get('proxy', '') or ''
@@ -925,25 +928,27 @@ def _atomic_yaml_save(yaml, data, path):
         if os.path.exists(backup):
           os.remove(backup)
         os.rename(path, backup)
-      except OSError:
-        pass
+      except OSError as e:
+        state.dbg(state.LOG_WARN, '[config] backup rename failed for %s: %s' % (path, e))
     os.rename(tmp_path, path)
     # Remove backup on success
     try:
       backup = path + '.bak'
       if os.path.exists(backup):
         os.remove(backup)
-    except OSError:
-      pass
+    except OSError as e:
+      state.dbg(state.LOG_DEBUG, '[config] backup cleanup failed for %s: %s' % (path, e))
   except Exception:
     traceback.print_exc()
+    state.dbg(state.LOG_ERROR, '[config] atomic save failed for', path)
     # Try to restore from backup if rename failed
     try:
       backup = path + '.bak'
       if not os.path.exists(path) and os.path.exists(backup):
         os.rename(backup, path)
-    except OSError:
-      pass
+        state.dbg(state.LOG_INFO, '[config] restored from backup:', backup)
+    except OSError as e:
+      state.dbg(state.LOG_ERROR, '[config] backup restore FAILED for %s: %s' % (path, e))
 
 
 # ---------------------------------------------------------------------------
@@ -963,10 +968,10 @@ class UIState:
       if os.path.isfile(old):
         try:
           os.rename(old, path)
-        except OSError:
-          pass
+        except OSError as e:
+          state.dbg(state.LOG_INFO, '[config] layout.yaml migration failed:', e)
     try:
-      with open(path, 'r') as f:
+      with open(path, 'r', encoding='utf-8') as f:
         self._data = self._yaml.load(f) or {}
     except FileNotFoundError:
       self._data = {}
@@ -1138,7 +1143,7 @@ def _update_text_formats(cfg):
 def loadconfig(configpath):
   yaml = YAML()
   yaml.preserve_quotes = True
-  with open(configpath, 'r') as f:
+  with open(configpath, 'r', encoding='utf-8') as f:
     data = yaml.load(f)
   cfg = AppConfig(configpath, data, yaml)
   _update_text_formats(cfg)
