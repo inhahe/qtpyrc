@@ -1227,6 +1227,16 @@ class NicksList(QListWidget):
                          cfg.nicklist_font_size or cfg.fontheight))
     else:
       self.setFont(QFont(cfg.fontfamily, cfg.fontheight))
+    # Reduce vertical spacing between items
+    self.setSpacing(0)
+    self.setUniformItemSizes(True)
+    class _CompactDelegate(QStyledItemDelegate):
+      def sizeHint(self, option, index):
+        sh = super().sizeHint(option, index)
+        fm = option.fontMetrics
+        sh.setHeight(fm.height() + 2)
+        return sh
+    self.setItemDelegate(_CompactDelegate(self))
     # Prevent persistent selection highlight
     self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
     self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
