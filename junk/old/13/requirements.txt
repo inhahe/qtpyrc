@@ -1,0 +1,4 @@
+ruamel.yaml
+pyside6
+qasync
+bottom

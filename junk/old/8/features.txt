@@ -1,0 +1,122 @@
+auto-size nicks pane to fit largest nick
+beep when message comes into a given channel
+scripting
+ do this via mixins?  no.  use a list of script classes and im_func.
+ don't use __init__. use init().
+ have an isconnected variable.
+ actually use __init__.  it passes a 'main' variable for the main ircclient.
+ all functions receive self, main, rest of arguments.
+ use __getattribute__ of ircclient class to call its own function and then the bots' functions.
+   to use that must inherit 'object'.
+   also use object.__getattribute__ within __getattribute__ for avoiding infinite recursion.
+add and remove event handlers on the command line (respond x times or respond indefinitely)
+default mirc color for outgoing messages
+(limit to certain channels)
+show warning or auto-reconnect if no ping received within x seconds
+  connec to various servers and determine ping intervals
+option to run without gui or pyqt as a bot
+ might be best not to import any * from pyqt so we can just create dummy objects for the
+ namespaces for which any attribute returns a dummy object for which any attribute returns
+ the dummy object
+alternative console mode?  make a ConsoleWindow class and if console mode is selected
+ then Window = ConsoleWindow, etc.
+on hover, show
+  nick
+  ident if avail
+  host if avail
+  location using an ip2loc database if host is numeric or user performed a dns on it already
+  realname if avail (user did a whois already)
+  channels if avail
+  ctcp version reply if avail (user did a ctcp version)
+  time if avail
+  time since they joined chan
+  time since they joined any chan youre in (for these, if they were already in chan say
+                                            it was at least however many minutes you were there)
+  idle time from whois if avail
+  whether theyre irc cop if avail
+  whether away if avail
+  other nicks the user has used
+   other nicks the user has used in different sessions?
+  time since last spoke in any chan
+  time since last spoke in chan
+  +v/+o/+b status (use mode changes and ban list for +b status)
+  mention the user cannot speak if +b or -v and chan is +m
+   don't some servers have a +mute mode? find out what any extra nick prefixes are
+keep a database tracking user identity by ident@host and simultaneous host login?
+ also identical any two: host, ident, realname, nick  (maybe not realname, many people are 'new now know how')
+ identical if ident and it starts with i= (freenode)
+ does /whois report if a user is using a registered nick?
+provide channel buffers for bot
+ use gzip if it's effective over single sentences
+should bots be done via mixins? no.
+pop-up ansi color picker like mirc has?
+ use ctrl-c for colors?
+color rgb configurator?
+support any windows registered scripting language like klient does
+/notify can be network-specific
+can pick a different random /whois every time you login
+when rejoining:
+ when rejoin show line.. maybe with time lapse between part/join
+ simulated joins/parts/modes/topic changes to show changes? use different color or different format
+quick creation of aliases, e.g., /alias "/srvcdc" = "/server irc.cdc.net"
+emulate mirc to things liike the iwnamp plugin
+dcc -- way to enter ip address directly instead of nick ??
+
+provide a function to find a user? given a nick, start joining and parting all channels in /list and look for them
+ password protected channels can be entered using split detection, but servers ban that.
+ channels you're banned from can be circumvented using a bnc or a server that can't resolve your ip
+  or perhaps by using ipv6?
+  also by changing nickname and ident
+ make multiple connections to different servers and do this in parallel
+ call this function, ultra-stalk.
+ also look in logs for all channel names joined and in /whois's because they may have become
+ private since then, which would be a good reason it doesnt show up in the /whois of someone you know.
+
+include chess bot, !seen, !memo, !quote, the fake /msg conversationalist
+provide a sandbox for scripts? find some third party sandbox? allow writing to the bot's dir, if not that then an sqlite database
+
+
+#todo
+#change window icon
+#newyork.ny.us.undernet.org -- on notification to use /motd, has characters that don't
+#show up right?
+#exit cleanly on ctrl-brk?
+#history in input widget
+#don't let type more than x-nicklen chrs
+#case normalization for channels and nicks
+#dynamicize colors and format strings
+#it might be useful if we could get the actual server name when you connect to for example
+#irc.dal.net.  maybe we'd have to get getPeer() and then do a dns on it?
+#remember window positions, etc
+#make a class for a window and inherit channel, server, query windows from it
+#get that better mirc color regex to work, (^|(?:mirc color))(*.?)
+#linereceived should pass the information from irc.py after generic parsing, not before it 
+#figure out the differences between current irc.py and latest, like motd = None
+#fix isupport calls bounce in irc.py
+#"actions"
+#try to capture console ctrl break to give a reasonable exit
+#/server invaliddomain doesn't seem to make an error
+#delete channel input text after send
+#font picker - does qt have a class?
+#how to set realname
+#option to run without gui or pyqt as a bot
+#alternative console mode?
+#irc.py: instead of None for _intOrDefault, why not the string value the server provided.  
+#or maybe add unparsable values to a dictionary
+#limit input length to exactly (500 - length of recipient) per line
+#IRC_UMODEIS seems to print to the server window..why!?
+#every other time i do /msg it saysi can't talk in a server window
+#don't freeze while adding a lot of text to a window, can use separate thread?
+#when mIRC changes networks the channels all close
+# so a client's conn may change, but that may or may not entail resetting all the channels
+# how do we determine what network we're on
+# doesn't disconnect first when changing servers
+# doesn't show 'connecting'
+#if last msg was a red message, do a - first
+#mirc puts -'s in between different server messages
+#different way to do scripts: each thing in the chain may modify the parameters by returning something
+#text runs off the right side of the screen!
+#timeout value for connection doesn't actually do anything!
+#wtf.. it tries to connect multiple times if i use mesa.az.us.undernet.org ?
+#when can't resolve host it goes into infinite loop <- put a connection throttle
+#order nicks in list by lowercase

@@ -256,14 +256,9 @@ def _tile_vertically():
     sub.setGeometry(0, i * h, w, h)
 
 def _on_treeview_splitter_moved(pos, index):
-  if not state.app or not state.app.mainwin:
-    return
-  mw = state.app.mainwin
-  mw._tree_user_set = True
-  sizes = mw._tree_splitter.sizes()
-  if len(sizes) >= 2:
-    mw._tree_target_tw = sizes[0]
-    if state.ui_state:
+  if state.ui_state:
+    sizes = state.app.mainwin._tree_splitter.sizes()
+    if len(sizes) >= 2:
       state.ui_state.treeview_width = sizes[0]
 
 _DEFAULT_TITLEBAR_FORMAT = (
@@ -272,12 +267,6 @@ _DEFAULT_TITLEBAR_FORMAT = (
   "sorted('%s (%s)' % (c.network_key or c.network or c.hostname, c.conn.nickname) "
   "for c in state.clients if c.connected)) "
   "if any(c.connected for c in state.clients) else ''"
-  '")}'
-  '{eval("'
-  " ' - ' + (_v.get('network_label','') + '/' if _v.get('network_label') else '')"
-  " + _v['channel']"
-  " + (': ' + _v['topic'] if _v.get('topic') else '')"
-  " if _v.get('channel') else ''"
   '")}'
 )
 
@@ -296,15 +285,9 @@ def update_main_title():
     variables = _window_context_vars(widget)
   else:
     variables = _window_context_vars(type('_Dummy', (), {'client': None})())
-  # Strip mIRC formatting codes from topic for titlebar display
-  import re
-  raw_topic = variables.get('topic', '')
-  variables['topic'] = re.sub(
-      r'[\x02\x03\x0F\x16\x1D\x1F]|\x03\d{0,2}(?:,\d{0,2})?', '', raw_topic) if raw_topic else ''
   variables.update(state._variables)
-  # Pass variables dict into eval namespace so eval can access topic safely
   title = _expand_vars(fmt, variables, allow_eval=True,
-                       eval_ns={'state': state, '_v': variables})
+                       eval_ns={'state': state})
   state.app.mainwin.setWindowTitle(title)
 
 def _refresh_window_titles():
@@ -355,49 +338,6 @@ def _on_subwindow_activated(subwindow):
   if tree:
     tree.sync_to_window(widget)
   _update_all_titles()
-
-def _populate_toolbar_menu(menu=None):
-  """Fill the Toolbar menu with entries matching the toolbar buttons."""
-  from toolbar import _resolve_toolbar_path, _load_toolbar_file, _resolve_icon, _exec_toolbar_command
-  if menu is None:
-    menu = state.app.mainwin.mnutoolbar
-  menu.clear()
-  # Clear old ui_registry entries
-  for key in [k for k in state.ui_registry if k.startswith('menu.toolbar.')]:
-    del state.ui_registry[key]
-  for key in [k for k in state.ui_descriptions if k.startswith('menu.toolbar.')]:
-    del state.ui_descriptions[key]
-
-  filepath = _resolve_toolbar_path()
-  entries = _load_toolbar_file(filepath) if filepath else []
-  if not entries:
-    _a = menu.addAction('(no toolbar entries)')
-    _a.setEnabled(False)
-    return
-
-  from toolbar import _toolbar_slug
-  slug_counts = {}
-  for entry in entries:
-    if entry[0] == 'linebreak':
-      menu.addSeparator()
-    elif entry[0] == 'separator':
-      menu.addSeparator()
-    else:
-      _, icon_name, tooltip, command = entry
-      icon = _resolve_icon(icon_name)
-      if not icon.isNull():
-        _a = menu.addAction(icon, tooltip)
-      else:
-        _a = menu.addAction(tooltip)
-      _a.triggered.connect(lambda checked, cmd=command: _exec_toolbar_command(cmd))
-      slug = _toolbar_slug(tooltip)
-      if slug:
-        n = slug_counts.get(slug, 0) + 1
-        slug_counts[slug] = n
-        key = 'menu.toolbar.' + (slug if n == 1 else '%s%d' % (slug, n))
-        state.ui_registry[key] = _a
-        state.ui_descriptions[key] = tooltip
-
 
 def _connect_network(netkey):
   """Connect to a configured network (from menu)."""
@@ -462,7 +402,7 @@ def _close_window(widget, force=False):
   elif widget.type == 'server':
     has_children = bool(client.channels or client.queries)
     if not force and (conn or has_children):
-      label = client.network_key or client.network or getattr(client, 'hostname', '') or 'server'
+      label = client.network_key or client.network or client.hostname or 'server'
       if conn and has_children:
         msg = 'Disconnect from %s and close all its windows?' % label
       elif conn:
@@ -612,26 +552,11 @@ def makeapp(args):
   content = app.mainwin.workspace
 
   app.mainwin.network_tree = NetworkTree()
-
-  class _TreeSplitter(QSplitter):
-    """QSplitter that re-applies saved tree width on resize until user drags."""
-    def resizeEvent(self, event):
-      super().resizeEvent(event)
-      mw = state.app.mainwin if state.app else None
-      if mw and not mw._tree_user_set:
-        total = self.width()
-        tw = mw._tree_target_tw
-        if total > tw:
-          self.blockSignals(True)
-          self.setSizes([tw, total - tw])
-          self.blockSignals(False)
-
-  app.mainwin._tree_splitter = _TreeSplitter()
+  app.mainwin._tree_splitter = QSplitter()
   app.mainwin._tree_splitter.addWidget(app.mainwin.network_tree)
   app.mainwin._tree_splitter.addWidget(content)
-  app.mainwin._tree_target_tw = state.ui_state.treeview_width if state.ui_state else 180
-  app.mainwin._tree_user_set = False
-  app.mainwin._tree_splitter.setSizes([app.mainwin._tree_target_tw, 600])
+  tw = state.ui_state.treeview_width if state.ui_state else 180
+  app.mainwin._tree_splitter.setSizes([tw, 600])
   app.mainwin._tree_splitter.splitterMoved.connect(_on_treeview_splitter_moved)
   app.mainwin.setCentralWidget(app.mainwin._tree_splitter)
   _refresh_navigation(app.mainwin)
@@ -703,25 +628,17 @@ def makeapp(args):
   app.mainwin._net_actions = {}
   if _networks:
     app.mainwin.mnunew.addSeparator()
-    _used_keys = set()
     for _netkey in _networks:
-      # Auto-assign & accelerator to first unique letter
-      _label = _netkey
-      for _ci, _ch in enumerate(_netkey):
-        if _ch.lower() not in _used_keys:
-          _used_keys.add(_ch.lower())
-          _label = _netkey[:_ci] + '&' + _netkey[_ci:]
-          break
-      _a = app.mainwin.mnunew.addAction(_label)
+      _a = app.mainwin.mnunew.addAction(_netkey)
       _a.triggered.connect(lambda checked, nk=_netkey: _connect_network(nk))
-      app.mainwin._net_actions[_netkey] = (_a, _label)
+      app.mainwin._net_actions[_netkey] = _a
       _ui_key = 'menu.file.new.' + _netkey.lower()
       _ui[_ui_key] = _a
       _desc[_ui_key] = _d('File', 'New', _netkey)
   def _update_net_menu():
-    for nk, (act, label) in app.mainwin._net_actions.items():
+    for nk, act in app.mainwin._net_actions.items():
       connected = any(c.network_key == nk and c.connected for c in state.clients)
-      act.setText('%s (connected)' % label if connected else label)
+      act.setText('%s (connected)' % nk if connected else nk)
   app.mainwin.mnunew.aboutToShow.connect(_update_net_menu)
 
   # Event filter for tooltips on disabled menu items
@@ -746,24 +663,21 @@ def makeapp(args):
     else:
       if app.mainwin._toolbar:
         app.mainwin._toolbar.hide()
-    state.config.save()
   _a_toolbar.triggered.connect(_toggle_toolbar)
   _ui['menu.view.toolbar'] = _a_toolbar
   _desc['menu.view.toolbar'] = _d('View', 'Toolbar')
 
   mnuview.addSeparator()
 
-  # Navigation submenu: Tabs Bar / Treeview / Both
-  _nav_menu = mnuview.addMenu('&Navigation')
-  _nav_group = QActionGroup(_nav_menu)
+  # Navigation mode: Treeview / Tabs Bar / Both
+  _nav_group = QActionGroup(mnuview)
   _nav_group.setExclusive(True)
   _nav_items = [
-      ('tabs', 'Tabs &Bar', 'menu.view.nav.tabs'),
       ('tree', '&Treeview', 'menu.view.nav.tree'),
-      ('both', '&Both', 'menu.view.nav.both'),
+      ('tabs', 'Ta&bs Bar', 'menu.view.nav.tabs'),
   ]
   for _nav_val, _nav_label, _nav_key in _nav_items:
-    _a = _nav_menu.addAction(_nav_label)
+    _a = mnuview.addAction(_nav_label)
     _a.setCheckable(True)
     _a.setChecked(state.config.navigation == _nav_val)
     def _set_nav(checked, nav=_nav_val):
@@ -774,11 +688,10 @@ def makeapp(args):
         state.config.treeview = state.config.show_tree
         state.config._data['navigation'] = nav
         _refresh_navigation()
-        state.config.save()
     _a.triggered.connect(_set_nav)
     _nav_group.addAction(_a)
     _ui[_nav_key] = _a
-    _desc[_nav_key] = _d('View', 'Navigation', _nav_label)
+    _desc[_nav_key] = _d('View', _nav_label)
 
   # Window menu
   mnuwindow = app.mainwin.menubar.addMenu('&Window')
@@ -824,10 +737,6 @@ def makeapp(args):
   _a.triggered.connect(lambda: __import__('dialogs').show_color_picker())
   _ui['menu.tools.colorpicker'] = _a
   _desc['menu.tools.colorpicker'] = _d('Tools', 'Color Picker')
-
-  # Toolbar menu — mirrors toolbar buttons as menu items
-  app.mainwin.mnutoolbar = app.mainwin.menubar.addMenu('T&oolbar')
-  _populate_toolbar_menu(app.mainwin.mnutoolbar)
 
   # Help menu
   mnuhelp = app.mainwin.menubar.addMenu('&Help')
@@ -901,7 +810,6 @@ def makeapp(args):
   app.mainwin.raise_()
   app.mainwin.activateWindow()
   app.lastWindowClosed.connect(quit)
-  app.aboutToQuit.connect(quit)
   return app
 
 def _startup_path():
@@ -1006,12 +914,7 @@ def _show_about():
        PySide6.__version__,
        sys.platform))
 
-_quitting = False
 def quit():
-  global _quitting
-  if _quitting:
-    return
-  _quitting = True
   if state.ui_state:
     state.ui_state.save()
   # Close all IRC connections
@@ -1067,43 +970,7 @@ _STUB_TEMPLATES = {
 # Full default content for --init and "Restore Defaults".
 _DEFAULT_TEMPLATES = {
     'config':  ('# qtpyrc configuration\n'
-                '# See config.example.yaml for all available options.\n'
-                '\n'
-                '# Files\n'
-                'popups_file: popups.ini\n'
-                'variables_file: variables.ini\n'
-                'toolbar_file: toolbar.ini\n'
-                'show_toolbar: true\n'
-                '\n'
-                '# Identity (set these before connecting)\n'
-                'nick: qtpyrc_user\n'
-                'user: qtpyrc\n'
-                'realname: qtpyrc user\n'
-                '\n'
-                '# Display\n'
-                'view_mode: tabbed\n'
-                'navigation: tabs\n'
-                'timestamps:\n'
-                '  display: HH:mm\n'
-                '\n'
-                '# Window title format. Uses {variables} and {eval("...")} expressions.\n'
-                '# Available variables: {me}, {network_key}, {network_label}, {channel}, {topic}\n'
-                '# Use _v dict in eval to safely reference variables (e.g. _v["topic"]).\n'
-                '# Leave blank or remove for the default format.\n'
-                'titlebar_format: >-\n'
-                "  qtpyrc{eval(\"' - ' + ', '.join(sorted('%s (%s)' % (c.network_key or c.network or c.hostname, c.conn.nickname) for c in state.clients if c.connected)) if any(c.connected for c in state.clients) else ''\")}{eval(\" ' - ' + (_v.get('network_label','') + '/' if _v.get('network_label') else '') + _v['channel'] + (': ' + _v['topic'] if _v.get('topic') else '') if _v.get('channel') else ''\")}\n"
-                '\n'
-                '# Networks\n'
-                '# networks:\n'
-                '#   libera:\n'
-                '#     server:\n'
-                '#       host: irc.libera.chat\n'
-                '#       port: 6697\n'
-                '#       tls: true\n'
-                '#     auto_connect: true\n'
-                '#     auto_join:\n'
-                "#       '#channel':\n"
-                ),
+                '# See config.example.yaml for all available options.\n'),
     'startup': ('; qtpyrc startup commands\n'
                 '; Each line is a /command or text. Lines starting with ; are comments.\n'),
     'popups':  ('; popups.ini - Right-click popup menus (mIRC-compatible syntax)\n'
@@ -1321,20 +1188,6 @@ def _init_config(app_dir, path_arg, set_opts):
       or (os.path.isdir(target) and not target.endswith('.yaml')
           and not target.endswith('.yml'))):
     target = os.path.join(target, 'config.yaml')
-  elif (not os.path.exists(target)
-        and not target.endswith('.yaml') and not target.endswith('.yml')):
-    # Ambiguous: could be a directory or a filename
-    print('"%s" does not exist and has no file extension.' % path_arg)
-    print('  [d] Create as a directory (config.yaml inside it)')
-    print('  [f] Create as a config file with that name')
-    print('  [c] Cancel')
-    choice = input('Choice [d/f/c]: ').strip().lower()
-    if choice == 'd':
-      target = os.path.join(target, 'config.yaml')
-    elif choice == 'f':
-      pass  # use as-is
-    else:
-      sys.exit(0)
 
   config_dir = os.path.dirname(target)
   filename = os.path.basename(target)
@@ -1461,12 +1314,10 @@ if __name__ == '__main__':
                            'PATH can be a filename, directory, or dir/filename '
                            '(default: config.yaml in current directory)')
   cli_args, qt_args = parser.parse_known_args()
-  # Error on unrecognized arguments (parse_known_args silently ignores them)
+  # Warn about unrecognized arguments (parse_known_args silently ignores them)
   unknown = [a for a in qt_args if a.startswith('-')]
   if unknown:
-    print('Error: unrecognized arguments: %s' % ' '.join(unknown), file=sys.stderr)
-    parser.print_usage(sys.stderr)
-    sys.exit(2)
+    print('Warning: unrecognized arguments: %s' % ' '.join(unknown), file=sys.stderr)
 
   mypath = os.path.dirname(os.path.abspath(__file__))
 
@@ -1605,14 +1456,6 @@ if __name__ == '__main__':
   if cli_args.ui and win:
     from commands import docommand
     _ui_cmd = cli_args.ui
-    # Validate the path
-    _ui_lower = _ui_cmd.strip().lower()
-    if _ui_lower not in state.ui_registry:
-      _matches = [k for k in state.ui_registry if k.startswith(_ui_lower + '.') or k.startswith(_ui_lower)]
-      if not _matches:
-        print('Error: unknown --ui path: %s' % _ui_cmd, file=sys.stderr)
-        print('Use --ui-list to see available paths.', file=sys.stderr)
-        sys.exit(2)
     _mw = state.app.mainwin
     class _ExposeFilter(QObject):
       def eventFilter(self, obj, event):

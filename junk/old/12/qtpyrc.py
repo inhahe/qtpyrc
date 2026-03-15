@@ -256,14 +256,9 @@ def _tile_vertically():
     sub.setGeometry(0, i * h, w, h)
 
 def _on_treeview_splitter_moved(pos, index):
-  if not state.app or not state.app.mainwin:
-    return
-  mw = state.app.mainwin
-  mw._tree_user_set = True
-  sizes = mw._tree_splitter.sizes()
-  if len(sizes) >= 2:
-    mw._tree_target_tw = sizes[0]
-    if state.ui_state:
+  if state.ui_state:
+    sizes = state.app.mainwin._tree_splitter.sizes()
+    if len(sizes) >= 2:
       state.ui_state.treeview_width = sizes[0]
 
 _DEFAULT_TITLEBAR_FORMAT = (
@@ -272,12 +267,6 @@ _DEFAULT_TITLEBAR_FORMAT = (
   "sorted('%s (%s)' % (c.network_key or c.network or c.hostname, c.conn.nickname) "
   "for c in state.clients if c.connected)) "
   "if any(c.connected for c in state.clients) else ''"
-  '")}'
-  '{eval("'
-  " ' - ' + (_v.get('network_label','') + '/' if _v.get('network_label') else '')"
-  " + _v['channel']"
-  " + (': ' + _v['topic'] if _v.get('topic') else '')"
-  " if _v.get('channel') else ''"
   '")}'
 )
 
@@ -296,15 +285,9 @@ def update_main_title():
     variables = _window_context_vars(widget)
   else:
     variables = _window_context_vars(type('_Dummy', (), {'client': None})())
-  # Strip mIRC formatting codes from topic for titlebar display
-  import re
-  raw_topic = variables.get('topic', '')
-  variables['topic'] = re.sub(
-      r'[\x02\x03\x0F\x16\x1D\x1F]|\x03\d{0,2}(?:,\d{0,2})?', '', raw_topic) if raw_topic else ''
   variables.update(state._variables)
-  # Pass variables dict into eval namespace so eval can access topic safely
   title = _expand_vars(fmt, variables, allow_eval=True,
-                       eval_ns={'state': state, '_v': variables})
+                       eval_ns={'state': state})
   state.app.mainwin.setWindowTitle(title)
 
 def _refresh_window_titles():
@@ -462,7 +445,7 @@ def _close_window(widget, force=False):
   elif widget.type == 'server':
     has_children = bool(client.channels or client.queries)
     if not force and (conn or has_children):
-      label = client.network_key or client.network or getattr(client, 'hostname', '') or 'server'
+      label = client.network_key or client.network or client.hostname or 'server'
       if conn and has_children:
         msg = 'Disconnect from %s and close all its windows?' % label
       elif conn:
@@ -612,26 +595,11 @@ def makeapp(args):
   content = app.mainwin.workspace
 
   app.mainwin.network_tree = NetworkTree()
-
-  class _TreeSplitter(QSplitter):
-    """QSplitter that re-applies saved tree width on resize until user drags."""
-    def resizeEvent(self, event):
-      super().resizeEvent(event)
-      mw = state.app.mainwin if state.app else None
-      if mw and not mw._tree_user_set:
-        total = self.width()
-        tw = mw._tree_target_tw
-        if total > tw:
-          self.blockSignals(True)
-          self.setSizes([tw, total - tw])
-          self.blockSignals(False)
-
-  app.mainwin._tree_splitter = _TreeSplitter()
+  app.mainwin._tree_splitter = QSplitter()
   app.mainwin._tree_splitter.addWidget(app.mainwin.network_tree)
   app.mainwin._tree_splitter.addWidget(content)
-  app.mainwin._tree_target_tw = state.ui_state.treeview_width if state.ui_state else 180
-  app.mainwin._tree_user_set = False
-  app.mainwin._tree_splitter.setSizes([app.mainwin._tree_target_tw, 600])
+  tw = state.ui_state.treeview_width if state.ui_state else 180
+  app.mainwin._tree_splitter.setSizes([tw, 600])
   app.mainwin._tree_splitter.splitterMoved.connect(_on_treeview_splitter_moved)
   app.mainwin.setCentralWidget(app.mainwin._tree_splitter)
   _refresh_navigation(app.mainwin)
@@ -746,24 +714,21 @@ def makeapp(args):
     else:
       if app.mainwin._toolbar:
         app.mainwin._toolbar.hide()
-    state.config.save()
   _a_toolbar.triggered.connect(_toggle_toolbar)
   _ui['menu.view.toolbar'] = _a_toolbar
   _desc['menu.view.toolbar'] = _d('View', 'Toolbar')
 
   mnuview.addSeparator()
 
-  # Navigation submenu: Tabs Bar / Treeview / Both
-  _nav_menu = mnuview.addMenu('&Navigation')
-  _nav_group = QActionGroup(_nav_menu)
+  # Navigation mode: Treeview / Tabs Bar / Both
+  _nav_group = QActionGroup(mnuview)
   _nav_group.setExclusive(True)
   _nav_items = [
-      ('tabs', 'Tabs &Bar', 'menu.view.nav.tabs'),
       ('tree', '&Treeview', 'menu.view.nav.tree'),
-      ('both', '&Both', 'menu.view.nav.both'),
+      ('tabs', 'Tabs &Bar', 'menu.view.nav.tabs'),
   ]
   for _nav_val, _nav_label, _nav_key in _nav_items:
-    _a = _nav_menu.addAction(_nav_label)
+    _a = mnuview.addAction(_nav_label)
     _a.setCheckable(True)
     _a.setChecked(state.config.navigation == _nav_val)
     def _set_nav(checked, nav=_nav_val):
@@ -774,11 +739,10 @@ def makeapp(args):
         state.config.treeview = state.config.show_tree
         state.config._data['navigation'] = nav
         _refresh_navigation()
-        state.config.save()
     _a.triggered.connect(_set_nav)
     _nav_group.addAction(_a)
     _ui[_nav_key] = _a
-    _desc[_nav_key] = _d('View', 'Navigation', _nav_label)
+    _desc[_nav_key] = _d('View', _nav_label)
 
   # Window menu
   mnuwindow = app.mainwin.menubar.addMenu('&Window')
@@ -1067,43 +1031,7 @@ _STUB_TEMPLATES = {
 # Full default content for --init and "Restore Defaults".
 _DEFAULT_TEMPLATES = {
     'config':  ('# qtpyrc configuration\n'
-                '# See config.example.yaml for all available options.\n'
-                '\n'
-                '# Files\n'
-                'popups_file: popups.ini\n'
-                'variables_file: variables.ini\n'
-                'toolbar_file: toolbar.ini\n'
-                'show_toolbar: true\n'
-                '\n'
-                '# Identity (set these before connecting)\n'
-                'nick: qtpyrc_user\n'
-                'user: qtpyrc\n'
-                'realname: qtpyrc user\n'
-                '\n'
-                '# Display\n'
-                'view_mode: tabbed\n'
-                'navigation: tabs\n'
-                'timestamps:\n'
-                '  display: HH:mm\n'
-                '\n'
-                '# Window title format. Uses {variables} and {eval("...")} expressions.\n'
-                '# Available variables: {me}, {network_key}, {network_label}, {channel}, {topic}\n'
-                '# Use _v dict in eval to safely reference variables (e.g. _v["topic"]).\n'
-                '# Leave blank or remove for the default format.\n'
-                'titlebar_format: >-\n'
-                "  qtpyrc{eval(\"' - ' + ', '.join(sorted('%s (%s)' % (c.network_key or c.network or c.hostname, c.conn.nickname) for c in state.clients if c.connected)) if any(c.connected for c in state.clients) else ''\")}{eval(\" ' - ' + (_v.get('network_label','') + '/' if _v.get('network_label') else '') + _v['channel'] + (': ' + _v['topic'] if _v.get('topic') else '') if _v.get('channel') else ''\")}\n"
-                '\n'
-                '# Networks\n'
-                '# networks:\n'
-                '#   libera:\n'
-                '#     server:\n'
-                '#       host: irc.libera.chat\n'
-                '#       port: 6697\n'
-                '#       tls: true\n'
-                '#     auto_connect: true\n'
-                '#     auto_join:\n'
-                "#       '#channel':\n"
-                ),
+                '# See config.example.yaml for all available options.\n'),
     'startup': ('; qtpyrc startup commands\n'
                 '; Each line is a /command or text. Lines starting with ; are comments.\n'),
     'popups':  ('; popups.ini - Right-click popup menus (mIRC-compatible syntax)\n'
