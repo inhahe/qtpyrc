@@ -68,6 +68,10 @@ class GeneralPage(QWidget):
         self.show_mode_prefix.setToolTip("Show mode prefixes (@, +, %, etc.) before nicks in messages, events, and the nick list")
         layout.addRow("Mode prefixes:", self.show_mode_prefix)
 
+        self.auto_copy_selection = QCheckBox()
+        self.auto_copy_selection.setToolTip("Auto-copy text to clipboard when mouse selection is released (mIRC-style)")
+        layout.addRow("Auto-copy selection:", self.auto_copy_selection)
+
         _separator(layout, 'History')
         self.backscroll_limit = QSpinBox()
         self.backscroll_limit.setRange(0, 1000000)
@@ -134,6 +138,7 @@ class GeneralPage(QWidget):
         self.close_on_kick.setChecked(bool(data.get('close_on_kick', False)))
         self.close_on_disconnect.setChecked(bool(data.get('close_on_disconnect', False)))
         self.show_mode_prefix.setChecked(bool(data.get('show_mode_prefix', False)))
+        self.auto_copy_selection.setChecked(bool(data.get('auto_copy_selection', False)))
         self.backscroll_limit.setValue(int(data.get('backscroll_limit', 10000)))
         hr = data.get('history_replay') or {}
         if isinstance(hr, int):
@@ -171,6 +176,7 @@ class GeneralPage(QWidget):
         data['close_on_kick'] = self.close_on_kick.isChecked()
         data['close_on_disconnect'] = self.close_on_disconnect.isChecked()
         data['show_mode_prefix'] = self.show_mode_prefix.isChecked()
+        data['auto_copy_selection'] = self.auto_copy_selection.isChecked()
         data['backscroll_limit'] = self.backscroll_limit.value()
         from ruamel.yaml.comments import CommentedMap
         hr = data.get('history_replay')

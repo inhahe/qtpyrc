@@ -203,6 +203,14 @@ class ChatOutput(QTextEdit):
         QDesktopServices.openUrl(QUrl(anchor))
         return
     super().mouseReleaseEvent(event)
+    # Auto-copy on select release (mIRC-style)
+    if (event.button() == Qt.MouseButton.LeftButton
+        and state.config.auto_copy_selection
+        and self.textCursor().hasSelection()):
+      self.copy()
+      c = self.textCursor()
+      c.clearSelection()
+      self.setTextCursor(c)
 
   def contextMenuEvent(self, event):
     import popups

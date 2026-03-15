@@ -1112,6 +1112,124 @@ class Commands:
     else:
       window.redmessage('[No window: %s]' % target)
 
+  def help(window, text):
+    """Show help for a command.  /help [command]
+    Without arguments, lists all commands."""
+    import os, re
+    cmd = text.strip().lstrip(state.config.cmdprefix).lower()
+    ref_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'docs', 'reference.md')
+    try:
+      with open(ref_path, 'r', encoding='utf-8') as f:
+        ref = f.read()
+    except FileNotFoundError:
+      window.redmessage('[reference.md not found]')
+      return
+
+    if not cmd:
+      # List all commands from table rows
+      cmds = []
+      for m in re.finditer(r'^\| `(/\w+)`', ref, re.MULTILINE):
+        c = m.group(1)
+        if c not in cmds:
+          cmds.append(c)
+      window.addline('[Commands: %s]' % ', '.join(cmds))
+      window.addline('[Topics: events, variables, popups, plugin, objects, cli]')
+      window.addline('[Use /help <command> or /help <topic> for details]')
+      return
+
+    # Check for topic-based help — show compact lists
+    if cmd.startswith(('events ', 'event ')):
+      # /help events <name> — show details for a specific event
+      event_name = cmd.split(None, 1)[1].strip()
+      _show_event_help(window, ref, event_name, re)
+      return
+    if cmd in ('events', 'event', 'on'):
+      # Extract event names from the Event Names table
+      events = re.findall(r'^\| `(\w+)` \|', ref, re.MULTILINE)
+      if events:
+        window.addline('[/on events: %s]' % ', '.join(events))
+        window.addline('[Use /help events <name> to see variables for an event]')
+      return
+    if cmd.startswith(('variables ', 'vars ', 'exec ')):
+      # /help variables <name> — show details for a specific variable/function
+      var_name = cmd.split(None, 1)[1].strip()
+      exec_section = ref[ref.index('## /exec Context'):] if '## /exec Context' in ref else ''
+      # Search in both Objects and Functions tables
+      var_m = re.search(
+          r'^\| `%s` \|([^|]*)\|([^|]*)\|' % re.escape(var_name), exec_section, re.MULTILINE)
+      if var_m:
+        col1 = var_m.group(1).strip().strip('`').strip()
+        col2 = var_m.group(2).strip()
+        if col1 and col2:
+          window.addline('  %s  %s — %s' % (var_name, col1, col2))
+        elif col2:
+          window.addline('  %s — %s' % (var_name, col2))
+        else:
+          window.addline('  %s — %s' % (var_name, col1))
+      else:
+        # Try 2-column table (Objects section)
+        var_m2 = re.search(
+            r'^\| `%s` \|([^|]*)\|' % re.escape(var_name), exec_section, re.MULTILINE)
+        if var_m2:
+          window.addline('  %s — %s' % (var_name, var_m2.group(1).strip()))
+        else:
+          window.redmessage('[Unknown variable: %s]' % var_name)
+      return
+    if cmd in ('variables', 'vars', 'exec'):
+      # Extract variable names from the /exec Context tables
+      exec_section = ref[ref.index('## /exec Context'):ref.index('## Popup')] if '## /exec Context' in ref else ''
+      var_names = re.findall(r'^\| `(\w+)`', exec_section, re.MULTILINE)
+      if var_names:
+        window.addline('[/exec variables: %s]' % ', '.join(var_names))
+        window.addline('[Use /help variables <name> for details]')
+      return
+    if cmd in ('popups', 'popup'):
+      window.addline('[Popup sections: [nicklist], [channel], [status], [query], [tab]]')
+      window.addline('[Syntax: Menu Item:/command   .Child:/command   -  (separator)]')
+      window.addline('[Variables: $nick, $me, $chan, $network, $server, $$1, $?="prompt"]')
+      window.addline('[See Help > Reference Manual for full popup syntax]')
+      return
+    if cmd in ('plugin', 'plugins', 'api'):
+      # Extract method names from the plugin.irc tables
+      methods = re.findall(r'^\| `(\w+)` \|', ref[ref.index('## plugin.irc'):] if '## plugin.irc' in ref else '', re.MULTILINE)
+      if methods:
+        window.addline('[plugin.irc methods: %s]' % ', '.join(methods))
+        window.addline('[Use irc.method(args) in plugins and /exec]')
+      return
+    if cmd in ('objects', 'object'):
+      window.addline('[Objects: conn (IRCClient), User, Channel, Query, Client, Network]')
+      window.addline('[See Help > Reference Manual for attributes and methods]')
+      return
+    if cmd in ('cli', 'commandline'):
+      # Extract CLI flags from the table
+      flags = re.findall(r'^\| `([^`]+)`', ref[ref.index('## Command Line'):ref.index('## Slash')] if '## Command Line' in ref else '', re.MULTILINE)
+      if flags:
+        window.addline('[CLI options: %s]' % ', '.join(flags))
+      return
+
+    # Find table rows for this command
+    lines_found = []
+    for m in re.finditer(
+        r'^\| `/%s`\s*\|([^|]*)\|([^|]*)\|' % re.escape(cmd), ref, re.MULTILINE):
+      syntax = m.group(1).strip().strip('`').strip()
+      desc = m.group(2).strip()
+      lines_found.append((syntax, desc))
+
+    if not lines_found:
+      window.redmessage('[No help for: /%s]' % cmd)
+      return
+
+    for syntax, desc in lines_found:
+      window.addline('  %s — %s' % (syntax, desc))
+
+    # Check for a detailed section (## /cmd or ### heading that mentions /cmd)
+    section_pat = re.compile(
+        r'^##+ .*/%s\b.*$' % re.escape(cmd), re.MULTILINE | re.IGNORECASE)
+    m = section_pat.search(ref)
+    if m:
+      _show_help_section(window, ref, m.group(0), start_match=m)
+
   def alert(window, text):
     """Show a popup message box.  /alert [-t "title"] "message" """
     title = 'qtpyrc'
@@ -1556,6 +1674,61 @@ def _split_quoted(s):
       return s[1:end], s[end + 1:].lstrip()
   parts = s.split(None, 1)
   return (parts[0] if parts else '', parts[1] if len(parts) > 1 else '')
+
+
+def _show_help_section(window, ref, heading, start_match=None):
+  """Display a section from reference.md in the window."""
+  import re as _re
+  if start_match:
+    m = start_match
+  else:
+    m = _re.search(_re.escape(heading), ref, _re.MULTILINE)
+  if not m:
+    return
+  level = m.group(0).count('#', 0, m.group(0).index(' '))
+  rest = ref[m.end():]
+  end_pat = _re.compile(r'^#{1,%d} [^#]' % level, _re.MULTILINE)
+  end_m = end_pat.search(rest)
+  section = rest[:end_m.start()] if end_m else rest
+  section_lines = []
+  in_code = False
+  for line in section.splitlines():
+    if line.strip().startswith('```'):
+      in_code = not in_code
+      continue
+    clean = line.rstrip()
+    clean = _re.sub(r'\*\*(.+?)\*\*', r'\1', clean)
+    clean = _re.sub(r'`(.+?)`', r'\1', clean)
+    if clean.strip():
+      section_lines.append('  ' + clean)
+  if len(section_lines) > 40:
+    section_lines = section_lines[:40]
+    truncated = True
+  else:
+    truncated = False
+  for line in section_lines:
+    window.addline(line)
+  if truncated:
+    window.addline('  ... (Help > Reference Manual for full details)')
+
+
+def _show_event_help(window, ref, event_name, re):
+  """Show help for a specific /on event."""
+  event_m = re.search(
+      r'^\| `%s` \|([^|]*)\|([^|]*)\|' % re.escape(event_name), ref, re.MULTILINE)
+  if not event_m:
+    window.redmessage('[Unknown event: %s]' % event_name)
+    return
+  fires = event_m.group(1).strip()
+  match_text = event_m.group(2).strip()
+  window.addline('  %s — fires: %s, matches: %s' % (event_name, fires, match_text))
+  var_m = re.search(
+      r'^\| `%s` \|([^|]*)\|' % re.escape(event_name),
+      ref[ref.index('{Variables} by'):] if '{Variables} by' in ref else '',
+      re.MULTILINE)
+  if var_m:
+    window.addline('  variables: %s' % var_m.group(1).strip())
+  window.addline('  (all events also have {network} and {me})')
 
 
 def _find_client(name):
