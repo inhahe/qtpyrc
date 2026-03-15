@@ -71,8 +71,8 @@ class TabbedWorkspace(QWidget):
     self._activating = False
     self._relayout_timer = QTimer(self)
     self._relayout_timer.setSingleShot(True)
-    self._relayout_timer.setInterval(0)
     self._relayout_timer.timeout.connect(self._do_relayout)
+    self._relayout_delay_ms = 200
 
     layout = QVBoxLayout(self)
     layout.setContentsMargins(0, 0, 0, 0)
@@ -404,10 +404,10 @@ class TabbedWorkspace(QWidget):
   # --- Row layout ---
 
   def _relayout(self):
-    """Schedule a relayout on the next event loop iteration.
-    Multiple calls before the event loop runs are collapsed into one."""
-    if not self._relayout_timer.isActive():
-      self._relayout_timer.start()
+    """Schedule a relayout after a short delay. Each call resets the timer,
+    so rapid changes (batch tab adds) result in one rebuild at the end."""
+    self._relayout_timer.setInterval(self._relayout_delay_ms)
+    self._relayout_timer.start()
 
   def _do_relayout(self):
     # Clear existing rows (but keep tab labels alive)
