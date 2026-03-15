@@ -344,6 +344,14 @@ def _on_subwindow_activated(subwindow):
   widget = subwindow.widget()
   if not widget:
     return
+  # Run deferred history replay on first activation
+  replay_info = getattr(widget, '_deferred_replay', None)
+  if replay_info:
+    del widget._deferred_replay
+    from irc_client import _history_replay
+    network, chname, chan = replay_info
+    _history_replay(widget, network, chname, chan_obj=chan)
+    widget.add_separator(' End of saved history ')
   # Clear activity highlight on the now-active window
   if hasattr(widget, 'clear_activity'):
     widget.clear_activity()
