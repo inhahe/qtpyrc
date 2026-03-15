@@ -902,12 +902,46 @@ class AppConfig:
     self.save()
 
   def save(self):
+    _atomic_yaml_save(self._yaml, self._data, self.path)
+
+
+def _atomic_yaml_save(yaml, data, path):
+  """Write YAML data to a file atomically (write to temp, then rename).
+  Prevents corruption from interrupted writes."""
+  import tempfile
+  try:
+    directory = os.path.dirname(path)
+    with tempfile.NamedTemporaryFile('w', suffix='.tmp', prefix='.qtpyrc_',
+                                     dir=directory, delete=False,
+                                     encoding='utf-8') as tmp:
+      yaml.dump(data, tmp)
+      tmp_path = tmp.name
+    # Atomic rename (on Windows, need to remove target first)
+    if os.path.exists(path):
+      backup = path + '.bak'
+      try:
+        if os.path.exists(backup):
+          os.remove(backup)
+        os.rename(path, backup)
+      except OSError:
+        pass
+    os.rename(tmp_path, path)
+    # Remove backup on success
     try:
-      with open(self.path, 'w') as f:
-        self._yaml.dump(self._data, f)
-    except Exception:
-      state.dbg(state.LOG_ERROR, 'Failed to save config to', self.path)
-      traceback.print_exc()
+      backup = path + '.bak'
+      if os.path.exists(backup):
+        os.remove(backup)
+    except OSError:
+      pass
+  except Exception:
+    traceback.print_exc()
+    # Try to restore from backup if rename failed
+    try:
+      backup = path + '.bak'
+      if not os.path.exists(path) and os.path.exists(backup):
+        os.rename(backup, path)
+    except OSError:
+      pass
 
 
 # ---------------------------------------------------------------------------
@@ -1074,11 +1108,7 @@ class UIState:
     self._data['input_history'] = list(history)
 
   def save(self):
-    try:
-      with open(self.path, 'w') as f:
-        self._yaml.dump(self._data, f)
-    except Exception:
-      traceback.print_exc()
+    _atomic_yaml_save(self._yaml, self._data, self.path)
 
 
 def _update_text_formats(cfg):
