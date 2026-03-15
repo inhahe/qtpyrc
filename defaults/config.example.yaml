@@ -367,7 +367,7 @@ history_replay:
 
 logging:
   dir: logs                # directory for log files (relative to config file)
-  use_subdirs: false       # create per-network subdirectories
+  use_subdirs: false       # create per-network and per-channel subdirectories
   separate_by_month: false # create per-month log files
   debug: false             # enable debug-level logging
   timestamp: "YYYY-MM-DD HH:mm:SS"  # timestamp format in log files
