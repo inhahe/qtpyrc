@@ -1,0 +1,403 @@
+
+
+
+check context menus
+Claude for a list of all /commands supported
+and a list of all parameters supported by /on
+tell claude to make a document about all the variables in the irc object or IrcProxy (seem to be more or less the same thing, maybe they should be named the same)
+test using a command prefix other than / for all the commands or look at how input is evaluated
+ask Claude for a list of all files used in the project.
+test font color, font face and size picker 
+  if the 2D color range updates too slowly, ask claude to make the widget in C++ if that's possible in PySide6.
+see if all options are available in the configuration dialogs.
+make an example yaml config explaining variables and overrides
+test persistance of widget slider locations
+test background and foreground colors
+test network server cycling
+include information on burst vs sustained speed for various networks' flood protection in the example yaml. there's such information in the irc bouncer yaml.
+test the treeview
+test window title highlighting
+test lots of things
+test ident server - port 113 may be blocked by ISP - include notes on that that are included in the irc bouncer yaml.
+test example plugin Claude said he made
+test /exec
+test /on
+test storing channel keys into the yaml when you /join with one
+test that all configuration options save to the yaml
+ask how i can design the configuration dialogs in pyside6-designer
+think of other triggers and other $variables we might want to support in /on than what we already have. and other /commands. once we get the lists to see.
+test notice
+test if actions show up well
+and notices
+test if ctrl+f opens the search.
+test: make esc turn the window's status to "skipped" 
+test ctrl+c quits the program. 
+what's the difference between hh and HH? hh is 12-hour? what are DOW and MON?
+what's the difference between ap and AP? just whether it shows it in caps or not?
+test reload history into channels
+test that /connect'ing to a server does the things it's supposed to do for that nework if the network name is the same as 'name' in the network config, like Libera.Chat
+test red x in tabs that are disconnected
+test that changing configuration options applies them right away. 
+test 'save configuration as' confirms before overwrite if file exists
+test future changes are saved to the new configuration file
+test notifications, including /notify 
+test highlight/notify on regex patterns
+test /on features
+test /notify on a server that supports MONITOR
+then go to a server without it and test /notify. asyncirc.py has "Make a mutable copy so ISUPPORT can update per-connection"
+test popups.ini
+test launching external text editors
+test triviabot
+test list and play sounds
+test tab completion
+test MDI mode - requires restart
+test irc color picker
+
+why isn't it showing that i joined the channel when i join?
+- i think that's a bug in Wicket, since it worked in mIRC.
+
+implement ctrl+up arrow puts the previously sent message back into the input field.
+
+#life couldn't joint channel need correct key. could be a wicket issue.
+
+add notes in  config.example.yaml  in "irc bouncer" about ident not working to this config.example.yaml
+
+I'm sure there's a better way than the current way of using signal to catch ctrl+c in the terminal and quit the program, because it used to display a traceback when I did that, just not quit. So if we just catch that exception, we can quit. Then claude made some changes, using signal, because i wanted it to quit with ctrl+c, and now it doesn't show any traceback, so we know he did something that affected that, which means that we do actually have access to change that point in code/flow. some of the versions under .\old\ show the KeyboardInterrupt. the signal method takes a long time to respond, i think the keyboard interrupt i was seeing before was much faster, but i'm not sure, we should check with a version in junk\old
+
+the server window still said "not connected" in the tab for a few seconds after it already joined the channels.
+
+you said normal patterns support wildcards, is there a way to escape the wildcards to make them literal? i guess channels and nicks don't need it because * is invalid in a channel or nick name, but do messages currently support wildcards? 
+-claude suggests the user just use a regex with an escape pattern when they want a literal wildcard. i'm not sure how much i like that, may change in the future. 
+
+if the server window still doesn't scroll all the way to the bottom, could we just call a function to scroll to the bottom every time a new line is added? would that solve it?  (it wouldn't allow us to remain scrolled up as new text is coming in though.)
+ - the scroll issue seems to be fixed. 
+
+this is a big feature, but should we allow other scripting languages? i once used an irc client that allows scripting from any scripting language registered on the system, so i guess there's some easy way to accommodate any registered scripting language, but i have no idea how that works. but also, some popular scripting languages like lua or javascript might not be registered on the system, so we'd have to code support for them specifically if we want to use them? 
+-claude says registered languages are few and and obsolete thing (and also windows-specific), and any way of embedding a language would be too much work to be worth it. and people who use qtpyrc probably already know python.
+
+
+the tab completion popup didn't work. it popped up the relevant nicks, but none were selected/highlighted, arrow keys didn't work, esc didn't get rid of it, and then the program quit with no exception raised. -done? 
+
+keeping scrolled all the way down in irc windows isn't fixed still. we've tried multiple times to fix it, so it's a hard bug. i also tried to fix it myself when i was developing it before the existence of AI. i wish qt had a decent function that solves this. is the use case too niche for them to provide it? i don't think so, it should apply to any chat client. i should probably submit an issue. :p
+
+ The classic problem: after inserting text, the layout may not have updated yet, so vs.maximum() might still reflect the
+  old content height. Let me check if there's a _updateBottomAlign that might be related:
+
+^ fixed, apparently.
+^ i think the problem might still happen sometimes. 
+
+ctrl-f4 won't close the configuration window  -done. check.
+
+give a list of {functions} and /commands to be available as members in the irc singleton for plugins.
+
+check font/colors->tab bar 
+
+
+● Here's the full inventory:
+
+  {functions} (expansion system)
+
+  ┌───────────────────┬────────────────────────────────────┐
+  │     Function      │            Description             │
+  ├───────────────────┼────────────────────────────────────┤
+  │ {eval("expr")}    │ Evaluate Python expression         │
+  ├───────────────────┼────────────────────────────────────┤
+  │ {stdin("prompt")} │ Read line from terminal (blocking) │
+  ├───────────────────┼────────────────────────────────────┤
+  │ {input("prompt")} │ GUI input dialog                   │
+  └───────────────────┴────────────────────────────────────┘
+
+  /commands (Commands class)
+
+  Connection: join, part, hop, connect, server, nick, quit, away, query
+
+  Messaging: say, msg, amsg, raw/quote, ctcp
+
+  User/Channel ops: whois, invite, kick, ban, kban, op, deop, halfop, dehalfop, voice, devoice, quiet, unquiet
+
+  Lists: ignore, aop, highlight, notify
+
+  Scripting: exec_, timer, timers, on, hooks, load, unload, scripts, script, play
+
+  Variables/Config: set, var, unset, config, alias
+
+  Window: close, find, title, tile, cascade, tabbed, mdi, newserver
+
+  Output: echo, log, alert, stdout, stderr
+
+  Settings/UI: settings, toolbar, icons, popups, sounds, urls/urlcatcher, save, reload
+
+  /exec context functions
+
+  Messaging: say(), msg(), notice(), raw()
+  Channel: join(), part(), kick(), mode(), channel()
+  User: nick(), me(), nicks(), user()
+  Window: echo(), error(), history()
+  Utility: irclower(), irceq(), network(), networks()
+  Commands: docommand(), timer(), on()
+  Input: inputbox(), stdin()
+
+  For the irc singleton, the /exec context functions are probably the best starting point since they're already designed
+  as callable APIs with proper parameters. The /commands would need the string-parsing refactored into the actual logic
+  vs. argument parsing.
+
+Go through this list and tell me which capabilities are already available to plugins through the irc singleton and the various qt objects passed to the plugins' __init__, what the full x.y.z path is to each such function (e.g., irc.irclower), and also which commands/functions aren't currently supported in plugins. 
+
+
+ Here's the full breakdown:
+
+  {functions} (expansion system)
+
+  ┌───────────────────┬──────────────┬────────────────────────────────────────────────────────────────────────────────┐
+  │     Function      │   Plugin     │                                     Notes                                      │
+  │                   │    access    │                                                                                │
+  ├───────────────────┼──────────────┼────────────────────────────────────────────────────────────────────────────────┤
+  │ {eval("expr")}    │ No           │ String expansion system, not meaningful for plugins (they have Python          │
+  │                   │              │ directly)                                                                      │
+  ├───────────────────┼──────────────┼────────────────────────────────────────────────────────────────────────────────┤
+  │ {stdin("prompt")} │ No           │ Plugins can call input() directly                                              │
+  ├───────────────────┼──────────────┼────────────────────────────────────────────────────────────────────────────────┤
+  │ {input("prompt")} │ No           │ Plugins can use QInputDialog directly                                          │
+  └───────────────────┴──────────────┴────────────────────────────────────────────────────────────────────────────────┘
+
+  These don't really need to be on irc — plugins have full Python and Qt access.
+
+  /commands — Available via irc.*
+
+  ┌────────────┬───────────────┬────────────────────────────────────────────┐
+  │  Command   │ irc singleton │                    Path                    │
+  ├────────────┼───────────────┼────────────────────────────────────────────┤
+  │ join       │      Yes      │ irc.join(conn, channel, key=None)          │
+  ├────────────┼───────────────┼────────────────────────────────────────────┤
+  │ part       │      Yes      │ irc.part(conn, channel, reason=None)       │
+  ├────────────┼───────────────┼────────────────────────────────────────────┤
+  │ nick (get) │      Yes      │ irc.nick(conn)                             │
+  ├────────────┼───────────────┼────────────────────────────────────────────┤
+  │ msg        │      Yes      │ irc.msg(conn, target, message)             │
+  ├────────────┼───────────────┼────────────────────────────────────────────┤
+  │ notice     │      Yes      │ irc.notice(conn, target, message)          │
+  ├────────────┼───────────────┼────────────────────────────────────────────┤
+  │ raw/quote  │      Yes      │ irc.sendLine(conn, line)                   │
+  ├────────────┼───────────────┼────────────────────────────────────────────┤
+  │ kick       │      Yes      │ irc.kick(conn, channel, nick, reason=None) │
+  ├────────────┼───────────────┼────────────────────────────────────────────┤
+  │ mode       │      Yes      │ irc.mode(conn, channel, modestring)        │
+  ├────────────┼───────────────┼────────────────────────────────────────────┤
+  │ docommand  │      Yes      │ irc.docommand(window, cmd, text='')        │
+  └────────────┴───────────────┴────────────────────────────────────────────┘
+
+  /commands — Available via object traversal
+
+  ┌─────────────┬─────┬─────────────────────────────────────┐
+  │   Command   │ How │                Path                 │
+  ├─────────────┼─────┼─────────────────────────────────────┤
+  │ config      │ Yes │ irc.config (the AppConfig instance) │
+  ├─────────────┼─────┼─────────────────────────────────────┤
+  │ networks    │ Yes │ irc.networks (dict of all networks) │
+  ├─────────────┼─────┼─────────────────────────────────────┤
+  │ network_key │ Yes │ irc.network_key(conn)               │
+  └─────────────┴─────┴─────────────────────────────────────┘
+
+  /commands — Not on irc singleton
+
+  ┌───────────────────────────────────────────────────────┬───────────────────────────────────────────────────────┐
+  │                        Command                        │                      Workaround                       │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ hop                                                   │ irc.docommand(win, 'hop')                             │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ connect                                               │ irc.docommand(win, 'connect', network)                │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ server                                                │ irc.docommand(win, 'server', 'host port')             │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ nick (set)                                            │ irc.sendLine(conn, 'NICK newnick')                    │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ quit                                                  │ irc.sendLine(conn, 'QUIT :message')                   │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ away                                                  │ irc.sendLine(conn, 'AWAY :message')                   │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ query                                                 │ irc.docommand(win, 'query', 'nick')                   │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ say                                                   │ irc.msg(conn, target, message) (same thing)           │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ amsg                                                  │ irc.docommand(win, 'amsg', message)                   │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ ctcp                                                  │ irc.sendLine(conn, 'PRIVMSG nick :\x01TYPE data\x01') │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ whois                                                 │ irc.sendLine(conn, 'WHOIS nick')                      │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ invite                                                │ irc.sendLine(conn, 'INVITE nick #channel')            │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ ban/kban                                              │ irc.docommand(win, 'ban', mask)                       │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ op/deop/voice/etc                                     │ irc.mode(conn, channel, '+o nick')                    │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ quiet/unquiet                                         │ irc.mode(conn, channel, '+q nick')                    │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ ignore/aop/highlight/notify                           │ irc.docommand(win, 'ignore', args)                    │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ exec_                                                 │ N/A (plugins are code)                                │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ timer                                                 │ Yes — irc.timer(name, reps, secs, command)            │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ on                                                    │ Yes — irc.on(event, name, pattern, command, ...)      │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ load/unload/scripts/script/play                       │ irc.docommand(win, 'load', name)                      │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ set/var/unset                                         │ irc.docommand(win, 'set', 'name value')               │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ alias                                                 │ irc.docommand(win, 'alias', 'name command')           │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ close                                                 │ irc.docommand(win, 'close')                           │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ find                                                  │ irc.docommand(win, 'find', text)                      │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ title                                                 │ irc.docommand(win, 'title', text)                     │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ tile/cascade/tabbed/mdi/newserver                     │ irc.docommand(win, 'tile') etc.                       │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ echo                                                  │ irc.docommand(win, 'echo', text) or win.addline(text) │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ log/alert/stdout/stderr                               │ irc.docommand(win, 'log', text) etc.                  │
+  ├───────────────────────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ settings/toolbar/icons/popups/sounds/urls/save/reload │ irc.docommand(win, 'settings') etc.                   │
+  └───────────────────────────────────────────────────────┴───────────────────────────────────────────────────────┘
+
+  /exec context — Available via irc.*
+
+  ┌──────────────┬────────────────────────────────────────┐
+  │   Function   │                irc path                │
+  ├──────────────┼────────────────────────────────────────┤
+  │ msg()        │ irc.msg(conn, target, msg)             │
+  ├──────────────┼────────────────────────────────────────┤
+  │ notice()     │ irc.notice(conn, target, msg)          │
+  ├──────────────┼────────────────────────────────────────┤
+  │ raw()        │ irc.sendLine(conn, line)               │
+  ├──────────────┼────────────────────────────────────────┤
+  │ join()       │ irc.join(conn, channel, key)           │
+  ├──────────────┼────────────────────────────────────────┤
+  │ part()       │ irc.part(conn, channel, reason)        │
+  ├──────────────┼────────────────────────────────────────┤
+  │ kick()       │ irc.kick(conn, channel, nick, reason)  │
+  ├──────────────┼────────────────────────────────────────┤
+  │ mode()       │ irc.mode(conn, channel, modestring)    │
+  ├──────────────┼────────────────────────────────────────┤
+  │ nick() (get) │ irc.nick(conn)                         │
+  ├──────────────┼────────────────────────────────────────┤
+  │ user()       │ irc.get_user(conn, nick)               │
+  ├──────────────┼────────────────────────────────────────┤
+  │ users        │ irc.users(conn)                        │
+  ├──────────────┼────────────────────────────────────────┤
+  │ irclower()   │ irc.irclower(conn, text)               │
+  ├──────────────┼────────────────────────────────────────┤
+  │ irceq()      │ irc.irceq(conn, a, b)                  │
+  ├──────────────┼────────────────────────────────────────┤
+  │ network()    │ irc.network_key(conn)                  │
+  ├──────────────┼────────────────────────────────────────┤
+  │ networks()   │ irc.networks                           │
+  ├──────────────┼────────────────────────────────────────┤
+  │ docommand()  │ irc.docommand(window, cmd, text)       │
+  ├──────────────┼────────────────────────────────────────┤
+  │ timer()      │ irc.timer(name, reps, secs, cmd)       │
+  ├──────────────┼────────────────────────────────────────┤
+  │ on()         │ irc.on(event, name, pattern, cmd, ...) │
+  ├──────────────┼────────────────────────────────────────┤
+  │ history()    │ irc.channel_history(conn, channel)     │
+  └──────────────┴────────────────────────────────────────┘
+
+  /exec context — Not on irc singleton
+
+  ┌────────────┬───────────────────────────────────────────────┐
+  │  Function  │                  Workaround                   │
+  ├────────────┼───────────────────────────────────────────────┤
+  │ say()      │ irc.msg(conn, target, msg)                    │
+  ├────────────┼───────────────────────────────────────────────┤
+  │ channel()  │ window.channel.name or window.remotenick      │
+  ├────────────┼───────────────────────────────────────────────┤
+  │ nicks()    │ set(conn.client.channels[irclower(ch)].nicks) │
+  ├────────────┼───────────────────────────────────────────────┤
+  │ me()       │ irc.nick(conn) (same thing)                   │
+  ├────────────┼───────────────────────────────────────────────┤
+  │ echo()     │ window.addline(text)                          │
+  ├────────────┼───────────────────────────────────────────────┤
+  │ error()    │ window.redmessage(text)                       │
+  ├────────────┼───────────────────────────────────────────────┤
+  │ inputbox() │ QInputDialog.getText(...) directly            │
+  ├────────────┼───────────────────────────────────────────────┤
+  │ stdin()    │ input() directly                              │
+  └────────────┴───────────────────────────────────────────────┘
+
+  The main gap: say(), echo(), error(), channel(), nicks() are window-relative conveniences. Plugins already get conn in
+  every callback, and can reach windows via irc.active_window or conn.client.channels[...].window, so these are all doable
+   — just more verbose.
+
+
+
+if we ever get more {functions}, consider adding a dummy /command that expands a string and throws away the return value.
+
+find a copy of triviabot somewhere, preferably the one the bot already refactored 
+
+ask claude how I could get people to know that I have this great IRC client repository. 
+
+use the syntax language class in cc2html.py to highlight, if that means using text color spans that were in the claude code window. 
+
+maybe we should be able to restore config.yaml?
+
+i also think that doing the same thing as --init should be an option in the dialog. it's okay if there's two different ways to do it. 
+
+also, there should be a button to create a new file with a stub for each default file like i think there is, but also a button to create the full default file from _DEFAULT_TEMPLATES.
+also, since there's apparenly also default templates for stub files, they should be stored only in _DEFAULT_TEMPLATES with the full defaults or in a similar variable in the same place. 
+
+should file dialog have an option to apply without saving? -done?
+
+yep, the program just stopped again with no error. 
+
+tabs bar wrapping too early. -done?
+
+whet i change the splitter value between channel text and nick list, it should automatically apply to all channels. -done?
+
+
+
+edit files dialog takes a while to close. is there any unnecessary stuff going on when it closes?
+save project before fixing this. 
+
+entering characters in the internal editor is slow. is there anything unnecessary going on there?
+
+it keeps saying the file has been modified outside the editor when i'm editing config.yaml. maybe it's because the bouncer was joining channels which was changing config.yaml's autojoins? does it 
+
+when i click to 'save as & reload' when the file has been modified by an external program, the default filename to save as is config.yaml.bak.*
+i think * needs to be removed
+when i try to save as config.yaml.bak, Windows' file save dialog says the filename is not valid. something must be being passed wrong to the file save dialog.
+-done?
+
+when it says the file has been modified outside the editor and i click reload, qtpyrc becomes not the active app on the desktop.
+when i click okay and the file has been modifoud outside the editor, there should be an option to cancel and go back to the edit window.
+-done?
+
+i changed tls to false in a server setting, and it's still trying to connect via tls every 30 seconds. i think it's not immediately applying it to the auto reconnect. is that ideal behavior? -done?
+
+the 'channels' page isn't really working right. sometimes it shows the channels in auto-join, sometimes it shows 'enable sasl,' 'mechanism', 'username' and 'password'. and when it shows all the channels from autojoin, i don't see any way to configure them. and i think 'channels' and 'autojoin' should be the same page. -done?
+
+the per-channel lists configuration isn't quite right. it says one per line, but the fields don't allow for very many lines. there's a lot of empty space above them, so they should just take up all that space. -done?
+
+not a lot of room for ignores, auto-ops, highlights and notify in the server-level settings. what can we do about that? -done?
+
+pass a ui launch command and a ui list function to plugins in the irc object. the ui list should return each name path and the description for that name path. just for convenience, let's also pass a hierarchical dictionary of dictionaries, etc., for the paths tree maybe? -done
+
+change persist_autojoins in my settings.
+
+i don't think it asked me about overwriting enough files when i picked the init option from the file dialog..
+
+unicode doesn't seem to be working right in display of topic change event. see the /topic of #sorry
+
+we currently have no way to constantly display a channel's topic.  maybe add " - {network}/{channel}:{topic}" to the default app title?
+" - {network}/{channel}:{topic}" should be outside of the eval. just append it to the result of eval instead of including it in the eval.
+
+
+whois and ping only work sometimes. 
+
+remove debug statements
+
+
+where is the default app title stored? i don't see it in the default config.yaml.
+
+is there any code that runs while sliding the divider between the channel text and the nick list that doesn't belong there, maybe from when you were trying to solve the problem with the nick list loading with a minimum size? because it responds really slowly while dragging.

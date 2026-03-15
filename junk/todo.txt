@@ -1,0 +1,88 @@
+scripts should be global, not loaded to one network or one channel, though there could be helper data to tell the script what channels or networks it should act on. 
+start text at the bottom of the window instead of the top (bottom-justify?) - done?
+use a better way of exposing all the irc functions to the scripting environment - done?
+sasl - support plain or external. - is this really necessary? i've never seen any network require external. claude agrees, it's very niche and not necessary. 
+make a configuration window with a tree view of the configuration pages, the configuration pages should be in a form that i can edit in pyside6-designer. networks and servers must be drop-down lists that we can add to, delete from, and individually edit with configuration windows. or maybe they should be added into and deleted from the configuration tree view by something the user does? whichever way you think is best. add the configuration window option to the menu up top under file -> settings. use the current yaml file to load/save configuration for all the configuration pages. - done?
+change autojoin to auto_join - done
+add burst lenience parameter to rate_limit? should we specify no more than X messages in Y time? - doing - actually, he says most server allow, say, 5 messages instantly, then rate control. so he's implementing that. done.
+allow network burst limit to override top level burst limit. should we allow server level too? - doing
+* i hope he implements the time checking on the messages efficiently. ask him to give a run-down of the algorithm he used. 
+networks and servers must be drop-down lists that we can add to, delete from, and individually edit with configuration windows. or maybe they should be added into the configuration tree view? - done?
+
+ if the system can't find the font specified, popup a dialog box that lets you select a font. - done
+ if a named color or fg_color doesn't match anything existing in Qt, popup a dialog box with two dropdowns of all the named qt colors. 
+also have two color pickers and allow input of rgb hex codes? allow toggling between two different color-edit modes for the color pickers: RGB, and HSB. can slide up and down the red, green or blue levels, or alternatively the hue, or saturation or brightness levelsto dynamically change the 2-D map of colors containing all the remaining two values of of R,G,B or H,S,B. like in Photoshop. also, show the past few colors picked (persist them in a file somewhere) that the user can click on to re-pick them. have a text sample in the given font face and font size that shows the text in the currently selected bg_color and fg_color. - done. 
+* but the 2d color map updating might be too slow? maybe tell claude to write the widget in c++ if that's possible, if we test it and it's very slow?
+
+tell claude to use the mIRC ctrl+k text color picker I made in the other irc client project. - done?
+tell claude if channel nick lists aren't in this version, grab them from the other version. - they already existed, but had no right-click context menus. 
+ask claude what features the other one has that this one doesn't. tell him to implement those features.
+channel nick list context menu actions - doing
+  ctcp finger
+  ctcp version
+  ctcp time 
+  ctcp ping
+  op
+  de-op
+  kick (can specify message) - maybe we should have a second option where you can specify a message, and just kick without a popup otherwise. same with kickban.
+* we should come up with an algorithm to apply ban hostmasks automatically.
+  kickban (can specify message)
+  ban
+  voice (+v)
+  de-voice 
+  quiet (+q)
+  unquiet
+  open message window
+  ignore
+  unignore
+  aop 
+  half-op (+h)
+  de-half-op
+  invite - need to implement - done? or did he put it in the wrong menu?
+
+ignore, unignore, ban, and kickban have the problem of what hostmask to use. 
+
+tell it to remove the redundant kick and kickban options. - done
+add ignore and auto-op lists to the configuration yaml - done?
+problem: they can be cross-channel or cross-network or not. 
+okay, just allow them to be specified on the top, network, or channel level. - done
+tell it to actually implement the configuration ignores and auto ops if it didn't already. - done
+make /ignore mIRC-like like /aop is. - done?
+add half-op (+h) context menu command and /command - done
+make a /whois response router to route the messages to the window from which the /whois was initiated. - doing
+ what should it do if whois results come that weren't tracked? show in current window, or in server window? - claude says server window. done. 
+
+ Features the newer_version has that this project still lacks
+
+  - Nick anchors in chat - Nicknames in the chat output are clickable links (right-click for context menu) - done
+  - CTCP TIME query - done?
+  - /ping command and CTCP ping response display
+
+maybe we should route ping responses and ctcp responses like we do /whois responses? ask Claude. - done
+
+  - /load command to load scripts at runtime - done
+  - /exec and /eval commands for running Python code from the input - done
+  - Sound notifications (has WAV/MP3 files in sounds/) - literally nobody uses this anymore
+  - Trivia bot plugin (a full trivia game script with fuzzy/metaphone matching)
+  - User objects - Network-wide user tracking with ident/host/realname per user (not just nick strings) - doing
+  - Tab-based interface (older project uses QTabWidget directly; this project uses QMdiArea in tabbed mode which is
+  functionally similar)
+  - Timestamp display [HH:MM] prefix on messages - done
+  - performonstartup.py - Auto-execute commands at launch (this project uses config-based auto_connect instead)  - claude and i decided to just add another script in the scripts directory to do it if we want. 
+
+find text in channel scrollback. option for regex. option for case-insensitive. go to next result or previous result. start from the bottom up by default. -done
+  should we not use irceq? because it's really only meant to apply to channels names and nicks. - no we shouldn't. done.
+make sure channel scrollback buffers are part of the irc context variable, also lists of inhabitants for each channel and their nick prefixes. link each one to the network wide list of nicks with the ident, host and realname. - done
+make sure all the current networks are part of the irc context variable - done
+make sure the function to compare strings using irc case insensitivity is available in the irc context variable - done 
+ but shouldn't /exec be network independent? the comparison feature is network-dependent.  maybe it's fine if exec is network dependent. well, unless we want to exec something involving another network. irccompare should be a member of a given network. - done
+* ask claude if it would be able to work with my code better if i separate the qtpyrc.py into separate files. don't separate into other files until i verify that the project is in working condition as is, then save the project before separating, then check the separated project and have claude try to fix errors. - done - after it's done, compare file size of qtpyrc.py and the new files. according to claude, the sizes match.
+add an optional treeview of networks and channels on the left - done
+option to show all open windows in a grid pattern - what do we do if there are too many windows? what do we do when a window is added or deleted? what does mIRC do? apparently this and cascading and freely positioning are automatically supported by a qt object. - done
+apply the window color to all windows. apply it to the menu and switchbar backgrounds too?  and the tree view. apply the font color to the menu items and the treeview items. should we name window_color and font -> color something else since they're more general? - dose
+option to close the window or not when you're kicked. make sure this applies to the treeview too. maybe we should add a member to channel objects saying if we're currently in them? - done
+also have channel key as a member of the channel object - done. i think he tracks when we issue a /join command with a key provided so we can add the key once we join and create the channel object. 
+ask claude if the general structure of the program is better in the newer project, and if we should switch to it. back up the current state first. -done
+highlight channel name based on new messages or nick mentioned - done
+* convert config from config['x']['y'] to config.x.y - we should do this eventually. but not using config2.py (from the BBS), according to claude. __iter__ yields names, we need data objects, not names. and None is always converted to null which it also says is a problem. but we could use the conversion file from qttirc. but without the null sentinel, how would we possibly do x.y.z where y may be None?
+* tell claude to give me a list of all files used in the project.

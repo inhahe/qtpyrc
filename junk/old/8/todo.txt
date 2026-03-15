@@ -1,0 +1,38 @@
+Claude for a list of all /commands supported
+and a list of all parameters supported by /on
+tell claude to make a document about all the variables in the irc object or IrcProxy (seem to be more or less the same thing, maybe they should be named the same)
+test using a command prefix other than / for all the commands or look at how input is evaluated
+ask Claude for a list of all files used in the project.
+test font color, font face and size picker 
+  if the 2D color range updates too slowly, ask claude to make the widget in C++ if that's possible in PySide6.
+see if all options are available in the configuration dialogs.
+make an example yaml config explaining variables and overrides
+test persistance of widget slider locations
+test background and foreground colors
+test network server cycling
+include information on burst vs sustained speed for various networks' flood protection in the example yaml. there's such information in the irc bouncer yaml.
+test the treeview
+test window title highlighting
+test lots of things
+test ident server - port 113 may be blocked by ISP - include notes on that that are included in the irc bouncer yaml.
+test example plugin Claude said he made
+test /exec
+test /on
+test storing channel keys into the yaml when you /join with one
+test that all configuration options save to the yaml
+ask how i can design the configuration dialogs in pyside6-designer
+think of other triggers and other $variables we might want to support in /on than what we already have. and other /commands. once we get the lists to see.
+test notice
+test if actions show up well
+and notices
+test if ctrl+f opens the search.
+test: make esc turn the window's status to "skipped" 
+
+what's the difference between hh and HH? hh is 12-hour? what are DOW and MON?
+what's the difference between ap and AP? just whether it shows it in caps or not?
+
+why isn't it showing that i joined the channel when i join?
+
+
+
+

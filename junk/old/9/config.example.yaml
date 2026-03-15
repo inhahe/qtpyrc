@@ -1,0 +1,330 @@
+# =============================================================================
+# qtpyrc configuration
+# =============================================================================
+# This file documents every configuration variable.
+# Copy it to config.yaml and edit to taste.
+# Run with: python qtpyrc.py -c config.yaml
+
+
+# ---------------------------------------------------------------------------
+# General
+# ---------------------------------------------------------------------------
+
+# Allow multiline text entry in the input field.
+multiline_input: false
+
+# Prefix character for slash commands.
+command_prefix: "/"
+
+# Main window state on launch: "maximized" or "normal".
+window_mode: maximized
+
+# View mode: "tabbed" (one window at a time with tabs) or
+# "mdi" (free-floating tiled/cascaded subwindows).
+view_mode: tabbed
+
+# Maximum rows for the tab bar.  0 = dynamic (grow as needed).
+tab_rows: 0
+
+# Show the network name in channel and query tab titles, e.g. "#channel (libera)".
+# If false, tabs just show "#channel".  Useful when tab grouping already makes
+# the network obvious.
+show_network_in_tabs: true
+
+# Initial state for new tabs:
+#   "active"  — switch to the new tab immediately (default)
+#   "normal"  — tab appears but doesn't become active
+#   "skipped" — tab appears in skipped state (Ctrl+Tab skips it)
+new_tab_state: active
+
+# Navigation panel: "tabs" (tab bar only), "tree" (tree view only),
+# or "both" (tab bar and tree view).  Requires restart.
+navigation: tabs
+
+# Display name shown in the title bar (cosmetic only, not sent to IRC).
+nickname: myuser
+
+# Close channel windows when you are kicked from a channel.
+# If false, the window stays open but is marked inactive.
+close_on_kick: false
+
+# Close channel windows when disconnected from the server.
+# If false, windows stay open and are marked inactive.
+close_on_disconnect: false
+
+
+# ---------------------------------------------------------------------------
+# Timestamps
+# ---------------------------------------------------------------------------
+# Tokens (case-sensitive):
+#   YYYY — 4-digit year          YY  — 2-digit year
+#   MM   — month (01-12)         MON — month abbreviation (Jan, Feb, Mar, ...)
+#   DD   — day (01-31)           DOW — weekday abbreviation (Mon, Tue, Wed, ...)
+#   HH   — 24-hour hour (00-23)  hh — 12-hour hour (01-12)
+#   mm   — minutes (00-59)       MI  — minutes (alias for mm)
+#   SS   — seconds (00-59)
+#   AP   — AM/PM (uppercase)     ap  — am/pm (lowercase)
+
+timestamps:
+  display: "HH:mm"        # shown in chat windows (e.g. "HH:mm:SS", "hh:mm ap")
+
+
+# ---------------------------------------------------------------------------
+# IRC identity (global defaults)
+# ---------------------------------------------------------------------------
+# These can all be overridden per-network (see the networks section below).
+# Overridable fields are marked [N] below.
+
+nick: myuser              # [N] primary nickname
+alt_nicks:                # [N] fallback nicks tried in order on collision
+  - myuser_
+  - myuser`
+user: myuser              # [N] username (ident)
+realname: "qtpyrc user"   # [N] real name / GECOS field
+
+
+# ---------------------------------------------------------------------------
+# Connection defaults
+# ---------------------------------------------------------------------------
+
+# Auto-connect to networks that have auto_connect: true on startup.
+auto_connect: false       # [N] override per-network
+
+# When you join or part a channel, update the network's auto_join list
+# in config.yaml so it persists across restarts.
+persist_autojoins: false  # [N] override per-network
+
+# Legacy rate limit: minimum milliseconds between sent lines.
+# Prefer the flood section below.  0 = disabled.
+# ms: 500                 # [N] (as rate_limit or ms)
+
+# Token-bucket flood protection.  Allows an initial burst of messages,
+# then throttles to one message per <rate> seconds.
+flood:
+  burst: 5                # messages allowed before throttling
+  rate: 2.0               # seconds between messages after burst
+# Both burst and rate can also be set per-network and will override
+# the global values independently (not as a whole section).
+
+
+# ---------------------------------------------------------------------------
+# Font
+# ---------------------------------------------------------------------------
+
+font:
+  family: Courier New
+  size: 20                 # font size in points
+  tab_family: Segoe UI     # tab title font face (omit for system default)
+  tab_size: 12             # tab title font size in points (omit for default)
+
+
+# ---------------------------------------------------------------------------
+# Colors
+# ---------------------------------------------------------------------------
+# Values can be Qt color names or hex ("#rrggbb").
+#
+# Available color names:
+#   white, black, red, green, blue, cyan, magenta, yellow,
+#   gray, darkGray, lightGray,
+#   darkRed, darkGreen, darkBlue, darkCyan, darkMagenta, darkYellow
+
+colors:
+  foreground: black        # text color (chat, menus, tree, input, nick list)
+  background: white        # background color (all windows, menus, tree)
+  system: red              # system/status messages (connecting, errors, reconnect)
+  info: darkGreen          # joins, parts, quits, nick changes, mode changes, topics
+  action: darkMagenta      # /me actions
+  notice: darkCyan          # NOTICE messages
+
+  # Tab colors.  Omit any to use auto-derived defaults.
+  tabs:
+    active_fg: white       # active tab text color (default: background color)
+    active_bg: black       # active tab background (default: foreground color)
+    normal_fg: black       # normal tab text color (default: foreground color)
+    normal_bg: white       # normal tab background (default: background color)
+    skipped_fg: gray       # skipped tab text color (default: dimmed foreground)
+    skipped_bg: lightGray  # skipped tab background (default: slightly tinted)
+    bar_bg: white          # tab bar empty area and blank screen
+                           # (default: normal_bg, or skipped_bg if new_tab_state is skipped)
+
+  # Search highlight (Ctrl+F).  Default: yellow background, black text.
+  search_bg: yellow
+  search_fg: black
+
+  # Tab/tree activity colors.  Omit or leave blank for defaults.
+  highlight: red           # color of window title when your nick is mentioned
+  new_message: blue        # color of window title when there are unread messages
+
+
+# ---------------------------------------------------------------------------
+# Ident server
+# ---------------------------------------------------------------------------
+
+ident_username: myuser     # username reported by the built-in identd
+
+ident:
+  enabled: true
+  host: "0.0.0.0"         # listen address
+  port: 113                # listen port
+
+
+# ---------------------------------------------------------------------------
+# Backscroll & History
+# ---------------------------------------------------------------------------
+
+# Maximum number of lines kept in each channel window's backscroll buffer.
+# Older lines are discarded as new ones arrive.  0 = unlimited.
+backscroll_limit: 10000
+
+# Lines of history to replay from the database when opening a window.
+# Shows color-coded messages, joins, parts, etc. from previous sessions.
+# Set to 0 to disable.
+history_replay:
+  channels: 10000            # replay on channel join (default: backscroll_limit)
+  queries: 0                 # replay on query open (default: 0 / disabled)
+                             # Note: nicks can be reused by different people,
+                             # so query history may not belong to the same person.
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+logging:
+  dir: logs                # directory for log files (relative to qtpyrc.py)
+  use_subdirs: false       # create per-network subdirectories
+  separate_by_month: false # create per-month log files
+  debug: false             # enable debug-level logging
+  timestamp: "YYYY-MM-DD HH:mm:SS"  # timestamp format in log files
+
+
+# ---------------------------------------------------------------------------
+# Scripts / Plugins
+# ---------------------------------------------------------------------------
+
+plugins:
+  dir: plugins             # directory for Python plugins (relative to qtpyrc.py)
+  auto_load:               # Python plugins to load automatically on startup
+    - triviabot
+
+scripts:
+  dir: scripts             # directory for command scripts (relative to qtpyrc.py)
+  auto_load:               # command scripts to run on startup
+    - startup.rc           # each line is a /command or text; comments start with ;
+
+
+# ---------------------------------------------------------------------------
+# Ignore & Auto-Op lists
+# ---------------------------------------------------------------------------
+# Global-level lists.  Entries are additive: network and channel levels
+# add to these, they don't replace them.
+# Masks support wildcards: nick, nick!*@*, *!*@host, etc.
+
+# ignores:
+#   - "spammer!*@*"
+#   - "annoying_nick"
+
+# auto_ops:
+#   - "trusted!*@trusted.host"
+
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+# Each key is a network identifier used internally.
+#
+# The following fields can be set at the network level to override the
+# global defaults defined above:
+#   nick, alt_nicks, user, realname          (identity)
+#   auto_connect, persist_autojoins          (connection behavior)
+#   rate_limit / ms                          (legacy rate limit)
+#   flood: { burst, rate }                   (token-bucket flood protection)
+#   password                                 (server password, also checked
+#                                             at the server level)
+#   ignores, auto_ops                        (additive, not replacing)
+#
+# Network-specific fields (not global):
+#   name            — reported network name for matching
+#   server/servers  — connection details
+#   sasl            — SASL authentication
+#   auto_join       — channels to join on connect
+
+networks:
+
+  # --- Example: single server ---
+  libera:
+    name: Libera.Chat           # match against the server-reported network name
+
+    # Identity overrides (omit to use global defaults)
+    nick: mynick
+    # alt_nicks:
+    #   - mynick_
+    # user: myident
+    # realname: "my real name"
+
+    auto_connect: true     # connect to this network on startup
+    persist_autojoins: true
+
+    # Server password (checked at server level first, then network level)
+    # password: "server_password_here"
+
+    # Single server
+    server:
+      host: irc.libera.chat
+      port: 6697
+      tls: true
+      tls_verify: true
+
+    # SASL authentication
+    sasl:
+      mechanism: PLAIN     # PLAIN or EXTERNAL
+      username: mynick
+      password: "my_sasl_password"
+
+    # Channels to auto-join.  Value is the channel key, or null for no key.
+    auto_join:
+      '#channel1':
+      '#channel2':
+      '#keyed-channel': the_channel_key
+
+    # Per-network flood protection (overrides global burst/rate independently)
+    # flood:
+    #   burst: 3
+    #   rate: 1.5
+
+    # Per-network ignore/auto-op (additive with global lists)
+    # ignores:
+    #   - "bot!*@*"
+    # auto_ops:
+    #   - "friend!*@friend.host"
+
+    # Per-network channel settings
+    # channels:
+    #   '#channel1':
+    #     ignores:
+    #       - "chanspammer"
+    #     auto_ops:
+    #       - "chanop!*@*"
+
+  # --- Example: multiple servers with cycling ---
+  # If connection to one server fails, the client cycles to the next.
+  undernet:
+    servers:
+      - host: irc.undernet.org
+        port: 6667
+        tls: false
+      - host: us.undernet.org
+        port: 6667
+        tls: false
+      - host: eu.undernet.org
+        port: 6667
+        tls: false
+
+    # auto_join:
+    #   '#somechannel':
+
+  # --- Example: minimal network ---
+  efnet:
+    server:
+      host: irc.efnet.org
+      tls_verify: false

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Komodo Project File - DO NOT EDIT -->
+<project id="2e988676-a3f1-40ed-b988-c40e1e04ebdb" kpf_version="4" name="qtpyrc.kpf">
+<file id="05908037-ea60-4415-a456-264c58a9f081" idref="2e988676-a3f1-40ed-b988-c40e1e04ebdb" name="__init__.py" url="scripts/triviabot/__init__.py">
+</file>
+<file id="20504105-6f8f-4ca9-b6a3-925753bf2e30" idref="2e988676-a3f1-40ed-b988-c40e1e04ebdb" name="features.txt" url="features.txt">
+</file>
+<file id="5f207a88-86c0-4847-99a8-5b1c33024051" idref="2e988676-a3f1-40ed-b988-c40e1e04ebdb" name="makeconfig.py" url="makeconfig.py">
+</file>
+<file id="a9cbe2cf-ff36-48a8-bea6-da76cccbe647" idref="2e988676-a3f1-40ed-b988-c40e1e04ebdb" name="qtpyrc.py" url="qtpyrc.py">
+</file>
+<file id="ca0fd06d-d6ae-4db9-867b-6132841a8fe0" idref="2e988676-a3f1-40ed-b988-c40e1e04ebdb" name="eventfilter.py" url="eventfilter.py">
+</file>
+<file id="cab4d823-a28a-4448-b7f6-1399bff87f3f" idref="2e988676-a3f1-40ed-b988-c40e1e04ebdb" name="scrap.py" url="scrap.py">
+</file>
+<preference-set idref="2e988676-a3f1-40ed-b988-c40e1e04ebdb">
+  <boolean id="import_live">0</boolean>
+</preference-set>
+</project>
