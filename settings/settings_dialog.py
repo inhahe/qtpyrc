@@ -25,6 +25,7 @@ from settings.page_autojoin import AutoJoinPage
 from settings.page_lists import ListsPage
 from settings.page_plugin_config import PluginConfigPage
 from settings.page_link_preview import LinkPreviewPage
+from settings.page_nick_colors import NickColorsPage
 from settings.page_notifications import NotificationsPage
 from settings.page_scripts import ScriptsPage
 from settings.page_file_editor import FileEditorPage
@@ -33,6 +34,62 @@ from settings.page_file_editor import FileEditorPage
 # Item data role for storing page type / network key
 ROLE_PAGE = Qt.ItemDataRole.UserRole
 ROLE_NETKEY = Qt.ItemDataRole.UserRole + 1
+
+# Settings tree structure: (ui_path_suffix, page_id, label, children)
+# Used for both building the tree and registering --ui paths.
+SETTINGS_PAGES = [
+    ('general', 'general', 'General', []),
+    ('identity', 'identity', 'Identity', []),
+    ('lists', 'lists', 'Lists', []),
+    ('fonts', 'font_root', 'Font / Colors', [
+        ('fonts.chat', 'font_chat', 'Chat', []),
+        ('fonts.tab', 'font_tab', 'Tab Bar', []),
+        ('fonts.menu', 'font_menu', 'Menus', []),
+        ('fonts.tree', 'font_tree', 'Network Tree', []),
+        ('fonts.nicklist', 'font_nicklist', 'Nick List', []),
+        ('fonts.toolbar', 'font_toolbar', 'Toolbar', []),
+        ('fonts.settings', 'font_settings', 'Settings Dialog', []),
+        ('fonts.editor', 'font_editor', 'File Editor', []),
+        ('fonts.nickcolors', 'nick_colors', 'Nick Colors', []),
+    ]),
+    ('identserver', 'ident_server', 'Ident Server', []),
+    ('logging', 'logging', 'Logging', []),
+    ('notifications', 'notifications', 'Notifications', []),
+    ('linkpreview', 'link_preview', 'Link Previews', []),
+    ('scripts', 'scripts', 'Scripts / Plugins', []),
+    ('pluginconfig', 'plugin_config', 'Plugin Config', []),
+    ('editor', 'editor', 'File Editor', []),
+]
+
+
+NETWORK_SUB_PAGES = [
+    ('server', 'Servers'),
+    ('sasl', 'SASL'),
+    ('autojoin', 'Channels'),
+    ('lists', 'Lists'),
+]
+
+
+def get_settings_ui_paths(config_data=None):
+    """Yield (ui_path, page_id, label) for all settings pages.
+
+    If *config_data* is provided, also yields network-specific paths.
+    """
+    def _walk(pages, prefix='settings'):
+        for suffix, pid, label, children in pages:
+            path = prefix + '.' + suffix
+            yield path, pid, label
+            if children:
+                yield from _walk(children, prefix)
+    yield from _walk(SETTINGS_PAGES)
+    # Network pages (dynamic from config)
+    if config_data:
+        networks = config_data.get('networks') or {}
+        for netkey in networks:
+            base = 'settings.networks.' + netkey.lower()
+            yield base, 'networks.' + netkey, 'Networks > %s' % netkey
+            for sub, label in NETWORK_SUB_PAGES:
+                yield base + '.' + sub, 'networks.%s.%s' % (netkey, sub), 'Networks > %s > %s' % (netkey, label)
 
 
 class _FlatSelectionDelegate(QStyledItemDelegate):
@@ -128,7 +185,8 @@ class SettingsDialog(QDialog):
         self._stack_widgets = {} # page_id -> widget in the stack (may be a scroll area)
         self._net_pages = {}    # (net_key, sub) -> widget   sub in ('net','server','sasl','autojoin')
 
-        self.installEventFilter(self)
+        from dialogs import install_input_focus_handler
+        install_input_focus_handler(self)
 
         self._build_global_pages()
         self._build_network_tree()
@@ -144,15 +202,6 @@ class SettingsDialog(QDialog):
         self._preview_timer.setInterval(150)
         self._preview_timer.timeout.connect(self._do_font_preview)
 
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.KeyPress and \
-                event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            w = self.focusWidget()
-            if isinstance(w, (QLineEdit, QSpinBox, QDoubleSpinBox,
-                              QAbstractSpinBox, QComboBox)):
-                w.clearFocus()
-                return True
-        return super().eventFilter(obj, event)
 
     def _apply_colors(self):
         """Apply settings dialog colors and font if explicitly configured."""
@@ -263,6 +312,10 @@ class SettingsDialog(QDialog):
         link_preview_page.load_from_data(self._data)
         self._add_page('link_preview', 'Link Previews', link_preview_page)
 
+        nick_colors_page = NickColorsPage()
+        nick_colors_page.load_from_data(self._data)
+        self._add_page('nick_colors', 'Nick Colors', nick_colors_page, stack_widget=nick_colors_page)
+
         # File editor page (handles config, startup, popups, toolbar, variables)
         config_path = os.path.abspath(self.config.path)
 
@@ -294,33 +347,15 @@ class SettingsDialog(QDialog):
                           variables_path=_resolve('variables_file'))
         self._add_page('editor', 'File Editor', self._editor_page, stack_widget=self._editor_page)
 
-        # Tree items for global pages
-        for pid, label in [('general', 'General'), ('identity', 'Identity'),
-                           ('lists', 'Lists')]:
-            item = QTreeWidgetItem(self.tree, [label])
-            item.setData(0, ROLE_PAGE, pid)
-        # Font / Colors parent with sub-pages
-        font_root = QTreeWidgetItem(self.tree, ['Font / Colors'])
-        font_root.setData(0, ROLE_PAGE, 'font_root')
-        font_root.setExpanded(True)
-        for pid, label in [('font_chat', 'Chat'),
-                           ('font_tab', 'Tab Bar'),
-                           ('font_menu', 'Menus'),
-                           ('font_tree', 'Network Tree'),
-                           ('font_nicklist', 'Nick List'),
-                           ('font_toolbar', 'Toolbar'),
-                           ('font_settings', 'Settings Dialog'),
-                           ('font_editor', 'File Editor')]:
-            child = QTreeWidgetItem(font_root, [label])
-            child.setData(0, ROLE_PAGE, pid)
-        for pid, label in [('ident_server', 'Ident Server'),
-                           ('logging', 'Logging'), ('notifications', 'Notifications'),
-                           ('link_preview', 'Link Previews'),
-                           ('scripts', 'Scripts / Plugins'),
-                           ('plugin_config', 'Plugin Config'),
-                           ('editor', 'File Editor')]:
-            item = QTreeWidgetItem(self.tree, [label])
-            item.setData(0, ROLE_PAGE, pid)
+        # Tree items from SETTINGS_PAGES structure
+        def _build_tree(parent, pages):
+            for suffix, pid, label, children in pages:
+                item = QTreeWidgetItem(parent, [label])
+                item.setData(0, ROLE_PAGE, pid)
+                if children:
+                    item.setExpanded(True)
+                    _build_tree(item, children)
+        _build_tree(self.tree, SETTINGS_PAGES)
 
     # ----- network tree -----
 
@@ -345,12 +380,7 @@ class SettingsDialog(QDialog):
         node.setExpanded(True)
 
         # Sub-pages
-        for sub_id, sub_label in [
-            ('server', 'Servers'),
-            ('sasl', 'SASL'),
-            ('autojoin', 'Channels'),
-            ('lists', 'Lists'),
-        ]:
+        for sub_id, sub_label in NETWORK_SUB_PAGES:
             child = QTreeWidgetItem(node, [sub_label])
             child.setData(0, ROLE_PAGE, sub_id)
             child.setData(0, ROLE_NETKEY, netkey)
@@ -427,11 +457,18 @@ class SettingsDialog(QDialog):
             return
 
         page_id = self._PAGE_ALIASES.get(page_id, page_id)
-        for i in range(self.tree.topLevelItemCount()):
-            item = self.tree.topLevelItem(i)
-            if item.data(0, ROLE_PAGE) == page_id:
-                self.tree.setCurrentItem(item)
-                return
+        def _find(parent, pid):
+            for i in range(parent.childCount() if hasattr(parent, 'childCount') else parent.topLevelItemCount()):
+                item = parent.child(i) if hasattr(parent, 'child') else parent.topLevelItem(i)
+                if item.data(0, ROLE_PAGE) == pid:
+                    return item
+                found = _find(item, pid)
+                if found:
+                    return found
+            return None
+        item = _find(self.tree, page_id)
+        if item:
+            self.tree.setCurrentItem(item)
 
     def _on_tree_select(self, current, previous):
         if not current:
@@ -619,8 +656,8 @@ class SettingsDialog(QDialog):
         import popups
         popups.load()
         # Refresh network settings paths in the /ui registry
-        from qtpyrc import _register_network_settings_pages
-        _register_network_settings_pages()
+        from qtpyrc import _register_settings_paths
+        _register_settings_paths()
 
     def _on_ok(self):
         if not self._editor_page._check_unsaved():

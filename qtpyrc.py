@@ -568,28 +568,20 @@ class _AppKeyFilter(QObject):
     return False
 
 
-_NET_SUB_LABELS = {'server': 'Server', 'sasl': 'SASL', 'autojoin': 'Auto-Join'}
-
-def _register_network_settings_pages():
-  """Populate ui_registry with settings.networks.* entries from config data."""
+def _register_settings_paths():
+  """Populate ui_registry with all settings.* entries."""
   from dialogs import open_settings
+  from settings.settings_dialog import get_settings_ui_paths
   reg = state.ui_registry
   desc = state.ui_descriptions
-  # Clear any previous network entries
-  for key in [k for k in reg if k.startswith('settings.networks.')]:
+  # Clear previous settings entries
+  for key in [k for k in reg if k.startswith('settings.')]:
     del reg[key]
-  for key in [k for k in desc if k.startswith('settings.networks.')]:
+  for key in [k for k in desc if k.startswith('settings.')]:
     del desc[key]
-  networks = state.config._data.get('networks') or {}
-  for netkey in networks:
-    low = netkey.lower()
-    base = 'settings.networks.' + low
-    reg[base] = lambda nk=netkey: open_settings(page='networks.' + nk)
-    desc[base] = 'Networks > %s' % netkey
-    for sub, label in _NET_SUB_LABELS.items():
-      reg[base + '.' + sub] = (
-        lambda nk=netkey, s=sub: open_settings(page='networks.%s.%s' % (nk, s)))
-      desc[base + '.' + sub] = 'Networks > %s > %s' % (netkey, label)
+  for ui_path, page_id, label in get_settings_ui_paths(state.config._data):
+    reg[ui_path] = lambda pid=page_id: open_settings(page=pid)
+    desc[ui_path] = label
 
 
 def makeapp(args):
@@ -853,29 +845,8 @@ def makeapp(args):
   _desc['menu.help.about'] = _d('Help', 'About')
 
   # --- Settings pages ---
-  # Register settings page paths as callables (dialog is constructed on demand)
-  for _ui_path, _page_id, _label in [
-      ('settings.general', 'general', 'General'),
-      ('settings.identity', 'identity', 'Identity'),
-      ('settings.fonts', 'font_root', 'Font / Colors'),
-      ('settings.fonts.chat', 'font_chat', 'Font / Colors > Chat'),
-      ('settings.fonts.tab', 'font_tab', 'Font / Colors > Tab Bar'),
-      ('settings.fonts.menu', 'font_menu', 'Font / Colors > Menus'),
-      ('settings.fonts.tree', 'font_tree', 'Font / Colors > Network Tree'),
-      ('settings.fonts.nicklist', 'font_nicklist', 'Font / Colors > Nick List'),
-      ('settings.fonts.toolbar', 'font_toolbar', 'Font / Colors > Toolbar'),
-      ('settings.fonts.settings', 'font_settings', 'Font / Colors > Settings Dialog'),
-      ('settings.fonts.editor', 'font_editor', 'Font / Colors > File Editor'),
-      ('settings.identserver', 'ident_server', 'Ident Server'),
-      ('settings.logging', 'logging', 'Logging'),
-      ('settings.notifications', 'notifications', 'Notifications'),
-      ('settings.scripts', 'scripts', 'Scripts / Plugins'),
-      ('settings.editor', 'editor', 'File Editor'),
-  ]:
-    _ui[_ui_path] = lambda pid=_page_id: open_settings(page=pid)
-    _desc[_ui_path] = _label
-  # Network settings pages (from config data)
-  _register_network_settings_pages()
+  # Register all settings page paths (global + network) from shared structure
+  _register_settings_paths()
 
   # --- Toolbar ---
   from toolbar import register_toolbar_ui_paths

@@ -938,6 +938,19 @@ class Window(QWidget):
     cur.movePosition(QTextCursor.MoveOperation.End)
     self._updateBottomAlign()
 
+  @staticmethod
+  def _nick_color(nick):
+    """Return a QColor for *nick* based on the nick_colors palette, or None."""
+    cfg = state.config
+    if not cfg.nick_colors_enabled or not cfg.nick_color_palette:
+      return None
+    # Strip mode prefixes (@+%) for consistent coloring
+    clean = nick.lstrip('@+%~&')
+    h = hash(clean.lower())
+    palette = cfg.nick_color_palette
+    color_str = palette[h % len(palette)]
+    return QColor(color_str)
+
   def addline_msg(self, nick, message, timestamp_override=None):
     """Add a <nick> message line with the nick as a right-clickable anchor."""
     if not self._widget_alive(): return
@@ -948,17 +961,25 @@ class Window(QWidget):
       self._insert_timestamp_override(timestamp_override)
     else:
       self._insert_timestamp()
+    # Determine nick color
+    nick_qcolor = self._nick_color(nick)
+    bracket_fmt = QTextCharFormat(state.defaultformat)
+    if nick_qcolor:
+      bracket_fmt.setForeground(QBrush(nick_qcolor))
     # Insert "<"
-    cur.insertText('<', state.defaultformat)
+    cur.insertText('<', bracket_fmt)
     # Insert nick as anchor
     anchor_fmt = QTextCharFormat(state.defaultformat)
     anchor_fmt.setAnchor(True)
     anchor_fmt.setAnchorHref("nick:" + nick)
     anchor_fmt.setFontUnderline(False)
-    anchor_fmt.setForeground(QBrush(state.config.fgcolor))
+    if nick_qcolor:
+      anchor_fmt.setForeground(QBrush(nick_qcolor))
+    else:
+      anchor_fmt.setForeground(QBrush(state.config.fgcolor))
     cur.insertText(nick, anchor_fmt)
     # Insert "> "
-    cur.insertText('> ', state.defaultformat)
+    cur.insertText('> ', bracket_fmt)
     cur.movePosition(QTextCursor.MoveOperation.End)
     # Now render the message body with mIRC formatting
     self._render_text(message)
