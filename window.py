@@ -1020,13 +1020,19 @@ class Window(QWidget):
   def _render_text(self, line, base_format=None):
     """Render mIRC-formatted text at current cursor position."""
     bold = underline = italics = False
-    fg = base_format.foreground().color() if base_format else state.config.fgcolor
+    base_fg = base_format.foreground().color() if base_format else state.config.fgcolor
+    if base_format:
+      tf = QTextCharFormat(base_format)
+    else:
+      tf = QTextCharFormat()
+      tf.setForeground(QBrush(base_fg))
+    fg = base_fg
     bg = state.config.bgcolor
-    tf = QTextCharFormat()
+    tf.setBackground(QBrush(bg))
     cur = self.cur
     for code, fgs, bgs, text in mircre.findall(line):
       if code in "\x03\x0F":
-        fg, bg = state.config.fgcolor, state.config.bgcolor
+        fg, bg = base_fg, state.config.bgcolor
         tf.setForeground(fg)
         tf.setBackground(bg)
         if code=="\x0F":

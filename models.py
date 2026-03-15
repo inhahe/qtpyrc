@@ -98,8 +98,8 @@ HISTORY_MAX = 2000
 class HistoryMessage:
   """A message in channel history."""
   __slots__ = ('time', 'user', 'nick', 'text', 'type', 'prefix')
-  def __init__(self, user, nick, text, msg_type='message', prefix=''):
-    self.time = datetime.now()
+  def __init__(self, user, nick, text, msg_type='message', prefix='', time=None):
+    self.time = time or datetime.now()
     self.user = user    # User object (may be None for server messages)
     self.nick = nick    # nick string (kept even if User is unavailable)
     self.text = text

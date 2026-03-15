@@ -337,6 +337,129 @@ def _update_all_titles():
   update_main_title()
   _refresh_window_titles()
 
+# ---------------------------------------------------------------------------
+# Background history replay — drip-feeds history into windows during idle
+# ---------------------------------------------------------------------------
+
+_bg_replay_queue = []  # list of (window, network, chname, chan_obj)
+_bg_replay_timer = None
+
+
+def _start_bg_replay():
+  """Start the background replay timer if there's work to do."""
+  global _bg_replay_timer
+  if _bg_replay_queue and not _bg_replay_timer:
+    interval = state.config.history_bg_interval if state.config else 50
+    _bg_replay_timer = QTimer()
+    _bg_replay_timer.timeout.connect(_bg_replay_tick)
+    _bg_replay_timer.start(interval)
+
+
+def _bg_replay_tick():
+  """Process one chunk of history replay for the next window in the queue."""
+  global _bg_replay_timer
+  while _bg_replay_queue:
+    entry = _bg_replay_queue[0]
+    window, network, chname, chan_obj = entry
+
+    # Skip if window was already fully replayed (user clicked on it)
+    if not hasattr(window, '_deferred_replay') and not hasattr(window, '_bg_replay'):
+      _bg_replay_queue.pop(0)
+      continue
+
+    # First time for this window — fetch all rows and store as pending
+    if not hasattr(window, '_bg_replay'):
+      db = state.historydb
+      limit = state.config.history_replay_channels
+      if not db or limit <= 0:
+        if hasattr(window, '_deferred_replay'):
+          del window._deferred_replay
+        _bg_replay_queue.pop(0)
+        continue
+      rows = db.get_last(network, chname.lower(), limit)
+      if not rows:
+        if hasattr(window, '_deferred_replay'):
+          del window._deferred_replay
+        _bg_replay_queue.pop(0)
+        continue
+      window._bg_replay = {
+        'rows': rows,
+        'index': 0,
+        'chan_obj': chan_obj,
+      }
+
+    bg = window._bg_replay
+    rows = bg['rows']
+    idx = bg['index']
+    chunk = state.config.history_bg_chunk if state.config else 50
+    end = min(idx + chunk, len(rows))
+    show_prefix = state.config.show_mode_prefix
+    history = bg['chan_obj'].history if bg['chan_obj'] else None
+
+    for i in range(idx, end):
+      ts, etype, nick, text, prefix = rows[i]
+      ts_short = ts[11:16]
+      pn = (prefix + nick) if (show_prefix and prefix and nick) else nick
+      if etype == 'message':
+        window.addline_msg(pn, text, timestamp_override=ts_short)
+      elif etype == 'action':
+        window.addline_nick(["* ", (pn,), " %s" % text], state.actionformat,
+                            timestamp_override=ts_short)
+      elif etype == 'notice':
+        window.addline_nick(["-", (pn,), "- %s" % text], state.noticeformat,
+                            timestamp_override=ts_short)
+      elif etype == 'join':
+        window.addline_nick(["* ", (pn,), " has joined %s" % (text or chname)],
+                            state.infoformat, timestamp_override=ts_short)
+      elif etype == 'part':
+        window.addline_nick(["* ", (pn,), " has left %s" % (text or chname)],
+                            state.infoformat, timestamp_override=ts_short)
+      elif etype == 'quit':
+        window.addline_nick(["* ", (pn,), " has quit (%s)" % (text or "")],
+                            state.infoformat, timestamp_override=ts_short)
+      elif etype == 'kick':
+        window.addline(text or '', state.infoformat, timestamp_override=ts_short)
+      elif etype == 'nick':
+        window.addline_nick(["* ", (pn,), " is now known as ", (text or '?',)],
+                            state.infoformat, timestamp_override=ts_short)
+      elif etype == 'topic':
+        window.addline_nick(["* ", (pn,), " changed the topic to: %s" % (text or '')],
+                            state.infoformat, timestamp_override=ts_short)
+      elif etype == 'mode':
+        window.addline_nick(["* ", (pn,), " %s" % text], state.infoformat,
+                            timestamp_override=ts_short)
+      if history is not None:
+        from models import HistoryMessage
+        from datetime import datetime
+        try:
+          t = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
+        except Exception:
+          t = datetime.now()
+        history.append(HistoryMessage(None, nick, text, etype, prefix=prefix, time=t))
+
+    bg['index'] = end
+
+    if end >= len(rows):
+      # Done with this window
+      window.add_separator(' End of saved history ')
+      del window._bg_replay
+      if hasattr(window, '_deferred_replay'):
+        del window._deferred_replay
+      _bg_replay_queue.pop(0)
+    return  # one chunk per tick
+
+  # Queue empty — stop timer
+  if _bg_replay_timer:
+    _bg_replay_timer.stop()
+    _bg_replay_timer = None
+
+
+def _queue_bg_replay(window, network, chname, chan_obj):
+  """Add a window to the background replay queue."""
+  _bg_replay_queue.append((window, network, chname, chan_obj))
+  _start_bg_replay()
+
+
 def _on_subwindow_activated(subwindow):
   """Sync the treeview selection and clear activity when switching windows."""
   if not subwindow:
@@ -344,12 +467,16 @@ def _on_subwindow_activated(subwindow):
   widget = subwindow.widget()
   if not widget:
     return
-  # Run deferred history replay on first activation
+  # Run deferred history replay on first activation (complete it immediately)
   replay_info = getattr(widget, '_deferred_replay', None)
   if replay_info:
     del widget._deferred_replay
     from irc_client import _history_replay
     network, chname, chan = replay_info
+    # Cancel any in-progress background replay
+    bg = getattr(widget, '_bg_replay', None)
+    if bg:
+      del widget._bg_replay
     _history_replay(widget, network, chname, chan_obj=chan)
     widget.add_separator(' End of saved history ')
   # Clear activity highlight on the now-active window

@@ -704,6 +704,8 @@ class AppConfig:
     else:
       self.history_replay_channels = hr.get('channels', self.backscroll_limit)
       self.history_replay_queries = hr.get('queries', 0)
+    self.history_bg_chunk = int(hr.get('bg_chunk', 50) if isinstance(hr, dict) else 50)
+    self.history_bg_interval = int(hr.get('bg_interval', 50) if isinstance(hr, dict) else 50)
 
     self.networks = data.get('networks') or {}
     self.nickswidth = data.get('nickswidth', 100)

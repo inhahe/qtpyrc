@@ -400,6 +400,8 @@ history_replay:
   queries: 0                 # replay on query open (default: 0 / disabled)
                              # Note: nicks can be reused by different people,
                              # so query history may not belong to the same person.
+  bg_chunk: 50               # lines per background replay tick (higher = faster but less responsive)
+  bg_interval: 50            # ms between background replay ticks (lower = faster but more CPU)
 
 
 # ---------------------------------------------------------------------------
