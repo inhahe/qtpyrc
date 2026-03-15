@@ -49,7 +49,7 @@ It should be cross-platform, but I haven't tested that yet either.
 
 **Other**
 - Channel history replay from SQLite database
-- IRC log files with optional per-network subdirectories and monthly rotation
+- IRC log files with optional per-network and per-channel subdirectories and monthly rotation
 - URL catcher
 - Built-in ident server
 - Persistent user variables (/set)
