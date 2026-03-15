@@ -6,6 +6,8 @@ It's a little sluggish, I guess because of PySide6, maybe partly Claude's fault,
 
 I haven't tested all the features, so please submit an issue if something doesn't work right.
 
+It should be cross-platform, but I haven't tested that yet either. 
+
 ## Features
 
 **IRC Protocol**
