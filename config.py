@@ -659,6 +659,10 @@ class AppConfig:
     notice_raw = colors.get('notice')
     self.color_notice = _parse_color(notice_raw) if notice_raw else QColor(Qt.darkCyan)
 
+    # Link color
+    link_raw = colors.get('link')
+    self.color_link = _parse_color(link_raw) if link_raw else QColor('#0066cc')
+
     # Search highlight color
     search_bg_raw = colors.get('search_bg')
     search_fg_raw = colors.get('search_fg')

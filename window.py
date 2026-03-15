@@ -180,10 +180,29 @@ class NetworkTree(QTreeWidget):
 # ---------------------------------------------------------------------------
 
 class ChatOutput(QTextEdit):
-  """QTextEdit subclass that supports right-clicking on nick anchors."""
+  """QTextEdit subclass that supports right-clicking on nick anchors and clickable URLs."""
   def __init__(self, parent_window):
     super().__init__(parent_window)
     self._parent_window = parent_window
+    self.setMouseTracking(True)
+
+  def mouseMoveEvent(self, event):
+    anchor = self.anchorAt(event.pos())
+    if anchor and anchor.startswith('http'):
+      self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+    else:
+      self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
+    super().mouseMoveEvent(event)
+
+  def mouseReleaseEvent(self, event):
+    if event.button() == Qt.MouseButton.LeftButton:
+      anchor = self.anchorAt(event.pos())
+      if anchor and anchor.startswith('http'):
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        QDesktopServices.openUrl(QUrl(anchor))
+        return
+    super().mouseReleaseEvent(event)
 
   def contextMenuEvent(self, event):
     import popups
@@ -752,9 +771,9 @@ class Window(QWidget):
     else:
       self._insert_timestamp()
     if fmt:
-      self._render_mirc(line, base_format=fmt)
+      self._render_text(line, base_format=fmt)
     else:
-      self._render_mirc(line)
+      self._render_text(line)
     self._updateBottomAlign()
 
   def addline_nick(self, parts, fmt=None, timestamp_override=None):
@@ -782,7 +801,7 @@ class Window(QWidget):
         anchor_fmt.setFontUnderline(False)
         cur.insertText(nick, anchor_fmt)
       else:
-        self._render_mirc(part, base_format=base)
+        self._render_text(part, base_format=base)
     cur.movePosition(QTextCursor.MoveOperation.End)
     self._updateBottomAlign()
 
@@ -809,10 +828,40 @@ class Window(QWidget):
     cur.insertText('> ', state.defaultformat)
     cur.movePosition(QTextCursor.MoveOperation.End)
     # Now render the message body with mIRC formatting
-    self._render_mirc(message)
+    self._render_text(message)
     self._updateBottomAlign()
 
-  def _render_mirc(self, line, base_format=None):
+  def _insert_with_urls(self, cur, text, fmt):
+    """Insert *text* with URLs rendered as clickable anchors."""
+    from irc_client import _URL_RE
+    pos = 0
+    for m in _URL_RE.finditer(text):
+      # Insert text before the URL
+      if m.start() > pos:
+        cur.insertText(text[pos:m.start()], fmt)
+      # Strip trailing punctuation (same logic as _extract_urls)
+      url = m.group(0)
+      while url and url[-1] in '.,;:!?\'"':
+        url = url[:-1]
+      while url.endswith(')') and url.count(')') > url.count('('):
+        url = url[:-1]
+      if url:
+        url_fmt = QTextCharFormat(fmt)
+        url_fmt.setAnchor(True)
+        url_fmt.setAnchorHref(url)
+        url_fmt.setFontUnderline(True)
+        url_fmt.setForeground(state.config.color_link)
+        cur.insertText(url, url_fmt)
+      # Insert any stripped trailing chars as plain text
+      stripped = text[m.start() + len(url):m.end()]
+      if stripped:
+        cur.insertText(stripped, fmt)
+      pos = m.end()
+    # Insert remaining text after last URL
+    if pos < len(text):
+      cur.insertText(text[pos:], fmt)
+
+  def _render_text(self, line, base_format=None):
     """Render mIRC-formatted text at current cursor position."""
     bold = underline = italics = False
     fg = base_format.foreground().color() if base_format else state.config.fgcolor
@@ -853,7 +902,7 @@ class Window(QWidget):
       elif code=="":
         tf.setForeground(fg)
         tf.setBackground(bg)
-      cur.insertText(text, tf)
+      self._insert_with_urls(cur, text, tf)
       cur.movePosition(QTextCursor.MoveOperation.End)
 
   def redmessage(self, text):

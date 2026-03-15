@@ -356,6 +356,9 @@ class ChatFontPage(QWidget):
         self.notice_color = _ColorRow(default_hint='default: darkCyan')
         layout.addRow("Notice:", self.notice_color)
 
+        self.link_color = _ColorRow(default_hint='default: #0066cc')
+        layout.addRow("Link:", self.link_color)
+
         self.highlight_color = _ColorRow(default_hint='default: red')
         layout.addRow("Highlight:", self.highlight_color)
 
@@ -378,6 +381,7 @@ class ChatFontPage(QWidget):
         self.info_color.setText(str(colors.get('info', '')))
         self.action_color.setText(str(colors.get('action', '')))
         self.notice_color.setText(str(colors.get('notice', '')))
+        self.link_color.setText(str(colors.get('link', '')))
         self.highlight_color.setText(str(colors.get('highlight', '')))
         self.newmsg_color.setText(str(colors.get('new_message', '')))
 
@@ -396,6 +400,7 @@ class ChatFontPage(QWidget):
         _save_color_val(colors, 'background', self.bg_color)
         for key, widget in [('system', self.system_color), ('info', self.info_color),
                             ('action', self.action_color), ('notice', self.notice_color),
+                            ('link', self.link_color),
                             ('highlight', self.highlight_color), ('new_message', self.newmsg_color)]:
             _save_color_val(colors, key, widget)
 
