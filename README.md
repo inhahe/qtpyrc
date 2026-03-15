@@ -2,6 +2,10 @@
 
 A full-featured IRC client written in Python with PySide6. Written mostly with the help of Claude Code.
 
+It's a little sluggish, I guess because of PySide6, maybe partly Claude's fault, too.
+
+I haven't tested all the features, so please submit an issue if something doesn't work right.
+
 ## Features
 
 **IRC Protocol**
