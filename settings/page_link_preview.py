@@ -22,7 +22,7 @@ class LinkPreviewPage(QWidget):
         layout.addRow("Timeout:", self.lp_timeout)
 
         self.lp_max_size = QSpinBox()
-        self.lp_max_size.setRange(4096, 524288)
+        self.lp_max_size.setRange(4096, 1048576)
         self.lp_max_size.setSuffix(" bytes")
         self.lp_max_size.setSingleStep(4096)
         layout.addRow("Max download:", self.lp_max_size)
@@ -49,8 +49,8 @@ class LinkPreviewPage(QWidget):
         if isinstance(lp, bool):
             lp = {'enabled': lp}
         self.link_preview.setChecked(bool(lp.get('enabled', False)))
-        self.lp_timeout.setValue(float(lp.get('timeout', 5.0)))
-        self.lp_max_size.setValue(int(lp.get('max_size', 65536)))
+        self.lp_timeout.setValue(float(lp.get('timeout', 10.0)))
+        self.lp_max_size.setValue(int(lp.get('max_size', 262144)))
         self.lp_width.setValue(int(lp.get('width', 400)))
         self.lp_height.setValue(int(lp.get('height', 120)))
         self.lp_proxy.setText(str(lp.get('proxy', '')))

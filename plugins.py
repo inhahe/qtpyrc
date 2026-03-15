@@ -183,13 +183,13 @@ def load_script_by_name(name, report_window=None):
     if hasattr(old, 'instance') and hasattr(old.instance, 'die'):
       try:
         old.instance.die()
-      except Exception:
-        pass
+      except Exception as e:
+        dbg(LOG_WARN, '[plugins] %s.die() failed: %s' % (name, e))
     elif hasattr(old, 'script') and hasattr(old.script, 'die'):
       try:
         old.script.die()
-      except Exception:
-        pass
+      except Exception as e:
+        dbg(LOG_WARN, '[plugins] %s.die() failed: %s' % (name, e))
 
   try:
     # Force reimport if already cached

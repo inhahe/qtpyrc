@@ -17,6 +17,8 @@ import string
 import time
 import traceback
 
+import state
+
 # --- Constants ---
 
 NUL = '\0'
@@ -201,8 +203,8 @@ def ctcpStringify(messages):
             if not isinstance(data, str):
                 try:
                     data = " ".join(str(x) for x in data)
-                except TypeError:
-                    pass
+                except TypeError as e:
+                    state.dbg(state.LOG_WARN, '[ctcp] stringify failed for tag=%r data=%r: %s' % (tag, data, e))
             m = "%s %s" % (tag, data)
         else:
             m = str(tag)
@@ -360,8 +362,10 @@ class IRCClient:
         self.connectionMade()
         try:
             await self._read_loop()
-        except (asyncio.CancelledError, ConnectionError, OSError):
-            pass
+        except asyncio.CancelledError:
+            state.dbg(state.LOG_INFO, '[irc] connection cancelled:', host)
+        except (ConnectionError, OSError) as e:
+            state.dbg(state.LOG_INFO, '[irc] connection lost:', host, str(e))
         finally:
             self.connectionLost("Connection closed")
             self._cleanup()
@@ -392,8 +396,8 @@ class IRCClient:
         if self._writer and not self._writer.is_closing():
             try:
                 self._writer.close()
-            except Exception:
-                pass
+            except Exception as e:
+                state.dbg(state.LOG_DEBUG, '[irc] writer close error:', e)
 
     # --- Line protocol ---
 
@@ -474,7 +478,7 @@ class IRCClient:
             self._current_tags = tags
             self.handleCommand(command, prefix, params)
         except IRCBadMessage:
-            pass
+            state.dbg(state.LOG_WARN, '[irc] malformed message:', repr(line[:200]))
         except Exception:
             traceback.print_exc()
         finally:

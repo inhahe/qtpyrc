@@ -266,6 +266,28 @@ class _Irc:
         window.redmessage(text)
 
     @staticmethod
+    def dbg(level, *args):
+        """Write to the console debug log at the given level.
+
+        Levels are available as constants on the irc object:
+        ``irc.LOG_ERROR``, ``irc.LOG_WARN``, ``irc.LOG_INFO``,
+        ``irc.LOG_DEBUG``, ``irc.LOG_TRACE``.
+
+        Example::
+
+            irc.dbg(irc.LOG_DEBUG, 'myplugin:', 'processed', count, 'items')
+        """
+        import state
+        state.dbg(level, *args)
+
+    LOG_SILENT = 0
+    LOG_ERROR  = 1
+    LOG_WARN   = 2
+    LOG_INFO   = 3
+    LOG_DEBUG  = 4
+    LOG_TRACE  = 5
+
+    @staticmethod
     def inputbox(prompt='', title='Input'):
         """Show an input dialog and return the text (or '' if cancelled)."""
         from PySide6.QtWidgets import QInputDialog, QApplication

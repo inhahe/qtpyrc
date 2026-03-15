@@ -208,8 +208,9 @@ class Commands:
     n = text.strip()
     try:
       window.client.conn.setNick(n)
-    except Exception:
-      pass
+    except Exception as e:
+      state.dbg(state.LOG_WARN, '[cmd] /nick failed:', e)
+      window.redmessage('[Nick change failed: %s]' % e)
 
   def whois(window, text):
     target = text.strip()
