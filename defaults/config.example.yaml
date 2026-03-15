@@ -115,6 +115,10 @@ close_on_disconnect: false
 # and the nick list.
 show_mode_prefix: false
 
+# Auto-copy text to clipboard when mouse selection is released (mIRC-style).
+# Selection is cleared after copying.  Default: false.
+auto_copy_selection: false
+
 
 # ---------------------------------------------------------------------------
 # Typing notifications (IRCv3 +typing)

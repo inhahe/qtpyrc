@@ -734,6 +734,7 @@ class AppConfig:
     self.close_on_disconnect = data.get('close_on_disconnect', False)
 
     self.show_mode_prefix = data.get('show_mode_prefix', False)
+    self.auto_copy_selection = data.get('auto_copy_selection', False)
 
     typing = data.get('typing') or {}
     self.typing_send = typing.get('send', True)
