@@ -999,8 +999,13 @@ class SettingsDialog(QDialog):
         self._collect_all()
         return self._data != self._original_data
 
+    def closeEvent(self, event):
+        """Handle window close (Alt+F4, X button) — delegate to reject()."""
+        event.ignore()
+        self.reject()
+
     def reject(self):
-        """Handle Cancel/Ctrl+F4."""
+        """Handle Cancel/Ctrl+F4/Alt+F4."""
         if not self._editor_page._check_unsaved():
             return
         if self._has_unsaved_changes():

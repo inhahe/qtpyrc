@@ -227,7 +227,14 @@ class ChatOutput(QTextEdit):
                         copy_action=has_selection,
                         parent_section=parent_section)
     elif anchor and anchor.startswith('http'):
-      self._show_link_menu(event.globalPos(), anchor, has_selection)
+      # Determine parent section for additive mode
+      wtype = getattr(self._parent_window, 'type', '')
+      parent_section = {'channel': 'channel', 'server': 'status',
+                        'query': 'query'}.get(wtype)
+      popups.show_popup('link', self._parent_window, event.globalPos(),
+                        extra_vars={'link': anchor},
+                        copy_action=has_selection,
+                        parent_section=parent_section)
     else:
       # Try window-type-specific popup
       wtype = getattr(self._parent_window, 'type', '')
@@ -237,38 +244,6 @@ class ChatOutput(QTextEdit):
           section, self._parent_window, event.globalPos(),
           copy_action=has_selection):
         super().contextMenuEvent(event)
-
-  def _show_link_menu(self, pos, url, has_selection):
-    """Show context menu for a URL link."""
-    from PySide6.QtWidgets import QMenu, QApplication
-    from PySide6.QtGui import QDesktopServices
-    from PySide6.QtCore import QUrl
-    menu = QMenu(self)
-    open_act = menu.addAction('Open Link')
-    copy_link_act = menu.addAction('Copy Link')
-    if has_selection:
-      from popups import _add_menu_separator
-      _add_menu_separator(menu)
-      copy_text_act = menu.addAction('Copy')
-    else:
-      copy_text_act = None
-    # Append normal channel/status/query popup entries below
-    import popups
-    wtype = getattr(self._parent_window, 'type', '')
-    section = {'channel': 'channel', 'server': 'status',
-               'query': 'query'}.get(wtype)
-    parent_action_map = popups.append_section_to_menu(
-        menu, section, self._parent_window)
-
-    action = menu.exec(pos)
-    if action is open_act:
-      QDesktopServices.openUrl(QUrl(url))
-    elif action is copy_link_act:
-      QApplication.clipboard().setText(url)
-    elif action is copy_text_act:
-      self.copy()
-    elif action and action in parent_action_map:
-      popups.exec_action(parent_action_map[action], self._parent_window)
 
 
 # ---------------------------------------------------------------------------

@@ -75,6 +75,8 @@ Parameters that accept arbitrary text (messages, reasons, titles) must be quoted
 | `/ctcp` | `/ctcp <nick> <type> [data]` | Send a CTCP query (PING, VERSION, TIME, etc.) |
 | `/invite` | `/invite <nick> [#channel]` | Invite a user to a channel (defaults to current) |
 | `/raw` | `/raw <line>` | Send a raw IRC command to the server |
+| `/openurl` | `/openurl <url>` | Open a URL in the system browser |
+| `/clipboard` | `/clipboard <text>` | Copy text to the system clipboard |
 | `/quote` | `/quote <line>` | Alias for `/raw` |
 | `/echo` | `/echo [-w target] <text>` | Print text to the current window (or target window with `-w`) |
 | `/log` | `/log [-w target] "text"` | Write a line to the log file for the current window (or target) |
