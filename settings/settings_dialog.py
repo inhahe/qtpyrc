@@ -179,10 +179,6 @@ class SettingsDialog(QDialog):
         self._btn_apply.setToolTip("Apply changes to the running UI (does not save to disk)")
         buttons.addButton(self._btn_apply, QDialogButtonBox.ButtonRole.ApplyRole)
         self._btn_apply.clicked.connect(self._on_apply)
-        self._btn_save_apply = QPushButton("Save && Apply")
-        self._btn_save_apply.setToolTip("Save to disk and apply changes")
-        buttons.addButton(self._btn_save_apply, QDialogButtonBox.ButtonRole.ApplyRole)
-        self._btn_save_apply.clicked.connect(self._on_save_and_apply)
         right.addWidget(buttons)
 
         main_layout.addLayout(right, 1)
