@@ -16,6 +16,7 @@ class IdentServerPage(QWidget):
         layout.addRow("Enable ident server:", self.enabled)
 
         self.host = _ck(QLineEdit(), 'ident.host')
+        self.host.setMinimumWidth(200)
         layout.addRow("Listen host:", self.host)
 
         self.port = _ck(QSpinBox(), 'ident.port')
@@ -23,6 +24,7 @@ class IdentServerPage(QWidget):
         layout.addRow("Listen port:", self.port)
 
         self.username = _ck(QLineEdit(), 'ident_username')
+        self.username.setMinimumWidth(200)
         layout.addRow("Ident username:", self.username)
 
     def load_from_data(self, data):

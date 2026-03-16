@@ -10,18 +10,28 @@ class IdentityPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+
+        from PySide6.QtGui import QFontMetrics
+        _fm = QFontMetrics(self.font())
+        _short_w = _fm.horizontalAdvance('M' * 20) + _fm.height() * 2
+        _long_w = _fm.horizontalAdvance('M' * 35) + _fm.height() * 2
 
         self.nick = _ck(QLineEdit(), 'nick')
+        self.nick.setFixedWidth(_short_w)
         layout.addRow("Nick:", self.nick)
 
         self.alt_nicks = _ck(QPlainTextEdit(), 'alt_nicks')
         self.alt_nicks.setMaximumHeight(80)
+        self.alt_nicks.setFixedWidth(_short_w)
         layout.addRow("Alt nicks (one per line):", self.alt_nicks)
 
         self.user = _ck(QLineEdit(), 'user')
+        self.user.setFixedWidth(_short_w)
         layout.addRow("Username:", self.user)
 
         self.realname = _ck(QLineEdit(), 'realname')
+        self.realname.setFixedWidth(_long_w)
         layout.addRow("Real name:", self.realname)
 
         self.auto_connect = QLineEdit()
@@ -34,6 +44,7 @@ class IdentityPage(QWidget):
         self.alt_nicks.setPlainText('\n'.join(str(a) for a in alts))
         self.user.setText(str(data.get('user', '')))
         self.realname.setText(str(data.get('realname', '')))
+        self.realname.setCursorPosition(0)
 
     def save_to_data(self, data):
         data['nick'] = self.nick.text()

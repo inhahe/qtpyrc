@@ -1793,11 +1793,26 @@ if __name__ == '__main__':
         from commands import docommand
         docommand(win, *(cmd.split(' ', 1)))
 
-    print('Running in headless mode. Press Ctrl+C to quit.')
+    # Graceful shutdown on SIGTERM/SIGINT
+    def _headless_shutdown():
+      print('\nShutting down...')
+      # Disconnect all clients
+      for client in (state.clients or []):
+        if client.conn:
+          client.conn.disconnect()
+      loop.stop()
+
+    try:
+      loop.add_signal_handler(signal.SIGINT, _headless_shutdown)
+      loop.add_signal_handler(signal.SIGTERM, _headless_shutdown)
+    except NotImplementedError:
+      pass  # Windows — Ctrl+C handled via KeyboardInterrupt
+
+    print('Running in headless mode. Ctrl+C or SIGTERM to quit.')
     try:
       loop.run_forever()
     except KeyboardInterrupt:
-      print('\nShutting down...')
+      _headless_shutdown()
     finally:
       loop.close()
     sys.exit(0)

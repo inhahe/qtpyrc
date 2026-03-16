@@ -58,6 +58,9 @@ class GeneralPage(QWidget):
         self.auto_connect = _ck(QCheckBox(), 'auto_connect')
         layout.addRow("Auto-connect:", self.auto_connect)
 
+        self.persist_autojoins = _ck(QCheckBox(), 'persist_autojoins')
+        layout.addRow("Persist auto-joins:", self.persist_autojoins)
+
         _separator(layout, 'History')
         self.backscroll_limit = _ck(QSpinBox(), 'backscroll_limit')
         self.backscroll_limit.setRange(0, 1000000)
@@ -120,6 +123,7 @@ class GeneralPage(QWidget):
         self.auto_copy_selection.setChecked(bool(data.get('auto_copy_selection', False)))
         self.tab_complete_age.setValue(int(data.get('tab_complete_age', 0) or 0))
         self.auto_connect.setChecked(bool(data.get('auto_connect', True)))
+        self.persist_autojoins.setChecked(bool(data.get('persist_autojoins', False)))
         self.backscroll_limit.setValue(int(data.get('backscroll_limit', 10000)))
         hr = data.get('history_replay') or {}
         if isinstance(hr, int):
@@ -166,6 +170,7 @@ class GeneralPage(QWidget):
         elif 'tab_complete_age' in data:
             del data['tab_complete_age']
         data['auto_connect'] = self.auto_connect.isChecked()
+        data['persist_autojoins'] = self.persist_autojoins.isChecked()
         data['backscroll_limit'] = self.backscroll_limit.value()
         hr = data.get('history_replay')
         if not isinstance(hr, dict):

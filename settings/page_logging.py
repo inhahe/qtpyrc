@@ -13,6 +13,7 @@ class LoggingPage(QWidget):
         layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
         self.log_dir = _ck(QLineEdit(), 'logging.dir')
+        self.log_dir.setMinimumWidth(200)
         layout.addRow("Log directory:", self.log_dir)
 
         self.use_subdirs = _ck(QCheckBox(), 'logging.use_subdirs')
@@ -25,6 +26,7 @@ class LoggingPage(QWidget):
         layout.addRow("Debug logging:", self.debug)
 
         self.timestamp = _ck(QLineEdit(), 'logging.timestamp')
+        self.timestamp.setMinimumWidth(200)
         layout.addRow("Log timestamp:", self.timestamp)
 
     def load_from_data(self, data):

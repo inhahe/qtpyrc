@@ -609,7 +609,7 @@ class SettingsDialog(QDialog):
 
         # Create page widgets
         net_page = NetworkPage()
-        net_page.load_from_data(net_data)
+        net_page.load_from_data(net_data, global_data=self._data)
         self._net_pages[(netkey, 'net')] = net_page
         self.stack.addWidget(net_page)
 
@@ -998,6 +998,13 @@ class SettingsDialog(QDialog):
         """Check if any settings have been modified from the original."""
         self._collect_all()
         return self._data != self._original_data
+
+    def mousePressEvent(self, event):
+        """Click on background clears focus from any edit widget."""
+        focused = self.focusWidget()
+        if focused and focused is not self:
+            focused.clearFocus()
+        super().mousePressEvent(event)
 
     def closeEvent(self, event):
         """Handle window close (Alt+F4, X button) — delegate to reject()."""
