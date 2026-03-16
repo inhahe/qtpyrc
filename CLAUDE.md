@@ -6,7 +6,7 @@ Entrypoint: `qtpyrc.py`
 
 **Always update docs when making changes:**
 - `docs/reference.md` — commands, variables, CLI options, scripting API
-- `config.example.yaml` — any new or changed config option (in `defaults/`)
+- `config.defaults.yaml` — any new or changed config option (in `defaults/`)
 - `copy_to_github.bat` — add new files to the copy list
 
 ## File Map
@@ -29,7 +29,7 @@ Entrypoint: `qtpyrc.py`
 | `logger.py` | File logging (IRCLogger) |
 | `settings/` | Settings dialog pages. Pattern: `load_from_data(dict)` / `save_to_data(dict)` |
 | `docs/reference.md` | Command reference and scripting API docs. Update when adding/changing commands |
-| `config.example.yaml` | Documents every config option. Update when adding new options |
+| `config.defaults.yaml` | Documents every config option. Update when adding new options |
 
 ## Architecture
 
@@ -69,12 +69,12 @@ Enter key -> Window.lineinput(text)
 **Every config option must be editable in the settings UI.** No YAML-only options.
 
 1. **`config.py`**: Add `self.<option> = data.get('<option>', default)` in AppConfig.__init__
-2. **`config.example.yaml`**: Document the option with a comment (see format below)
+2. **`config.defaults.yaml`**: Document the option with a comment (see format below)
 3. **`settings/page_general.py`** (or appropriate page): Add widget in `__init__` using `_ck(Widget(), 'dotted.yaml.key')`, load in `load_from_data`, save in `save_to_data`
 
-### config.example.yaml comment format
+### config.defaults.yaml comment format
 
-Comments in `config.example.yaml` are auto-parsed to generate tooltips and right-click Help text in the settings dialog (`settings/config_help.py`). The parser uses a simple convention:
+Comments in `config.defaults.yaml` are auto-parsed to generate tooltips and right-click Help text in the settings dialog (`settings/config_help.py`). The parser uses a simple convention:
 
 - `# comment` — help text (accumulated for the next key)
 - `key: value` — active config key (help buffer assigned to it)

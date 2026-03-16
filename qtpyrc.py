@@ -779,9 +779,14 @@ class _AppKeyFilter(QObject):
       alt = mods & Qt.KeyboardModifier.AltModifier
 
       # Alt+F4: close the entire application
+      # If a dialog is active, let it handle the close (unsaved changes check)
       if key == Qt.Key.Key_F4 and alt:
         if event.type() == QEvent.Type.ShortcutOverride:
           event.accept()
+          return True
+        active = QApplication.activeWindow()
+        if isinstance(active, QDialog):
+          active.close()
           return True
         QApplication.instance().quit()
         return True
@@ -1113,7 +1118,7 @@ def makeapp(args):
     _a.setToolTip('File not found: %s' % _ref_path)
   _ui['menu.help.reference'] = _a
   _desc['menu.help.reference'] = _d('Help', 'Reference Manual')
-  _example_path = os.path.join(_basedir, 'defaults', 'config.example.yaml')
+  _example_path = os.path.join(_basedir, 'defaults', 'config.defaults.yaml')
   _a = mnuhelp.addAction('&Config Reference', lambda p=_example_path: _show_doc_viewer(p))
   if not os.path.isfile(_example_path):
     _a.setEnabled(False)
@@ -1302,7 +1307,7 @@ _DEFAULT_ANCILLARY = [
 ]
 
 _STUB_CONFIG = ('# qtpyrc configuration\n'
-                '# See config.example.yaml for all available options.\n')
+                '# See config.defaults.yaml for all available options.\n')
 
 def _read_default_file(name):
   """Read a default file from the defaults/ directory."""
@@ -1315,20 +1320,20 @@ def _read_default_file(name):
 
 
 def _get_default_config():
-  """Build the default config.yaml from config.example.yaml.
+  """Build the default config.yaml from config.defaults.yaml.
 
   Comments out the networks section (has bogus example values) and
   replaces placeholder identity values.
   """
   example_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              'defaults', 'config.example.yaml')
+                              'defaults', 'config.defaults.yaml')
   try:
     with open(example_path, 'r', encoding='utf-8') as f:
       lines = f.readlines()
   except FileNotFoundError:
-    # Fallback if config.example.yaml isn't available
+    # Fallback if config.defaults.yaml isn't available
     return ('# qtpyrc configuration\n'
-            '# config.example.yaml not found — see docs for options.\n'
+            '# config.defaults.yaml not found — see docs for options.\n'
             'popups_file: popups.ini\n'
             'variables_file: variables.ini\n'
             'toolbar_file: toolbar.ini\n'
@@ -1374,7 +1379,7 @@ def _get_default_config():
     elif stripped.startswith('  family: Fixedsys'):
       result.append('  family: Consolas\n')
     elif stripped == '# Copy it to config.yaml and edit to taste.':
-      result.append('# Edit to taste.  See config.example.yaml for detailed documentation.\n')
+      result.append('# Edit to taste.  See config.defaults.yaml for detailed documentation.\n')
     elif stripped == '# Run with: python qtpyrc.py -c config.yaml':
       continue  # skip this line
     else:
@@ -1385,7 +1390,7 @@ def _get_default_config():
 
 # Full default content for --init and "Restore Defaults".
 # All templates are loaded from files at runtime:
-#   config  — built from config.example.yaml by _get_default_config()
+#   config  — built from config.defaults.yaml by _get_default_config()
 #   popups  — defaults/popups.ini
 #   toolbar — defaults/toolbar.ini
 #   startup — defaults/startup.rc

@@ -263,7 +263,7 @@ class SettingsDialog(QDialog):
         """Install right-click context filter on all settings input widgets.
 
         Uses the 'config_key' property set on each widget (via _ck()) to
-        look up help text and default values from config.example.yaml.
+        look up help text and default values from config.defaults.yaml.
         No manual mapping dict needed — the config_key IS the YAML key.
         """
         from settings.widget_context import (
@@ -273,14 +273,14 @@ class SettingsDialog(QDialog):
         )
         from PySide6.QtWidgets import QWidget as _QW
 
-        # Load defaults from config.example.yaml
+        # Load defaults from config.defaults.yaml
         default_data = {}
         try:
             import os
             from ruamel.yaml import YAML
             example_path = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                'defaults', 'config.example.yaml')
+                'defaults', 'config.defaults.yaml')
             if os.path.isfile(example_path):
                 yaml = YAML()
                 yaml.preserve_quotes = True
@@ -289,28 +289,26 @@ class SettingsDialog(QDialog):
         except Exception:
             pass
 
-        # Load help text from config.example.yaml comments
+        # Load help text from config.defaults.yaml comments
         from settings.config_help import get_all_help
         all_help = get_all_help()
 
         for page in list(self._pages.values()) + list(self._net_pages.values()):
+            # Install event filter on ALL descendant widgets so right-click
+            # works everywhere (the filter walks up to find defaults/help)
+            for child in page.findChildren(_QW):
+                child.installEventFilter(self._ctx_filter)
+
             for attr_name in dir(page):
                 if attr_name.startswith('_'):
                     continue
                 widget = getattr(page, attr_name, None)
                 if not isinstance(widget, _QW):
                     continue
-                # Only process widgets that have a config_key
-                if not widget.property('config_key'):
-                    continue
-
-                widget.installEventFilter(self._ctx_filter)
-                widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-                widget.customContextMenuRequested.connect(
-                    lambda pos, w=widget: show_widget_context_menu(w, pos))
-
-                # Use config_key property to look up help and defaults
+                # Only tag defaults/help for widgets with a config_key
                 cfg_key = widget.property('config_key')
+                if not cfg_key:
+                    continue
                 if not cfg_key:
                     continue
 

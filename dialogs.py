@@ -311,11 +311,10 @@ class ColorPickerWidget(QWidget):
     layout.setContentsMargins(0, 0, 0, 0)
 
     _fm = self.fontMetrics()
-    _char = _fm.horizontalAdvance('0')
-    _w4 = _char * 6   # room for "-128"
-    _w7 = _char * 10  # room for "#FFFFFF"
-    # Width for min/max labels (fits "-128")
-    _wminmax = _fm.horizontalAdvance('-128') + 4
+    _pad = _fm.height()  # scale padding with font size
+    _w4 = _fm.horizontalAdvance('0000') + _pad      # room for "000" / "-128"
+    _w7 = _fm.horizontalAdvance('#000000') + _pad    # room for "#FFFFFF"
+    _wminmax = _fm.horizontalAdvance('-128') + 8
 
     def _fit_btn(btn):
       w = btn.fontMetrics().horizontalAdvance(btn.text()) + 18
@@ -332,11 +331,13 @@ class ColorPickerWidget(QWidget):
     slider_col = QVBoxLayout()
 
     # Model buttons — one per entry in _MODELS, generated from the dict
+    # All buttons same width = widest model name
     mode_row = QHBoxLayout()
     self._model_buttons = {}
+    _max_model_w = max(_fm.horizontalAdvance(n) for n in _MODELS) + _pad
     for model_name in _MODELS:
       btn = QPushButton(model_name)
-      _fit_btn(btn)
+      btn.setFixedWidth(_max_model_w)
       btn.setCheckable(True)
       btn.clicked.connect(lambda checked, m=model_name: self._set_model(m))
       mode_row.addWidget(btn)
@@ -355,7 +356,7 @@ class ColorPickerWidget(QWidget):
 
       radio = QPushButton()
       radio.setCheckable(True)
-      radio.setFixedWidth(38)
+      radio.setFixedWidth(_fm.horizontalAdvance('W:') + _pad)
       radio.clicked.connect(lambda checked, idx=i: self._set_fixed_axis(idx))
       self._slider_radios.append(radio)
       row.addWidget(radio)
@@ -488,7 +489,7 @@ class ColorPickerWidget(QWidget):
     saved_header = QHBoxLayout()
     saved_header.addWidget(QLabel("Saved:"))
     self._save_btn = QPushButton("Save")
-    self._save_btn.setFixedWidth(40)
+    _fit_btn(self._save_btn)
     self._save_btn.setToolTip("Save current color to the bar below")
     self._save_btn.clicked.connect(self._save_color)
     saved_header.addWidget(self._save_btn)

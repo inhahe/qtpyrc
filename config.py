@@ -500,6 +500,23 @@ def _modify_list_entry(list_key, mask, remove, network_key=None, channel=None):
 # Configuration  (ruamel.yaml round-trip for comment preservation)
 # ---------------------------------------------------------------------------
 
+def _default_nick_palette():
+  """Load default nick color palette from config.defaults.yaml."""
+  try:
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        'defaults', 'config.defaults.yaml')
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    with open(path, 'r', encoding='utf-8') as f:
+      data = yaml.load(f)
+    palette = (data.get('nick_colors') or {}).get('palette')
+    if palette:
+      return list(palette)
+  except Exception:
+    pass
+  return ['#cc0000', '#0066cc', '#009900', '#9933cc', '#cc6600']
+
+
 class AppConfig:
   """Application configuration backed by a ruamel.yaml round-trip document.
 
@@ -561,9 +578,7 @@ class AppConfig:
     if self.menu_font_size is not None:
       self.menu_font_size = int(self.menu_font_size)
     self.tree_font_family = font.get('tree_family', None)
-    self.tree_font_size = font.get('tree_size', None)
-    if self.tree_font_size is not None:
-      self.tree_font_size = int(self.tree_font_size)
+    self.tree_font_size = int(font.get('tree_size', 11)) or None
     self.nicklist_font_family = font.get('nicklist_family', None)
     self.nicklist_font_size = font.get('nicklist_size', None)
     if self.nicklist_font_size is not None:
@@ -755,12 +770,7 @@ class AppConfig:
     if isinstance(nc, bool):
       nc = {'enabled': nc}
     self.nick_colors_enabled = bool(nc.get('enabled', False))
-    self.nick_color_palette = nc.get('palette') or [
-      '#cc0000', '#0066cc', '#009900', '#9933cc', '#cc6600',
-      '#00999e', '#cc0066', '#6633cc', '#008844', '#aa4400',
-      '#2255aa', '#cc3399', '#337700', '#7744aa', '#006688',
-      '#994400', '#2266cc', '#880044', '#448800', '#663399',
-    ]
+    self.nick_color_palette = nc.get('palette') or _default_nick_palette()
 
     typing = data.get('typing') or {}
     self.typing_send = typing.get('send', True)
