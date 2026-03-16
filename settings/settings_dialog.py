@@ -859,26 +859,51 @@ class SettingsDialog(QDialog):
                             _refresh_all_window_fonts,
                             _get_message_colors, _recolor_chat_text,
                             _refresh_navigation)
-        # Snapshot old message colors before reinit
+        # Snapshot old state before reinit
         old_colors = _get_message_colors()
+        old_cfg = self.config
+        old_font = (old_cfg.fontfamily, old_cfg.fontheight, old_cfg.input_lines,
+                    old_cfg.nicklist_font_family, old_cfg.nicklist_font_size)
+        old_nav = (old_cfg.show_tabs, old_cfg.show_tree)
+        old_toolbar = old_cfg.show_toolbar
+        old_stylesheet = _build_app_stylesheet()
+
         self.config._data = data
         self.config.__init__(self.config.path, data, self.config._yaml)
         from config import _update_text_formats
         _update_text_formats(self.config)
-        from PySide6.QtWidgets import QApplication
-        QApplication.instance().setStyleSheet(_build_app_stylesheet())
-        _apply_palette()
-        _refresh_all_window_fonts()
-        _refresh_navigation()
+
+        # Only rebuild stylesheet if it actually changed
+        new_stylesheet = _build_app_stylesheet()
+        if new_stylesheet != old_stylesheet:
+            from PySide6.QtWidgets import QApplication
+            QApplication.instance().setStyleSheet(new_stylesheet)
+            _apply_palette()
+
+        new_font = (self.config.fontfamily, self.config.fontheight,
+                    self.config.input_lines,
+                    self.config.nicklist_font_family,
+                    self.config.nicklist_font_size)
+        if new_font != old_font:
+            _refresh_all_window_fonts()
+
+        new_nav = (self.config.show_tabs, self.config.show_tree)
+        if new_nav != old_nav:
+            _refresh_navigation()
+
         _recolor_chat_text(old_colors, visible_only=visible_only)
+
         from tabbar import TabbedWorkspace
         ws = state.app.mainwin.workspace
         if isinstance(ws, TabbedWorkspace):
             ws._load_colors()
             for entry in ws._tabs:
                 ws._style_tab(entry)
-        from toolbar import reload_toolbar
-        reload_toolbar()
+
+        if self.config.show_toolbar != old_toolbar:
+            from toolbar import reload_toolbar
+            reload_toolbar()
+
         # Refresh live client connection settings from updated config
         for client in state.clients:
             client.refresh_server_config()
