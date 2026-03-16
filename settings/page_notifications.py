@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
     QPushButton,
 )
 from PySide6.QtCore import Qt
+from settings.page_general import _ck
 
 
 class NotificationsPage(QWidget):
@@ -96,10 +97,9 @@ class NotificationsPage(QWidget):
         self._highlight_hint.setTextFormat(Qt.TextFormat.PlainText)
         layout.addRow(self._highlight_hint)
 
-        self.check_interval = QSpinBox()
+        self.check_interval = _ck(QSpinBox(), 'notifications.check_interval')
         self.check_interval.setRange(10, 600)
         self.check_interval.setSuffix(" s")
-        self.check_interval.setToolTip("How often to check if /notify nicks are online (ISON polling interval)")
         layout.addRow("Notify check interval:", self.check_interval)
 
         tip = QLabel("For per-nick, per-channel, or per-pattern notifications, "

@@ -310,6 +310,7 @@ _DEFAULT_TITLEBAR_FORMAT = (
   " + (': ' + _v['topic'] if _v.get('topic') else '')"
   " if _v.get('channel') else ''"
   '")}'
+  '{replay}'
 )
 
 def update_main_title():
@@ -332,6 +333,7 @@ def update_main_title():
   raw_topic = variables.get('topic', '')
   variables['topic'] = re.sub(
       r'[\x02\x03\x0F\x16\x1D\x1F]|\x03\d{0,2}(?:,\d{0,2})?', '', raw_topic) if raw_topic else ''
+  variables['replay'] = getattr(state.app.mainwin, '_replay_status', '')
   variables.update(state._variables)
   # Pass variables dict into eval namespace so eval can access topic safely
   title = _expand_vars(fmt, variables, allow_eval=True,
@@ -421,21 +423,24 @@ def _update_all_titles():
 
 _bg_replay_queue = []  # list of (window, network, chname, chan_obj)
 _bg_replay_timer = None
+_bg_replay_total = 0   # total channels queued for replay
+_bg_replay_done = 0    # channels completed
 
 
 def _start_bg_replay():
   """Start the background replay timer if there's work to do."""
   global _bg_replay_timer
   if _bg_replay_queue and not _bg_replay_timer:
-    interval = state.config.history_bg_interval if state.config else 50
+    interval = state.config.history_bg_interval if state.config else 100
     _bg_replay_timer = QTimer()
     _bg_replay_timer.timeout.connect(_bg_replay_tick)
     _bg_replay_timer.start(interval)
+    _update_replay_status()
 
 
 def _bg_replay_tick():
   """Process one chunk of history replay for the next window in the queue."""
-  global _bg_replay_timer
+  global _bg_replay_timer, _bg_replay_done
   while _bg_replay_queue:
     entry = _bg_replay_queue[0]
     window, network, chname, chan_obj = entry
@@ -529,12 +534,29 @@ def _bg_replay_tick():
       if hasattr(window, '_deferred_replay'):
         del window._deferred_replay
       _bg_replay_queue.pop(0)
+      _bg_replay_done += 1
+      _update_replay_status()
     return  # one chunk per tick
 
   # Queue empty — stop timer
   if _bg_replay_timer:
     _bg_replay_timer.stop()
     _bg_replay_timer = None
+    _bg_replay_done = 0
+    _bg_replay_total = 0
+    _update_replay_status()
+
+
+def _update_replay_status():
+  """Update the {replay} variable and refresh the title bar."""
+  if not state.app or not state.app.mainwin:
+    return
+  if _bg_replay_timer and _bg_replay_total > 0:
+    state.app.mainwin._replay_status = (
+        ' [history: %d/%d]' % (_bg_replay_done, _bg_replay_total))
+  else:
+    state.app.mainwin._replay_status = ''
+  update_main_title()
 
 
 def _queue_bg_replay(window, network, chname, chan_obj):
@@ -543,11 +565,13 @@ def _queue_bg_replay(window, network, chname, chan_obj):
   If background replay is disabled, just marks the window for deferred
   replay (loads all at once when the user first switches to it).
   """
+  global _bg_replay_total
   if not state.config.history_bg_enabled:
     # Deferred: load on first activation
     window._deferred_replay = (network, chname, chan_obj)
     return
   _bg_replay_queue.append((window, network, chname, chan_obj))
+  _bg_replay_total += 1
   _start_bg_replay()
 
 

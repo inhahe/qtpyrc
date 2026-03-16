@@ -2,6 +2,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QSpinBox,
     QCheckBox, QPushButton, QListWidget, QGroupBox,
 )
+from settings.page_general import _ck
 
 
 class ServerPage(QWidget):
@@ -37,15 +38,15 @@ class ServerPage(QWidget):
         # Edit form for selected server
         self._edit_group = QGroupBox("Server details")
         form = QFormLayout(self._edit_group)
-        self.host = QLineEdit()
+        self.host = _ck(QLineEdit(), 'server.host')
         form.addRow("Host:", self.host)
-        self.port = QSpinBox()
+        self.port = _ck(QSpinBox(), 'server.port')
         self.port.setRange(1, 65535)
         self.port.setValue(6667)
         form.addRow("Port:", self.port)
-        self.tls = QCheckBox()
+        self.tls = _ck(QCheckBox(), 'server.tls')
         form.addRow("Use TLS:", self.tls)
-        self.tls_verify = QCheckBox()
+        self.tls_verify = _ck(QCheckBox(), 'server.tls_verify')
         self.tls_verify.setChecked(True)
         self.tls_verify.setEnabled(False)
         form.addRow("Verify TLS certificate:", self.tls_verify)

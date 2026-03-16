@@ -85,21 +85,24 @@ class TriviaBot(plugin.Callbacks):
     """Trivia bot plugin."""
 
     config_fields = [
-        ('command_prefix', str, '!trivia', 'Command prefix (e.g. !trivia, !t)'),
-        ('questions_file', str, '', 'Path to trivia JSON (blank = bundled trivia2.json)'),
-        ('hint_interval', int, 15, 'Seconds between hints'),
-        ('max_hints', int, 5, 'Maximum number of hints per question'),
-        ('question_timeout', int, 60, 'Seconds before skipping unanswered question'),
-        ('fuzzy_threshold', float, 0.3, 'Fuzzy match threshold (0.0=exact, 0.5=very fuzzy)'),
-        ('use_colors', bool, True, 'Use mIRC colors in output'),
-        ('no_color_channels', str, '', 'Channels where colors are disabled (comma-sep, e.g. dalnet/#nocol)'),
-        ('color_question', int, 3, 'mIRC color for questions (3=green)'),
-        ('color_answer', int, 4, 'mIRC color for answers (4=red)'),
-        ('color_hint', int, 7, 'mIRC color for hints (7=orange)'),
-        ('color_score', int, 12, 'mIRC color for scores (12=blue)'),
-        ('auto_channels', str, '', 'Auto-start channels (comma-sep, e.g. dalnet/#trivia,libera/#quiz)'),
-        ('blocked_channels', str, '', 'Blocked channels (comma-sep)'),
-        ('scores_interval', int, 0, 'Auto-show scores every N questions (0=never)'),
+        ('command_prefix', str, '!trivia', 'Command prefix'),
+        ('questions_file', str, '', 'Questions file'),
+        ('hint_interval', int, 15, 'Hint interval (sec)'),
+        ('max_hints', int, 5, 'Max hints'),
+        ('question_timeout', int, 60, 'Question timeout (sec)'),
+        ('fuzzy_threshold', float, 0.3, 'Fuzzy threshold'),
+        ('use_colors', bool, True, 'Use mIRC colors'),
+        ('no_color_channels', str, '', 'No-color channels'),
+        ('color_question', int, 3, 'Question color'),
+        ('color_answer', int, 4, 'Answer color'),
+        ('color_hint', int, 7, 'Hint color'),
+        ('color_score', int, 12, 'Score color'),
+        ('auto_channels', str, '', 'Auto-start channels'),
+        ('channel_mode', str, 'allow_all', 'Channel mode',
+            ['allow_all', 'block_all']),
+        ('blocked_channels', str, '', 'Blocked channels'),
+        ('allowed_channels', str, '', 'Allowed channels'),
+        ('scores_interval', int, 0, 'Scores interval'),
     ]
 
     def __init__(self, irc):
@@ -160,14 +163,16 @@ class TriviaBot(plugin.Callbacks):
         nk = conn.client.network_key or ''
         return (nk.lower(), conn.irclower(channel))
 
-    def _is_blocked(self, conn, channel):
-        blocked = self._cfg('blocked_channels', '')
-        if not blocked:
+    def _match_channel_list(self, conn, channel, list_str):
+        """Check if channel matches a comma-separated network/channel list."""
+        if not list_str:
             return False
         nk = (conn.client.network_key or '').lower()
         ch = channel.lower()
-        for entry in blocked.split(','):
+        for entry in list_str.split(','):
             entry = entry.strip().lower()
+            if not entry:
+                continue
             if '/' in entry:
                 net, chan = entry.split('/', 1)
                 if net == nk and chan == ch:
@@ -175,6 +180,17 @@ class TriviaBot(plugin.Callbacks):
             elif entry == ch:
                 return True
         return False
+
+    def _is_blocked(self, conn, channel):
+        mode = self._cfg('channel_mode', 'allow_all').lower().strip()
+        if mode == 'block_all':
+            # Block everything except the allowed list
+            return not self._match_channel_list(conn, channel,
+                                                self._cfg('allowed_channels', ''))
+        else:
+            # Allow everything except the blocked list
+            return self._match_channel_list(conn, channel,
+                                            self._cfg('blocked_channels', ''))
 
     def _use_colors(self, conn, channel):
         """Check if colors should be used for this channel."""

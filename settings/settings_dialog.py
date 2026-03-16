@@ -11,7 +11,7 @@ import copy
 from ruamel.yaml.comments import CommentedMap
 import state
 
-from settings.page_general import GeneralPage
+from settings.page_general import GeneralPage, InterfacePage, TitlesPage, FilesPage
 from settings.page_identity import IdentityPage
 from settings.page_font import (BaseColorsPage, ChatFontPage, TabFontPage,
     MenuFontPage, TreeFontPage, NicklistFontPage, ToolbarFontPage,
@@ -38,7 +38,14 @@ ROLE_NETKEY = Qt.ItemDataRole.UserRole + 1
 # Settings tree structure: (ui_path_suffix, page_id, label, children)
 # Used for both building the tree and registering --ui paths.
 SETTINGS_PAGES = [
-    ('general', 'general', 'General', []),
+    ('general', 'general', 'General', [
+        ('general.interface', 'interface', 'Interface', []),
+        ('general.titles', 'titles', 'Titles', []),
+        ('general.identserver', 'ident_server', 'Ident Server', []),
+        ('general.logging', 'logging', 'Logging', []),
+        ('general.linkpreview', 'link_preview', 'Link Previews', []),
+        ('general.files', 'files', 'Files', []),
+    ]),
     ('identity', 'identity', 'Identity', []),
     ('lists', 'lists', 'Lists', []),
     ('fonts', 'font_root', 'Font / Colors', [
@@ -52,12 +59,9 @@ SETTINGS_PAGES = [
         ('fonts.editor', 'font_editor', 'File Editor', []),
         ('fonts.nickcolors', 'nick_colors', 'Nick Colors', []),
     ]),
-    ('identserver', 'ident_server', 'Ident Server', []),
-    ('logging', 'logging', 'Logging', []),
     ('notifications', 'notifications', 'Notifications', []),
-    ('linkpreview', 'link_preview', 'Link Previews', []),
     ('scripts', 'scripts', 'Scripts', []),
-    ('pluginconfig', 'plugin_config', 'Plugins', []),
+    ('plugins', 'plugin_config', 'Plugins', []),
     ('editor', 'editor', 'File Editor', []),
 ]
 
@@ -90,6 +94,11 @@ def get_settings_ui_paths(config_data=None):
             yield base, 'networks.' + netkey, 'Networks > %s' % netkey
             for sub, label in NETWORK_SUB_PAGES:
                 yield base + '.' + sub, 'networks.%s.%s' % (netkey, sub), 'Networks > %s > %s' % (netkey, label)
+    # Plugin config pages (dynamic from loaded plugins + saved config)
+    if config_data:
+        for pname in get_plugin_names(config_data):
+            path = 'settings.plugins.' + pname.lower()
+            yield path, 'plugin_config_' + pname, 'Plugins > %s' % pname
 
 
 class _FlatSelectionDelegate(QStyledItemDelegate):
@@ -137,7 +146,6 @@ class SettingsDialog(QDialog):
         QShortcut(QKeySequence("Ctrl+W"), self, self.reject)
         self.config = config
         # Deep copy the YAML data so we only write back on OK/Apply
-        self._original_data = copy.deepcopy(config._data)
         self._data = copy.deepcopy(config._data)
         self._applied = False  # True when Apply used without Save
 
@@ -191,9 +199,21 @@ class SettingsDialog(QDialog):
         from dialogs import install_input_focus_handler
         install_input_focus_handler(self)
 
+        # Right-click context menu (Reset to Default, Help) on all settings widgets
+        from settings.widget_context import SettingsContextFilter
+        self._ctx_filter = SettingsContextFilter(self)
+
         self._build_global_pages()
         self._build_network_tree()
         self._build_plugin_config_tree()
+
+        # Round-trip: collect all pages back to normalize the data
+        # (pages may add default keys on load), then snapshot as original
+        self._collect_all()
+        self._original_data = copy.deepcopy(self._data)
+
+        # Install right-click context menus and tag defaults
+        self._install_widget_context_menus()
 
         self.tree.currentItemChanged.connect(self._on_tree_select)
         # Select first item
@@ -201,6 +221,119 @@ class SettingsDialog(QDialog):
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
 
 
+
+    def _install_widget_context_menus(self):
+        """Install right-click context filter on all settings input widgets.
+
+        Uses the 'config_key' property set on each widget (via _ck()) to
+        look up help text and default values from config.example.yaml.
+        No manual mapping dict needed — the config_key IS the YAML key.
+        """
+        from settings.widget_context import (
+            set_default, set_help,
+            QCheckBox, QLineEdit, QSpinBox, QDoubleSpinBox,
+            QComboBox, QFontComboBox, QPlainTextEdit,
+        )
+        widget_types = (QCheckBox, QLineEdit, QSpinBox, QDoubleSpinBox,
+                        QComboBox, QFontComboBox, QPlainTextEdit)
+
+        # Load defaults from config.example.yaml
+        default_data = {}
+        try:
+            import os
+            from ruamel.yaml import YAML
+            example_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'defaults', 'config.example.yaml')
+            if os.path.isfile(example_path):
+                yaml = YAML()
+                yaml.preserve_quotes = True
+                with open(example_path, 'r', encoding='utf-8') as f:
+                    default_data = yaml.load(f) or {}
+        except Exception:
+            pass
+
+        # Load help text from config.example.yaml comments
+        from settings.config_help import get_all_help
+        all_help = get_all_help()
+
+        for page in list(self._pages.values()) + list(self._net_pages.values()):
+            for attr_name in dir(page):
+                if attr_name.startswith('_'):
+                    continue
+                widget = getattr(page, attr_name, None)
+                if not isinstance(widget, widget_types):
+                    continue
+
+                widget.installEventFilter(self._ctx_filter)
+                widget.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)
+
+                # Use config_key property to look up help and defaults
+                cfg_key = widget.property('config_key')
+                if not cfg_key:
+                    continue
+
+                # Help text from YAML comments
+                help_text = (all_help.get(cfg_key, '')
+                             or self._resolve_help(all_help, cfg_key))
+                if help_text:
+                    if not widget.toolTip():
+                        widget.setToolTip(help_text)
+                    set_help(widget, help_text)
+
+                # Default value from YAML data
+                default = (self._resolve_yaml_value(default_data, cfg_key)
+                           or self._resolve_yaml_value_network(default_data, cfg_key))
+                if default is not None:
+                    set_default(widget, default)
+
+    @staticmethod
+    def _resolve_yaml_value(data, dotted_key):
+        """Resolve a dotted key like 'logging.dir' from nested YAML data."""
+        parts = dotted_key.split('.')
+        node = data
+        for part in parts:
+            if not isinstance(node, dict):
+                return None
+            node = node.get(part)
+            if node is None:
+                return None
+        return node
+
+    @staticmethod
+    def _resolve_yaml_value_network(data, dotted_key):
+        """Fall back: try resolving key under the first network in the example.
+
+        For per-network widgets with config_key like 'sasl.mechanism',
+        tries 'networks.<first_net>.sasl.mechanism'.
+        """
+        networks = data.get('networks')
+        if not isinstance(networks, dict) or not networks:
+            return None
+        first_net = next(iter(networks))
+        net_data = networks[first_net]
+        parts = dotted_key.split('.')
+        node = net_data
+        for part in parts:
+            if not isinstance(node, dict):
+                return None
+            node = node.get(part)
+            if node is None:
+                return None
+        return node
+
+    @staticmethod
+    def _resolve_help(all_help, cfg_key):
+        """Fall back: search help keys matching networks.*.<cfg_key>.
+
+        For per-network widgets with config_key like 'sasl.mechanism',
+        finds help for 'networks.libera.sasl.mechanism' etc.
+        """
+        suffix = '.' + cfg_key
+        for key, text in all_help.items():
+            if key.startswith('networks.') and key.endswith(suffix):
+                return text
+        return ''
 
     def _apply_colors(self):
         """Apply settings dialog colors and font if explicitly configured."""
@@ -259,6 +392,9 @@ class SettingsDialog(QDialog):
     def _build_global_pages(self):
         general = GeneralPage()
         self._add_page('general', 'General', general)
+        self._add_page('interface', 'Interface', InterfacePage())
+        self._add_page('titles', 'Titles', TitlesPage())
+        self._add_page('files', 'Files', FilesPage())
         self._add_page('identity', 'Identity', IdentityPage())
         self._add_page('lists', 'Lists', ListsPage())
         # Font / Colors parent — base foreground/background colors

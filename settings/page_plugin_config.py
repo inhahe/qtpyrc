@@ -6,7 +6,7 @@ Shows raw key/value pairs for plugins that aren't currently loaded.
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QFormLayout, QLabel, QLineEdit,
-    QSpinBox, QDoubleSpinBox, QCheckBox, QScrollArea,
+    QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox, QScrollArea,
 )
 from PySide6.QtCore import Qt
 
@@ -44,11 +44,13 @@ class SinglePluginConfigPage(QWidget):
         fields = getattr(type(cls), 'config_fields', []) if cls else []
 
         if fields:
-            for key, typ, default, desc in fields:
+            for field in fields:
+                key, typ, default, desc = field[:4]
+                choices = field[4] if len(field) > 4 else None
                 value = plugin_data.get(key, default)
-                widget = self._make_widget(typ, value, desc)
+                widget = self._make_widget(typ, value, desc, choices)
                 self._form.addRow(desc + ':', widget)
-                self._widgets[key] = (widget, typ)
+                self._widgets[key] = (widget, typ, choices)
         else:
             # No schema — show raw key/value pairs
             if plugin_data:
@@ -56,12 +58,24 @@ class SinglePluginConfigPage(QWidget):
                     widget = QLineEdit(str(value))
                     widget.setToolTip("Raw value (plugin not loaded)")
                     self._form.addRow(key + ':', widget)
-                    self._widgets[key] = (widget, str)
+                    self._widgets[key] = (widget, str, None)
             else:
                 self._form.addRow(QLabel("(plugin not loaded, no saved config)"))
 
-    def _make_widget(self, typ, value, tooltip=''):
-        if typ is bool:
+    def _make_widget(self, typ, value, tooltip='', choices=None):
+        if choices:
+            w = QComboBox()
+            for c in choices:
+                w.addItem(str(c))
+            idx = w.findText(str(value))
+            if idx >= 0:
+                w.setCurrentIndex(idx)
+            else:
+                w.setCurrentText(str(value))
+            if tooltip:
+                w.setToolTip(tooltip)
+            return w
+        elif typ is bool:
             w = QCheckBox()
             w.setChecked(bool(value))
             if tooltip:
@@ -100,8 +114,12 @@ class SinglePluginConfigPage(QWidget):
             plugin_data = CommentedMap()
             plugins_data[self._plugin_name] = plugin_data
 
-        for key, (widget, typ) in self._widgets.items():
-            if typ is bool:
+        for key, entry in self._widgets.items():
+            widget, typ = entry[0], entry[1]
+            choices = entry[2] if len(entry) > 2 else None
+            if choices:
+                plugin_data[key] = widget.currentText()
+            elif typ is bool:
                 plugin_data[key] = widget.isChecked()
             elif typ is int:
                 plugin_data[key] = widget.value()
@@ -115,7 +133,7 @@ def get_plugin_names(data):
     """Return sorted list of plugin names that have config fields or saved config."""
     names = set()
     # Loaded plugins with config_fields
-    for name, loaded in state.activescripts.items():
+    for name, loaded in (state.activescripts or {}).items():
         cls = getattr(loaded, 'instance', None)
         if cls and getattr(type(cls), 'config_fields', []):
             names.add(name)

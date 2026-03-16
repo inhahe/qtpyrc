@@ -850,8 +850,9 @@ class Commands:
     """/on <event> <name> [options] [pattern] [command]
     /on -r <event> <name>
     /on -l [event]
-    Options: -n nick/mask  -c #channel  -k network  -s sound  -d  -h  -p
+    Options: -n nick/mask  -c #channel  -k network  -s sound  -d  -h  -p  -x
     -p persists the hook by appending it to the startup script.
+    -x suppresses the default handler (event won't appear in window).
     Events: chanmsg privmsg action noticed join part quit kick nick topic
             mode connect disconnect signon motd invite rawcmd numeric ctcpreply"""
     from exec_system import _ON_EVENT_MAP
@@ -883,6 +884,8 @@ class Commands:
             filters.append('-d')
           if hinfo.get('highlight_tab'):
             filters.append('-h')
+          if hinfo.get('suppress'):
+            filters.append('-x')
           pat = hinfo.get('pattern', '*')
           fstr = (' %s' % ' '.join(filters)) if filters else ''
           cmd = hinfo.get('command', '')
@@ -936,6 +939,7 @@ class Commands:
     desktop = False
     highlight_tab = False
     persist = False
+    suppress = False
 
     while rest:
       if rest[0] == '-n' and len(rest) > 1:
@@ -959,6 +963,9 @@ class Commands:
       elif rest[0] == '-p':
         rest.pop(0)
         persist = True
+      elif rest[0] == '-x':
+        rest.pop(0)
+        suppress = True
       else:
         break
 
@@ -996,6 +1003,7 @@ class Commands:
       'sound': sound,
       'desktop': desktop,
       'highlight_tab': highlight_tab,
+      'suppress': suppress,
       'window': window,
     }
     parts = [event, '"%s"' % hookname]
@@ -1011,6 +1019,8 @@ class Commands:
       parts.append('-d')
     if highlight_tab:
       parts.append('-h')
+    if suppress:
+      parts.append('-x')
     if pattern != '*':
       parts.append(pattern)
     if command:

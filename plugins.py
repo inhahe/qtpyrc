@@ -415,7 +415,8 @@ def _dispatch_to_plugins(name, conn, args, kwargs):
           traceback.print_exc()
   # Dispatch /on hooks
   try:
-    _dispatch_on_hooks(name, conn, args)
+    if _dispatch_on_hooks(name, conn, args):
+      return True
   except Exception:
     traceback.print_exc()
   return False
