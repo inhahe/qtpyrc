@@ -98,6 +98,7 @@ class _ColorRow(QWidget):
             self._combo.addItem(name)
         self._combo.addItem('Custom...')
         self._combo.setMinimumWidth(140)
+        self._combo.setStyleSheet("QComboBox { padding-left: 4px; }")
         self._combo.currentTextChanged.connect(self._on_text_changed)
         self._combo.activated.connect(self._on_activated)
         self._combo.lineEdit().editingFinished.connect(self.colorChanged.emit)
@@ -253,7 +254,7 @@ def _make_optional_font():
     """Return (family_combo, size_combo) for an optional font (0 = system default)."""
     fam = QFontComboBox()
     fam.setEditable(True)
-    fam.lineEdit().setPlaceholderText("(system default)")
+    fam.insertItem(0, "(system default)")
     sz = _FontSizeCombo()
     sz.setSpecialValueText("(system default)")
     return fam, sz
@@ -263,13 +264,13 @@ def _load_optional_font(fam_combo, size_spin, family, size):
     if family:
         fam_combo.setCurrentText(str(family))
     else:
-        fam_combo.setCurrentText('')
+        fam_combo.setCurrentIndex(0)
     size_spin.setValue(int(size) if size else 0)
 
 
 def _save_optional_font(font, fam_key, size_key, fam_combo, size_spin):
     fam = fam_combo.currentText().strip()
-    if fam:
+    if fam and fam != '(system default)':
         font[fam_key] = fam
     elif fam_key in font:
         del font[fam_key]
@@ -648,7 +649,9 @@ class SettingsFontPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         self.settings_family, self.settings_size = _make_optional_font()
+        self.settings_family.setMinimumWidth(200)
         layout.addRow("Font family:", self.settings_family)
         layout.addRow("Font size:", self.settings_size)
         self.settings_fg = _ColorRow(default_hint='default: foreground')
@@ -672,6 +675,29 @@ class SettingsFontPage(QWidget):
             default_hint='default: system theme',
             default_color=_sys(QPalette.ColorRole.Highlight))
         layout.addRow("Tree selection bg:", self.settings_tree_sel_bg)
+
+        # Element sizes
+        def _size_combo(config_key):
+            c = _ck(_FontSizeCombo(), config_key)
+            c.setSpecialValueText("(base font)")
+            from PySide6.QtWidgets import QSizePolicy
+            c.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            self._size_combos.append(c)
+            return c
+        self._size_combos = []
+        self.title_size = _size_combo('font.settings_sizes.title')
+        layout.addRow("Title size:", self.title_size)
+        self.label_size = _size_combo('font.settings_sizes.label')
+        layout.addRow("Label size:", self.label_size)
+        self.list_size = _size_combo('font.settings_sizes.list')
+        layout.addRow("List/field size:", self.list_size)
+        self.note_size = _size_combo('font.settings_sizes.note')
+        layout.addRow("Note size:", self.note_size)
+        self.hint_size = _size_combo('font.settings_sizes.hint')
+        layout.addRow("Hint size:", self.hint_size)
+        self.delete_size = _size_combo('font.settings_sizes.delete')
+        layout.addRow("Delete btn size:", self.delete_size)
+
         _connect_changed(self)
 
     def load_from_data(self, data):
@@ -687,6 +713,36 @@ class SettingsFontPage(QWidget):
         self.settings_tree_bg.setText(str(settings_tree.get('background', '')))
         self.settings_tree_sel_fg.setText(str(settings_tree.get('select_fg', '')))
         self.settings_tree_sel_bg.setText(str(settings_tree.get('select_bg', '')))
+        sizes = font.get('settings_sizes') or {}
+        self.title_size.setValue(int(sizes.get('title', 13)))
+        self.label_size.setValue(int(sizes.get('label', 0)))
+        self.list_size.setValue(int(sizes.get('list', 0)))
+        self.note_size.setValue(int(sizes.get('note', 0)))
+        self.hint_size.setValue(int(sizes.get('hint', 0)))
+        self.delete_size.setValue(int(sizes.get('delete', 0)))
+
+    def resize_combos(self):
+        """Resize font size combos to fit '(base font)' at current font size."""
+        from PySide6.QtGui import QFontMetrics
+        for c in self._size_combos:
+            fm = QFontMetrics(c.font())
+            text_w = fm.horizontalAdvance('(base font)')
+            # Scale padding with font height (arrow button, margins, etc.)
+            padding = fm.height() * 3
+            c.setFixedWidth(max(text_w + padding, 100))
+
+    def resize_color_rows(self):
+        """Resize color rows to fit the longest default hint at current font."""
+        from PySide6.QtGui import QFontMetrics
+        fm = QFontMetrics(self.font())
+        text_w = fm.horizontalAdvance('default: settings background')
+        # Scale padding with font height: swatch + Pick button + arrow + margins
+        padding = fm.height() * 6
+        w = text_w + padding
+        for row in [self.settings_fg, self.settings_bg,
+                    self.settings_tree_fg, self.settings_tree_bg,
+                    self.settings_tree_sel_fg, self.settings_tree_sel_bg]:
+            row.setFixedWidth(max(w, 250))
 
     def save_to_data(self, data):
         font = _ensure_font(data)
@@ -705,6 +761,17 @@ class SettingsFontPage(QWidget):
         _save_color_val(settings_tree, 'select_bg', self.settings_tree_sel_bg)
         if not settings_tree:
             del colors['settings_tree']
+        from ruamel.yaml.comments import CommentedMap
+        sizes = font.get('settings_sizes')
+        if sizes is None:
+            sizes = CommentedMap()
+            font['settings_sizes'] = sizes
+        sizes['title'] = self.title_size.value()
+        sizes['label'] = self.label_size.value()
+        sizes['list'] = self.list_size.value()
+        sizes['note'] = self.note_size.value()
+        sizes['hint'] = self.hint_size.value()
+        sizes['delete'] = self.delete_size.value()
 
 
 class EditorFontPage(QWidget):

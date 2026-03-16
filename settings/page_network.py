@@ -19,7 +19,8 @@ class NetworkPage(QWidget):
                       "Ignores, auto-ops, highlights, notify: additive (combined with global\n"
                       "and per-channel lists, not replacing them).")
         note.setWordWrap(True)
-        note.setStyleSheet("color: #666; font-size: 9pt; margin-bottom: 4px;")
+        from settings import SETTINGS_NOTE_STYLE
+        note.setStyleSheet(SETTINGS_NOTE_STYLE + " margin-bottom: 4px;")
         layout.addRow(note)
 
         self.name = _ck(QLineEdit(), 'name')

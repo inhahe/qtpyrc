@@ -64,7 +64,8 @@ class ScriptsPage(QWidget):
         pl.addLayout(dir_row)
 
         hint = QLabel("Checked = auto-loaded on startup.")
-        hint.setStyleSheet("color: gray; font-size: 11px;")
+        from settings import SETTINGS_HINT_STYLE
+        hint.setStyleSheet(SETTINGS_HINT_STYLE)
         pl.addWidget(hint)
 
         self.plugins_list = self._make_reorderable_list()
@@ -119,7 +120,8 @@ class ScriptsPage(QWidget):
 
         hint = QLabel("Checked = auto-run on startup. The startup script is set in\n"
                       "config.yaml under scripts.startup (edit via File Editor).")
-        hint.setStyleSheet("color: gray; font-size: 11px;")
+        from settings import SETTINGS_HINT_STYLE
+        hint.setStyleSheet(SETTINGS_HINT_STYLE)
         sl.addWidget(hint)
 
         self.scripts_list = self._make_reorderable_list()

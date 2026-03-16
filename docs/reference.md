@@ -90,6 +90,7 @@ Parameters that accept arbitrary text (messages, reasons, titles) must be quoted
 | `/ban` | `/ban <nick\|mask>` | Ban a user (nicks are expanded to `nick!*@*`) |
 | `/kban` | `/kban <nick> [reason]` | Ban and kick a user in one command |
 | `/chaninfo` | `/chaninfo` | Show channel details dialog (modes, bans, topic) |
+| `/list` | `/list [params]` | Open the channel list browser. See ELIST params below. |
 | `/op` | `/op <nick>` | Give operator status (+o) |
 | `/deop` | `/deop <nick>` | Remove operator status (-o) |
 | `/halfop` | `/halfop <nick>` | Give halfop status (+h) |
@@ -98,6 +99,24 @@ Parameters that accept arbitrary text (messages, reasons, titles) must be quoted
 | `/devoice` | `/devoice <nick>` | Remove voice (-v) |
 | `/quiet` | `/quiet <nick>` | Quiet a user (+q) |
 | `/unquiet` | `/unquiet <nick>` | Remove quiet (-q) |
+
+#### /list ELIST Parameters
+
+`/list` with no parameters opens the browser without fetching. Any parameters are passed to the server as ELIST filters (server-side filtering, reduces load). Multiple parameters can be combined.
+
+| Parameter | Meaning | Example |
+|-----------|---------|---------|
+| `>N` | Channels with **more than** N users | `/list >50` — busy channels only |
+| `<N` | Channels with **fewer than** N users | `/list <20` — small channels |
+| `*mask*` | Channel name matches wildcard | `/list *python*` — channels with "python" in the name |
+| `C>N` | Channel **created more than** N minutes ago | `/list C>1440` — channels older than 1 day |
+| `C<N` | Channel **created less than** N minutes ago | `/list C<60` — channels created in the last hour |
+| `T>N` | **Topic changed more than** N minutes ago | `/list T>10080` — stale topics (>1 week) |
+| `T<N` | **Topic changed less than** N minutes ago | `/list T<60` — recently active topics |
+
+Combined example: `/list >10 <500 *chat*` — channels with 10-500 users and "chat" in the name.
+
+Not all servers support all ELIST parameters. The `>N` filter is the most widely supported. The browser also has a client-side text filter for searching results after they arrive.
 
 ### User Info
 
@@ -652,6 +671,8 @@ class MyPlugin(plugin.Callbacks):
 
 Class = MyPlugin
 ```
+
+For a full working example, see the **triviabot** plugin in `plugins/triviabot/__init__.py`. It demonstrates channel message handling, config fields, timers, fuzzy matching, mIRC colors, and per-channel allow/block lists.
 
 ### `irc.on()` — Registering Hooks from Plugins
 

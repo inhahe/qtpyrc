@@ -1,8 +1,10 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QListWidget,
     QGroupBox, QFormLayout, QLineEdit, QPlainTextEdit, QCheckBox, QLabel,
-    QInputDialog,
+    QInputDialog, QMenu, QSizePolicy,
 )
+from PySide6.QtCore import Qt
+from functools import partial
 
 
 class AutoJoinPage(QWidget):
@@ -16,19 +18,18 @@ class AutoJoinPage(QWidget):
         list_col = QVBoxLayout()
         self._chan_list = QListWidget()
         self._chan_list.currentRowChanged.connect(self._on_row_changed)
+        self._chan_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._chan_list.customContextMenuRequested.connect(self._chan_context_menu)
         list_col.addWidget(self._chan_list, 1)
-        btn_row = QHBoxLayout()
         self._add_btn = QPushButton("Add")
         self._add_btn.clicked.connect(self._add_channel)
-        btn_row.addWidget(self._add_btn)
-        self._remove_btn = QPushButton("Remove")
-        self._remove_btn.clicked.connect(self._remove_channel)
-        btn_row.addWidget(self._remove_btn)
-        list_col.addLayout(btn_row)
-        layout.addLayout(list_col)
+        list_col.addWidget(self._add_btn)
+        layout.addLayout(list_col, 1)
 
         # Edit panel (right)
         self._edit_group = QGroupBox("Channel settings")
+        self._edit_group.setMinimumWidth(0)
+        self._edit_group.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         edit_layout = QVBoxLayout(self._edit_group)
 
         key_row = QHBoxLayout()
@@ -46,22 +47,27 @@ class AutoJoinPage(QWidget):
 
         note = QLabel("Per-channel lists are additive (combined with network "
                       "and global). One entry per line.")
-        note.setStyleSheet("color: #666; font-size: 9pt;")
+        from settings import SETTINGS_NOTE_STYLE
+        note.setStyleSheet(SETTINGS_NOTE_STYLE)
         edit_layout.addWidget(note)
 
         edit_layout.addWidget(QLabel("Ignores:"))
+        from settings import SETTINGS_LIST_STYLE as _list_style
         self._ignores = QPlainTextEdit()
         self._ignores.setPlaceholderText("nick!*@host masks, one per line")
+        self._ignores.setStyleSheet(_list_style)
         edit_layout.addWidget(self._ignores, 1)
 
         edit_layout.addWidget(QLabel("Auto-ops:"))
         self._auto_ops = QPlainTextEdit()
         self._auto_ops.setPlaceholderText("nick!*@host masks, one per line")
+        self._auto_ops.setStyleSheet(_list_style)
         edit_layout.addWidget(self._auto_ops, 1)
 
         edit_layout.addWidget(QLabel("Highlights:"))
         self._highlights = QPlainTextEdit()
         self._highlights.setPlaceholderText("words or /regex/ patterns, one per line")
+        self._highlights.setStyleSheet(_list_style)
         edit_layout.addWidget(self._highlights, 1)
 
         self._edit_group.setEnabled(False)
@@ -129,8 +135,9 @@ class AutoJoinPage(QWidget):
                     self._chan_list.setCurrentRow(i)
                     break
 
-    def _remove_channel(self):
-        row = self._chan_list.currentRow()
+    def _remove_channel(self, row=None):
+        if row is None:
+            row = self._chan_list.currentRow()
         if row < 0 or row >= len(self._channels):
             return
         name = self._channels.pop(row)
@@ -139,12 +146,41 @@ class AutoJoinPage(QWidget):
         self._current_chan = None
         self._refresh_list()
 
+    def _chan_context_menu(self, pos):
+        item = self._chan_list.itemAt(pos)
+        if not item:
+            return
+        row = self._chan_list.row(item)
+        menu = QMenu(self)
+        menu.addAction('Remove', partial(self._remove_channel, row))
+        menu.exec(self._chan_list.viewport().mapToGlobal(pos))
+
     def _refresh_list(self):
         self._updating = True
         row = self._chan_list.currentRow()
         self._chan_list.clear()
-        for ch in self._channels:
-            self._chan_list.addItem(ch)
+        for i, ch in enumerate(self._channels):
+            from PySide6.QtWidgets import QListWidgetItem
+            # Custom row widget: [X] channel_name
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(2, 0, 2, 0)
+            row_layout.setSpacing(4)
+            del_btn = QPushButton('\u00d7')
+            del_btn.setFixedSize(20, 20)
+            from settings import SETTINGS_DELETE_STYLE
+            del_btn.setStyleSheet(SETTINGS_DELETE_STYLE)
+            del_btn.setToolTip('Remove %s' % ch)
+            del_btn.clicked.connect(partial(self._remove_channel, i))
+            row_layout.addWidget(del_btn)
+            label = QLabel(ch)
+            from settings import SETTINGS_LIST_STYLE
+            label.setStyleSheet(SETTINGS_LIST_STYLE)
+            row_layout.addWidget(label, 1)
+            item = QListWidgetItem()
+            item.setSizeHint(row_widget.sizeHint())
+            self._chan_list.addItem(item)
+            self._chan_list.setItemWidget(item, row_widget)
         if 0 <= row < self._chan_list.count():
             self._chan_list.setCurrentRow(row)
         elif self._chan_list.count() > 0:

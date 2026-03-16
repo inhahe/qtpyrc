@@ -35,7 +35,7 @@ It should be cross-platform, but I haven't tested that yet either.
 - Per-channel ignores, auto-ops, highlights, and notification control
 
 **Scripting & Automation**
-- Python plugin API with full access to IRC events and client state
+- Python plugin API with full access to IRC events and client state (see `plugins/triviabot/` for an example)
 - `/exec` for inline Python evaluation
 - `/on` event hooks with pattern matching, sounds, and desktop notifications
 - `/timer` for recurring commands
@@ -56,16 +56,20 @@ It should be cross-platform, but I haven't tested that yet either.
 - Persistent user variables (/set)
 - Tab-completion for nicks with recency sorting
 
-## Requirements
+## Installation
+
+```bash
+git clone https://github.com/inhahe/qtpyrc.git
+cd qtpyrc
+pip install -r requirements.txt
+```
+
+### Requirements
 
 - Python 3.10+
 - PySide6
 - ruamel.yaml
 - qasync
-
-```
-pip install -r requirements.txt
-```
 
 ## Quick Start
 

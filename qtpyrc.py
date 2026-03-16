@@ -22,11 +22,24 @@
 #    module <- the script's entire module
 #    script <- the script module's running Script() instance
 
+import sys, os, asyncio, argparse, signal
+
+# Attach to parent console if one exists (e.g. launched from cmd.exe).
+# This allows print/debug output when run from a terminal, without
+# spawning a console window when launched from a shortcut or explorer.
+if sys.platform == 'win32':
+  try:
+    import ctypes
+    if ctypes.windll.kernel32.AttachConsole(-1):  # ATTACH_PARENT_PROCESS
+      # Reopen stdout/stderr to the console
+      sys.stdout = open('CONOUT$', 'w')
+      sys.stderr = open('CONOUT$', 'w')
+  except Exception:
+    pass
+
 from PySide6.QtWidgets import *
 from PySide6.QtGui import *
 from PySide6.QtCore import *
-
-import sys, os, asyncio, argparse, signal
 
 APP_NAME = 'qtpyrc'
 APP_VERSION = '0.1.0'
@@ -649,6 +662,17 @@ def _populate_toolbar_menu(menu=None):
         state.ui_descriptions[key] = tooltip
 
 
+def _run_wizard():
+  """Show the connection wizard to add a new network."""
+  from setup_wizard import SetupWizard, apply_wizard_result
+  wizard = SetupWizard(state.app.mainwin)
+  if wizard.exec() == QDialog.DialogCode.Accepted and wizard.result_data:
+    apply_wizard_result(state.config, wizard.result_data)
+    # Connect to the new network
+    netkey = wizard.result_data['net_key']
+    _connect_network(netkey)
+
+
 def _connect_network(netkey):
   """Connect to a configured network (from menu)."""
   import asyncio
@@ -829,6 +853,9 @@ def _register_settings_paths():
     del reg[key]
   for key in [k for k in desc if k.startswith('settings.')]:
     del desc[key]
+  # Register bare 'settings' to open the dialog
+  reg['settings'] = lambda: open_settings()
+  desc['settings'] = 'Open Settings dialog'
   for ui_path, page_id, label in get_settings_ui_paths(state.config._data):
     reg[ui_path] = lambda pid=page_id: open_settings(page=pid)
     desc[ui_path] = label
@@ -902,6 +929,10 @@ def makeapp(args):
   app.mainwin.mnusettings.triggered.connect(open_settings)
   _ui['menu.file.settings'] = app.mainwin.mnusettings
   _desc['menu.file.settings'] = _d('File', 'Settings')
+  _a = app.mainwin.mnufile.addAction('Connection &Wizard...')
+  _a.triggered.connect(_run_wizard)
+  _ui['menu.file.wizard'] = _a
+  _desc['menu.file.wizard'] = _d('File', 'Connection Wizard')
   mnuedit = app.mainwin.mnufile.addMenu('&Edit files')
   for label, page_key, ui_key in [
       ('&Startup commands', 'startup', 'menu.file.edit.startup'),
@@ -1652,8 +1683,10 @@ if __name__ == '__main__':
       print('Error: config file not found: %s' % configpath, file=sys.stderr)
       print('Use --init to create a new config file.', file=sys.stderr)
       sys.exit(1)
-    with open(configpath, 'w') as f:
-      f.write(_STUB_CONFIG)
+    # No config file found — auto-init on first run
+    print('First run — creating default configuration in %s'
+          % os.path.dirname(os.path.abspath(configpath)))
+    _init_config(mypath, configpath, cli_args.set_opts)
   state.config = loadconfig(configpath)
 
   # Apply --set overrides
@@ -1710,6 +1743,13 @@ if __name__ == '__main__':
 
   # --- Apply plugin hooks to IRCClient ---
   apply_hooks()
+
+  # --- First-run wizard ---
+  from setup_wizard import should_show_wizard, SetupWizard, apply_wizard_result
+  if should_show_wizard(state.config):
+    wizard = SetupWizard(state.app.mainwin)
+    if wizard.exec() == QDialog.DialogCode.Accepted and wizard.result_data:
+      apply_wizard_result(state.config, wizard.result_data)
 
   # --- Initialise plugin.irc singleton and auto-connect ---
   state.clients = set()

@@ -150,28 +150,33 @@ class SettingsDialog(QDialog):
         self._applied = False  # True when Apply used without Save
 
         # --- layout ---
-        main_layout = QHBoxLayout(self)
+        main_layout = QVBoxLayout(self)
 
         # Apply settings dialog colors
-        self._apply_colors()
+        self._apply_dialog_style()
+
+        from PySide6.QtWidgets import QSplitter
+        splitter = QSplitter(self)
 
         # Tree
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
-        self.tree.setMinimumWidth(180)
-        self.tree.setMaximumWidth(220)
+        self.tree.setMinimumWidth(120)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._tree_context_menu)
         self._tree_delegate = _FlatSelectionDelegate(parent=self.tree)
         self.tree.setItemDelegate(self._tree_delegate)
-        self._apply_tree_colors()
+        self._apply_tree_style()
         self.tree.setFrameShape(QFrame.Shape.StyledPanel)
-        main_layout.addWidget(self.tree)
+        splitter.addWidget(self.tree)
 
         # Right side: stacked pages + buttons
-        right = QVBoxLayout()
+        right_widget = QWidget()
+        right = QVBoxLayout(right_widget)
+        right.setContentsMargins(4, 0, 0, 0)
         self.page_title = QLabel()
-        self.page_title.setStyleSheet("font-weight: bold; font-size: 14px;")
+        from settings import SETTINGS_TITLE_STYLE
+        self.page_title.setStyleSheet(SETTINGS_TITLE_STYLE)
         right.addWidget(self.page_title)
 
         self.stack = QStackedWidget()
@@ -187,9 +192,17 @@ class SettingsDialog(QDialog):
         self._btn_apply.setToolTip("Apply changes to the running UI (does not save to disk)")
         buttons.addButton(self._btn_apply, QDialogButtonBox.ButtonRole.ApplyRole)
         self._btn_apply.clicked.connect(self._on_apply)
+        self._reset_page_btn = QPushButton('Reset Page to Defaults')
+        self._reset_page_btn.setToolTip('Reset all settings on this page to their default values')
+        self._reset_page_btn.clicked.connect(self._reset_current_page)
+        buttons.addButton(self._reset_page_btn, QDialogButtonBox.ButtonRole.ResetRole)
         right.addWidget(buttons)
 
-        main_layout.addLayout(right, 1)
+        splitter.addWidget(right_widget)
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        main_layout.addWidget(splitter)
+        self._splitter = splitter
 
         # --- pages ---
         self._pages = {}        # page_id -> widget (actual page for save/load)
@@ -214,6 +227,25 @@ class SettingsDialog(QDialog):
 
         # Install right-click context menus and tag defaults
         self._install_widget_context_menus()
+
+        # Apply label font size if configured
+        from settings import SETTINGS_LABEL_STYLE
+        if SETTINGS_LABEL_STYLE:
+            from PySide6.QtWidgets import QFormLayout
+            for page in list(self._pages.values()) + list(self._net_pages.values()):
+                for child in page.findChildren(QLabel):
+                    # Only style labels that are form row labels (not notes/hints)
+                    parent_layout = child.parent().layout() if child.parent() else None
+                    if isinstance(parent_layout, QFormLayout):
+                        for row in range(parent_layout.rowCount()):
+                            label_item = parent_layout.itemAt(row, QFormLayout.ItemRole.LabelRole)
+                            if label_item and label_item.widget() is child:
+                                child.setStyleSheet(SETTINGS_LABEL_STYLE)
+                                break
+
+        # Defer initial sizing until the dialog has its font applied
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self._initial_sizing)
 
         self.tree.currentItemChanged.connect(self._on_tree_select)
         # Select first item
@@ -274,16 +306,18 @@ class SettingsDialog(QDialog):
                     continue
 
                 # Help text from YAML comments
-                help_text = (all_help.get(cfg_key, '')
-                             or self._resolve_help(all_help, cfg_key))
+                help_text = all_help.get(cfg_key, '')
+                if not help_text:
+                    help_text = self._resolve_help(all_help, cfg_key)
                 if help_text:
                     if not widget.toolTip():
                         widget.setToolTip(help_text)
                     set_help(widget, help_text)
 
                 # Default value from YAML data
-                default = (self._resolve_yaml_value(default_data, cfg_key)
-                           or self._resolve_yaml_value_network(default_data, cfg_key))
+                default = self._resolve_yaml_value(default_data, cfg_key)
+                if default is None:
+                    default = self._resolve_yaml_value_network(default_data, cfg_key)
                 if default is not None:
                     set_default(widget, default)
 
@@ -335,12 +369,53 @@ class SettingsDialog(QDialog):
                 return text
         return ''
 
-    def _apply_colors(self):
-        """Apply settings dialog colors and font if explicitly configured."""
+    def _reset_current_page(self):
+        """Reset all config widgets on the current page to their defaults."""
+        from PySide6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self, 'Reset Page',
+            'Reset all settings on this page to their default values?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        from settings.widget_context import _get_default, _reset_widget
+        widget = self.stack.currentWidget()
+        if not widget:
+            return
+        # Find the actual page (may be wrapped in a scroll area or container)
+        page = None
+        for pid, w in self._pages.items():
+            sw = self._stack_widgets.get(pid)
+            if sw is widget or w is widget:
+                page = w
+                break
+        if not page:
+            # Check network pages
+            for key, w in self._net_pages.items():
+                if w is widget:
+                    page = w
+                    break
+        if not page:
+            return
+        from PySide6.QtWidgets import QWidget as _QW
+        count = 0
+        for attr_name in dir(page):
+            if attr_name.startswith('_'):
+                continue
+            w = getattr(page, attr_name, None)
+            if isinstance(w, _QW):
+                default = _get_default(w)
+                if default is not None:
+                    _reset_widget(w, default)
+                    count += 1
+
+    def _apply_dialog_style(self):
+        """Apply settings dialog colors and font."""
         cfg = self.config
         colors = (cfg._data.get('colors') or {})
         settings = colors.get('settings') or {}
         parts = []
+        # Only apply colors if explicitly configured (not inherited from chat colors)
         if settings.get('foreground') or settings.get('background'):
             if cfg.settings_bgcolor:
                 parts.append("background-color: %s;" % cfg.settings_bgcolor.name())
@@ -350,10 +425,21 @@ class SettingsDialog(QDialog):
             parts.append("font-family: '%s';" % cfg.settings_font_family)
         if cfg.settings_font_size:
             parts.append("font-size: %dpt;" % cfg.settings_font_size)
+        # Apply via QFont directly — more reliable than stylesheet for dialogs
+        from PySide6.QtGui import QFont
+        f = self.font()
+        if cfg.settings_font_family:
+            f.setFamily(cfg.settings_font_family)
+        if cfg.settings_font_size:
+            f.setPointSize(cfg.settings_font_size)
+        self.setFont(f)
+        # Stylesheet for colors only
         if parts:
-            self.setStyleSheet("SettingsDialog { %s }" % ' '.join(parts))
+            self.setStyleSheet("* { %s }" % ' '.join(parts))
+        else:
+            self.setStyleSheet('')
 
-    def _apply_tree_colors(self):
+    def _apply_tree_style(self):
         """Apply settings tree colors and selection colors."""
         cfg = self.config
         parts = []
@@ -796,8 +882,83 @@ class SettingsDialog(QDialog):
         self._apply_to_ui(self._data, visible_only=False)
         self._applied = True
         # Refresh settings dialog's own appearance
-        self._apply_colors()
-        self._apply_tree_colors()
+        self._apply_dialog_style()
+        self._apply_tree_style()
+        # Defer font-dependent sizing until Qt processes the font change
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self._refresh_dialog_fonts)
+
+    def _refresh_dialog_fonts(self):
+        """Reapply settings dialog element font sizes after config change."""
+        import settings as _settings_mod
+        # Refresh the cached style strings from current config
+        _s = _settings_mod.get_styles()
+        _settings_mod.SETTINGS_TITLE_STYLE = _s['title']
+        _settings_mod.SETTINGS_LABEL_STYLE = _s['label']
+        _settings_mod.SETTINGS_LIST_STYLE = _s['list']
+        _settings_mod.SETTINGS_NOTE_STYLE = _s['note']
+        _settings_mod.SETTINGS_HINT_STYLE = _s['hint']
+        _settings_mod.SETTINGS_DELETE_STYLE = _s['delete']
+
+        # Apply title style
+        self.page_title.setStyleSheet(_s['title'])
+
+        # Apply to all pages
+        from PySide6.QtWidgets import QFormLayout, QPlainTextEdit
+        for page in list(self._pages.values()) + list(self._net_pages.values()):
+            # Labels
+            if _s['label']:
+                for child in page.findChildren(QLabel):
+                    parent_layout = child.parent().layout() if child.parent() else None
+                    if isinstance(parent_layout, QFormLayout):
+                        for row in range(parent_layout.rowCount()):
+                            li = parent_layout.itemAt(row, QFormLayout.ItemRole.LabelRole)
+                            if li and li.widget() is child:
+                                child.setStyleSheet(_s['label'])
+                                break
+            # List/text fields
+            if _s['list']:
+                for te in page.findChildren(QPlainTextEdit):
+                    te.setStyleSheet(_s['list'])
+            # Resize font size combos and color rows
+            if hasattr(page, 'resize_combos'):
+                page.resize_combos()
+            if hasattr(page, 'resize_color_rows'):
+                page.resize_color_rows()
+        self._autosize_tree()
+
+    def _initial_sizing(self):
+        """Deferred sizing after the dialog font is applied."""
+        font_settings = self._pages.get('font_settings')
+        if font_settings and hasattr(font_settings, 'resize_combos'):
+            font_settings.resize_combos()
+        if font_settings and hasattr(font_settings, 'resize_color_rows'):
+            font_settings.resize_color_rows()
+        self._autosize_tree()
+
+    def _autosize_tree(self):
+        """Resize the tree panel to fit its content."""
+        self.tree.expandAll()
+        # Measure widest item text with current font
+        from PySide6.QtGui import QFontMetrics
+        fm = QFontMetrics(self.tree.font())
+        max_w = 0
+        indent = self.tree.indentation() or 20
+        def _measure(item, depth):
+            nonlocal max_w
+            w = fm.horizontalAdvance(item.text(0)) + (depth + 1) * indent + 10
+            if w > max_w:
+                max_w = w
+            for i in range(item.childCount()):
+                _measure(item.child(i), depth + 1)
+        for i in range(self.tree.topLevelItemCount()):
+            _measure(self.tree.topLevelItem(i), 0)
+        # Add scrollbar width + frame + generous padding
+        tree_w = max_w + 40
+        tree_w = max(tree_w, 180)
+        self.tree.setMinimumWidth(tree_w)
+        total = self._splitter.width() or 700
+        self._splitter.setSizes([tree_w, max(total - tree_w, 300)])
 
     def _on_save_and_apply(self):
         """Save to disk and apply changes to the running UI."""

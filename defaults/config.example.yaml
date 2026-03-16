@@ -285,7 +285,23 @@ font:
   #~ toolbar_family: Segoe UI  # toolbar button text font (omit for system default)
   #~ toolbar_size: 11          # defaults to ~55% of icon size if not specified
   #~ settings_family: Segoe UI  # settings dialog font (omit for system default)
-  #~ settings_size: 10
+  # settings dialog base font size (pt)
+  settings_size: 11
+  # settings dialog element sizes
+  # settings dialog element sizes (pt, 0 = use base dialog font)
+  settings_sizes:
+    # page title
+    title: 13
+    # form labels
+    label: 0
+    # list and text field content
+    list: 0
+    # muted explanatory notes
+    note: 0
+    # small helper/tip text
+    hint: 0
+    # delete button text
+    delete: 0
   editor_family: Consolas  # file editor font (monospaced recommended)
   editor_size: 10          # file editor font size
 

@@ -667,6 +667,34 @@ class IRCClient(asyncirc.IRCClient):
     # Default: show in server window
     self.window.addline(' '.join(params[1:]))
 
+  # --- Channel list numerics ---
+
+  def irc_RPL_LISTSTART(self, prefix, params):
+    pass  # 321 — just a header, nothing to do
+
+  def irc_RPL_LIST(self, prefix, params):
+    # 322: [me, #channel, visible_count, :topic]
+    if len(params) < 3:
+      return
+    channel = params[1]
+    try:
+      users = int(params[2])
+    except (ValueError, TypeError):
+      users = 0
+    topic = params[3] if len(params) > 3 else ''
+    dlg = getattr(self.client, '_list_dialog', None)
+    if dlg:
+      dlg.add_entry(channel, users, topic)
+    else:
+      # No dialog open — show in server window
+      self.window.addline('[LIST] %s (%d) %s' % (channel, users, topic))
+
+  def irc_RPL_LISTEND(self, prefix, params):
+    # 323: end of LIST
+    dlg = getattr(self.client, '_list_dialog', None)
+    if dlg:
+      dlg.list_end()
+
   def irc_RPL_WELCOME(self, prefix, params):
     super().irc_RPL_WELCOME(prefix, params)
     # Use network_key as default; ISUPPORT NETWORK= will correct it later if available
