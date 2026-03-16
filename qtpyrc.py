@@ -778,18 +778,9 @@ class _AppKeyFilter(QObject):
       ctrl = mods & Qt.KeyboardModifier.ControlModifier
       alt = mods & Qt.KeyboardModifier.AltModifier
 
-      # Alt+F4: close the entire application
-      # If a dialog is active, let it handle the close (unsaved changes check)
-      if key == Qt.Key.Key_F4 and alt:
-        if event.type() == QEvent.Type.ShortcutOverride:
-          event.accept()
-          return True
-        active = QApplication.activeWindow()
-        if isinstance(active, QDialog):
-          active.close()
-          return True
-        QApplication.instance().quit()
-        return True
+      # Alt+F4: let Windows handle it natively.
+      # On the main window: closes it → lastWindowClosed → quit.
+      # On a dialog: closes it → closeEvent → reject (unsaved check).
 
       # Ctrl+F4: close the active in-app window (part channel, close query)
       # If a dialog (modal or non-modal) has focus, close it instead

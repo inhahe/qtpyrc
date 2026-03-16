@@ -1111,6 +1111,26 @@ class Commands:
     state.config = cfg
     window.redmessage("[Configuration reloaded from %s]" % cfg.path)
 
+  def openurl(window, text):
+    """Open a URL in the system browser.
+    /openurl <url>"""
+    url = text.strip()
+    if not url:
+      window.redmessage('[Usage: /openurl <url>]')
+      return
+    from PySide6.QtGui import QDesktopServices
+    from PySide6.QtCore import QUrl
+    QDesktopServices.openUrl(QUrl(url))
+
+  def clipboard(window, text):
+    """Copy text to the system clipboard.
+    /clipboard <text>"""
+    if not text:
+      window.redmessage('[Usage: /clipboard <text>]')
+      return
+    from PySide6.QtWidgets import QApplication
+    QApplication.clipboard().setText(text)
+
   def raw(window, text):
     """Send a raw IRC command to the server."""
     conn = window.client.conn if window.client else None
