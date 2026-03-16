@@ -17,7 +17,7 @@ input_lines: 1
 # Tab completion: max age (seconds) for prioritizing recently active nicks.
 # Nicks who spoke within this window are sorted first, then nicks you mentioned,
 # then alphabetical.  0 = no age limit (use entire channel history buffer).
-# tab_complete_age: 3600
+#~ tab_complete_age: 3600
 
 # Prefix character for slash commands.
 command_prefix: "/"
@@ -41,15 +41,15 @@ show_toolbar: true
 toolbar_icon_size: 20
 
 # Legacy toolbar font/color keys (now under font.toolbar_* and colors.toolbar.*).
-# toolbar_font_family: Segoe UI
-# toolbar_font_size: 11
-# toolbar_foreground_color: "#cccccc"
-# toolbar_separator_color: "#666666"
+#~ toolbar_font_family: Segoe UI
+#~ toolbar_font_size: 11
+#~ toolbar_foreground_color: "#cccccc"
+#~ toolbar_separator_color: "#666666"
 
 # External text editor for editing config/script files.
 # If set, the Config/Startup/Popups buttons in the File Editor will open
 # this program instead of the built-in editor.
-# external_editor: notepad++
+#~ external_editor: notepad++
 
 # UI state file (splitter sizes, recent sounds, etc.).  Default: ui.yaml.
 ui_state_file: ui.yaml
@@ -66,10 +66,11 @@ window_mode: maximized
 # Other functions: {stdin("prompt")} reads a line from the terminal.
 # The eval namespace includes `state`, `import_module`, and `stdin`.
 # The title refreshes every 3s and immediately on connect/disconnect/nick change.
+# {replay} shows history replay progress (e.g. " [history: 12/85]"), empty when done.
 # Example: 'qtpyrc ({me} on {network_key}) - {channel}'
-#titlebar_format: ""
+#~ titlebar_format: ""
 # How often (in seconds) to refresh the title bar.  Minimum 0.1.
-#titlebar_interval: 1
+#~ titlebar_interval: 1
 
 # Window title format strings.  Supports the same {variables} and {eval("...")}
 # function calls as titlebar_format.  Additional variables for window titles:
@@ -78,7 +79,9 @@ window_mode: maximized
 # Titles refresh on the same timer as titlebar_format
 # and on connect/disconnect/nick/topic changes.
 titles:
+  # title format for connected server windows
   server: "{network_label} - {me}"
+  # title format for disconnected server windows
   server_disconnected: "[not connected] {network_label} - {me}"
   channel: "{channel}"                   # e.g. "{channel} ({network_label})" to include network
   query: "{query_nick}"                  # e.g. "{query_nick} ({network_label})"
@@ -100,9 +103,6 @@ new_tab_state: active
 # or "both" (tab bar and tree view).  Requires restart.
 navigation: tabs
 
-# Display name shown in the title bar (cosmetic only, not sent to IRC).
-nickname: myuser
-
 # Close channel windows when you are kicked from a channel.
 # If false, the window stays open but is marked inactive.
 close_on_kick: false
@@ -122,11 +122,12 @@ auto_copy_selection: false
 # Assign random colors to nicks in channel messages.
 # Each nick always gets the same color (based on hash).
 nick_colors:
+  # color nicks in channel messages based on a hash of the nick name
   enabled: false
-  # palette:              # custom palette (list of hex colors)
-  #   - "#cc0000"
-  #   - "#0066cc"
-  #   - "#009900"
+  #~ palette:              # custom palette (list of hex colors)
+  #~   - "#cc0000"
+  #~   - "#0066cc"
+  #~   - "#009900"
   #   # ... add as many as you like
 
 
@@ -134,6 +135,7 @@ nick_colors:
 # Typing notifications (IRCv3 +typing)
 # ---------------------------------------------------------------------------
 
+# IRCv3 typing notifications (+typing capability)
 typing:
   send: true              # send typing notifications to channels
   show: true              # show typing indicators from other users
@@ -152,7 +154,7 @@ link_preview:
   timeout: 10.0            # seconds before giving up on a fetch
   width: 400               # preview box width in pixels
   height: 120              # preview box height in pixels
-  # proxy: socks5://127.0.0.1:9050  # route fetches through a proxy (hides your IP)
+  #~ proxy: socks5://127.0.0.1:9050  # route fetches through a proxy (hides your IP)
                            # Supports http://, https://, socks5:// URLs.
                            # Example for Tor: socks5://127.0.0.1:9050
 
@@ -181,26 +183,26 @@ link_preview:
 notifications:
   sound: beep               # global default sound: "beep", "none", a name, or a .wav path
   notice:                   # receiving a NOTICE
-    sound: none
-    desktop: false
+    sound: none             # sound to play (beep, none, default, name, or .wav path)
+    desktop: false          # show a desktop notification
   new_query:                # receiving a privmsg that opens a new query
-    sound: default
-    desktop: true
+    sound: default          # sound to play
+    desktop: true           # show a desktop notification
   highlight:                # a highlight pattern matched in a channel
-    sound: default
-    desktop: true
+    sound: default          # sound to play
+    desktop: true           # show a desktop notification
   connect:                  # connected to a server
-    sound: none
-    desktop: false
+    sound: none             # sound to play
+    desktop: false          # show a desktop notification
   disconnect:               # disconnected from a server
-    sound: none
-    desktop: false
+    sound: none             # sound to play
+    desktop: false          # show a desktop notification
   notify_online:            # someone in /notify list logged on
-    sound: default
-    desktop: true
+    sound: default          # sound to play
+    desktop: true           # show a desktop notification
   notify_offline:           # someone in /notify list logged off
-    sound: none
-    desktop: false
+    sound: none             # sound to play
+    desktop: false          # show a desktop notification
   check_interval: 60        # seconds between ISON polls for /notify list
                             # (only used when the server doesn't support MONITOR)
 
@@ -248,7 +250,7 @@ persist_autojoins: false  # [N] override per-network
 
 # Legacy rate limit: minimum milliseconds between sent lines.
 # Prefer the flood section below.  0 = disabled.
-# ms: 500                 # [N] (as rate_limit or ms)
+#~ ms: 500                 # [N] (as rate_limit or ms)
 
 # Token-bucket flood protection.  Allows an initial burst of messages,
 # then throttles to one message per <rate> seconds.
@@ -270,22 +272,22 @@ flood:
 # If the font is not installed, qtpyrc will prompt you to pick a replacement.
 
 font:
-  family: Fixedsys
+  family: Fixedsys         # chat font family name
   size: 15                 # font size in points
   tab_family: Segoe UI     # tab title font (omit for system default)
   tab_size: 12             # tab title font size (omit for default)
-  # menu_family: Segoe UI  # menu font (omit for system default)
-  # menu_size: 10
-  # tree_family: Segoe UI  # network tree sidebar font (omit for system default)
-  # tree_size: 10
-  # nicklist_family: Fixedsys  # nick list font (omit to use chat font)
-  # nicklist_size: 15
-  # toolbar_family: Segoe UI  # toolbar button text font (omit for system default)
-  # toolbar_size: 11          # defaults to ~55% of icon size if not specified
-  # settings_family: Segoe UI  # settings dialog font (omit for system default)
-  # settings_size: 10
+  #~ menu_family: Segoe UI  # menu font (omit for system default)
+  #~ menu_size: 10
+  #~ tree_family: Segoe UI  # network tree sidebar font (omit for system default)
+  #~ tree_size: 10
+  #~ nicklist_family: Fixedsys  # nick list font (omit to use chat font)
+  #~ nicklist_size: 15
+  #~ toolbar_family: Segoe UI  # toolbar button text font (omit for system default)
+  #~ toolbar_size: 11          # defaults to ~55% of icon size if not specified
+  #~ settings_family: Segoe UI  # settings dialog font (omit for system default)
+  #~ settings_size: 10
   editor_family: Consolas  # file editor font (monospaced recommended)
-  editor_size: 10
+  editor_size: 10          # file editor font size
 
 
 # ---------------------------------------------------------------------------
@@ -299,51 +301,57 @@ font:
 #   darkRed, darkGreen, darkBlue, darkCyan, darkMagenta, darkYellow
 
 colors:
-  foreground: black        # chat text color
-  background: white        # chat background color
-  system: red              # system/status messages (connecting, errors, reconnect)
-  info: darkGreen          # joins, parts, quits, nick changes, mode changes, topics
-  action: darkMagenta      # /me actions
-  notice: darkCyan         # NOTICE messages
+  # chat text color
+  foreground: black
+  # chat background color
+  background: white
+  # system/status messages (connecting, errors, reconnect)
+  system: red
+  # joins, parts, quits, nick changes, mode changes, topics
+  info: darkGreen
+  # /me actions
+  action: darkMagenta
+  # NOTICE messages
+  notice: darkCyan
 
   # Menu colors.  Defaults to foreground/background.
-  #menu:
-  #  foreground: black
-  #  background: white
+  #~ menu:
+  #~   foreground: black
+  #~   background: white
 
   # Network tree sidebar colors.  Defaults to foreground/background.
-  #tree:
-  #  foreground: black
-  #  background: white
+  #~ tree:
+  #~   foreground: black
+  #~   background: white
 
   # Nick list colors.  Defaults to foreground/background.
   # Font is under font.nicklist_family / font.nicklist_size (defaults to chat font).
-  #nicklist:
-  #  foreground: black
-  #  background: white
+  #~ nicklist:
+  #~   foreground: black
+  #~   background: white
 
   # Toolbar icon color.  Defaults to foreground.
-  #toolbar:
-  #  foreground: black
-  #  separator: "#808080"   # separator line color (default: midpoint of fg/bg)
+  #~ toolbar:
+  #~   foreground: black
+  #~   separator: "#808080"   # separator line color (default: midpoint of fg/bg)
 
   # Built-in file editor colors.  Defaults to foreground/background.
   # Font is under font.editor_family / font.editor_size.
-  #editor:
-  #  foreground: black
-  #  background: white
+  #~ editor:
+  #~   foreground: black
+  #~   background: white
 
   # Settings dialog colors.  Defaults to foreground/background.
-  #settings:
-  #  foreground: black
-  #  background: white
+  #~ settings:
+  #~   foreground: black
+  #~   background: white
 
   # Settings dialog tree (left panel).  Defaults to system theme.
-  #settings_tree:
-  #  foreground: black
-  #  background: "#f0f0f0"
-  #  select_fg: white          # selected item text (default: system highlight text)
-  #  select_bg: "#0078d4"      # selected item background (default: system highlight)
+  #~ settings_tree:
+  #~   foreground: black
+  #~   background: "#f0f0f0"
+  #~   select_fg: white          # selected item text (default: system highlight text)
+  #~   select_bg: "#0078d4"      # selected item background (default: system highlight)
 
   # Tab colors.  Omit any to use auto-derived defaults.
   tabs:
@@ -360,8 +368,8 @@ colors:
   link: "#0066cc"
 
   # Search highlight (Ctrl+F).  Default: yellow background, black text.
-  search_bg: yellow
-  search_fg: black
+  search_bg: yellow        # search highlight background color
+  search_fg: black         # search highlight text color
 
   # Tab/tree activity colors.  Omit or leave blank for defaults.
   highlight: red           # color of window title when your nick is mentioned
@@ -374,43 +382,51 @@ colors:
 
 ident_username: myuser     # username reported by the built-in identd
 
+# built-in ident (RFC 1413) server
 ident:
+  # run the ident server on startup
   enabled: true
-  host: "0.0.0.0"         # listen address
-  port: 113                # listen port
+  host: "0.0.0.0"         # listen address (0.0.0.0 = all interfaces)
+  port: 113                # listen port (may require admin privileges)
 
 
 # ---------------------------------------------------------------------------
 # Backscroll & History
 # ---------------------------------------------------------------------------
 
-# Maximum number of lines kept in each channel window's backscroll buffer.
-# Older lines are discarded as new ones arrive.  0 = unlimited.
 # SQLite database for session history replay.
 # Relative paths are resolved from the config file directory.
 history_file: history.db
 
+# Maximum number of lines kept in each channel window's backscroll buffer.
+# Older lines are discarded as new ones arrive.  0 = unlimited.
 backscroll_limit: 10000
 
 # Lines of history to replay from the database when opening a window.
 # Shows color-coded messages, joins, parts, etc. from previous sessions.
 # Set to 0 to disable.
 history_replay:
-  channels: 10000            # replay on channel join (default: backscroll_limit)
-  queries: 0                 # replay on query open (default: 0 / disabled)
-                             # Note: nicks can be reused by different people,
-                             # so query history may not belong to the same person.
-  bg_enabled: true           # load history in the background after connecting
-                             # true = channels fill gradually, UI stays responsive
-                             # false = history loads all at once when you switch to a channel
-  bg_chunk: 50               # lines per background tick (higher = faster but UI may stutter)
-  bg_interval: 50            # ms pause between chunks (higher = smoother UI, slower loading)
+  # lines to replay on channel join (default: backscroll_limit)
+  channels: 10000
+  # lines to replay on query open (default: 0 / disabled).
+  # Note: nicks can be reused by different people,
+  # so query history may not belong to the same person.
+  queries: 0
+  # load history in the background after connecting.
+  # true = channels fill gradually, UI stays responsive.
+  # false = history loads all at once when you switch to a channel.
+  bg_enabled: true
+  # lines per background tick (higher = faster but UI may stutter)
+  bg_chunk: 50
+  # ms pause between chunks (higher = smoother UI, slower loading)
+  bg_interval: 100
 
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
+# IRC chat logging to text files
 logging:
   dir: logs                # directory for log files (relative to config file)
   use_subdirs: false       # create per-network and per-channel subdirectories
@@ -423,6 +439,7 @@ logging:
 # Scripts / Plugins
 # ---------------------------------------------------------------------------
 
+# Python plugin system
 plugins:
   dir: plugins             # directory for Python plugins (relative to config file)
   auto_load:               # Python plugins to load automatically on startup
@@ -444,12 +461,12 @@ scripts:
 # add to these, they don't replace them.
 # Masks support wildcards: nick, nick!*@*, *!*@host, etc.
 
-# ignores:
-#   - "spammer!*@*"
-#   - "annoying_nick"
+#~ ignores:
+#~   - "spammer!*@*"
+#~   - "annoying_nick"
 
-# auto_ops:
-#   - "trusted!*@trusted.host"
+#~ auto_ops:
+#~   - "trusted!*@trusted.host"
 
 # Highlight patterns.  Messages matching any pattern trigger highlight
 # activity and (optionally) beep/desktop notifications.
@@ -465,14 +482,14 @@ scripts:
 # (see the /on section in docs/reference.md).
 highlights:
   - "{me}"
-#  - "important"
-#  - "/deploy\s+fail/i"
+#~  - "important"
+#~  - "/deploy\s+fail/i"
 
 # Nick watch list (global).  /notify nicks are tracked via MONITOR if the
 # server supports it, otherwise checked periodically via ISON polling.
-# notify:
-#   - friend1
-#   - friend2
+#~ notify:
+#~   - friend1
+#~   - friend2
 
 
 # ---------------------------------------------------------------------------
@@ -504,16 +521,17 @@ networks:
 
     # Identity overrides (omit to use global defaults)
     nick: mynick
-    # alt_nicks:
-    #   - mynick_
-    # user: myident
-    # realname: "my real name"
+    #~ alt_nicks:
+    #~   - mynick_
+    #~ user: myident
+    #~ realname: "my real name"
 
     auto_connect: true     # connect to this network on startup
+    # save /join and /part changes to the auto_join list in config
     persist_autojoins: true
 
     # Server password (checked at server level first, then network level)
-    # password: "server_password_here"
+    #~ password: "server_password_here"
 
     # Single server
     server:
@@ -535,30 +553,30 @@ networks:
       '#keyed-channel': the_channel_key
 
     # Per-network flood protection (overrides global burst/rate independently)
-    # flood:
-    #   burst: 3
-    #   rate: 1.5
+    #~ flood:
+    #~   burst: 3
+    #~   rate: 1.5
 
     # Per-network ignore/auto-op/notify/highlights (additive with global lists)
-    # ignores:
-    #   - "bot!*@*"
-    # auto_ops:
-    #   - "friend!*@friend.host"
-    # notify:
-    #   - friendnick
-    # highlights:
-    #   - "urgent"
+    #~ ignores:
+    #~   - "bot!*@*"
+    #~ auto_ops:
+    #~   - "friend!*@friend.host"
+    #~ notify:
+    #~   - friendnick
+    #~ highlights:
+    #~   - "urgent"
 
     # Per-network channel settings
-    # channels:
-    #   '#channel1':
-    #     ignores:
-    #       - "chanspammer"
-    #     auto_ops:
-    #       - "chanop!*@*"
-    #     highlights:
-    #       - "deploy"
-    #     highlight_notify: false   # suppress beep/desktop for this channel
+    #~ channels:
+    #~   '#channel1':
+    #~     ignores:
+    #~       - "chanspammer"
+    #~     auto_ops:
+    #~       - "chanop!*@*"
+    #~     highlights:
+    #~       - "deploy"
+    #~     highlight_notify: false   # suppress beep/desktop for this channel
 
   # --- Example: multiple servers with cycling ---
   # If connection to one server fails, the client cycles to the next.
@@ -574,8 +592,8 @@ networks:
         port: 6667
         tls: false
 
-    # auto_join:
-    #   '#somechannel':
+    #~ auto_join:
+    #~   '#somechannel':
 
   # --- Example: minimal network ---
   efnet:

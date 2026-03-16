@@ -334,7 +334,7 @@ class _Irc:
 
     def on(self, event, name, pattern, command='', *, channel=None, network=None,
            nick_mask=None, sound=None, desktop=False, highlight_tab=False,
-           window=None):
+           suppress=False, window=None):
         """Register an /on hook.
 
         Args:
@@ -343,11 +343,15 @@ class _Irc:
             name:     Unique name for this hook (used for removal).
             pattern:  Wildcard pattern matched against the event's primary text
                       (message, nick, etc.).  Use ``'*'`` to match everything.
-            command:  Command string or callable.  Strings are executed as
-                      slash commands with ``{nick}``, ``{channel}``, etc.
-                      expanded.  Callables receive ``(variables_dict, conn)``
-                      where variables_dict has keys like ``'nick'``,
-                      ``'channel'``, ``'message'``, etc.
+            command:  Command string, callable, or list of both.
+                      Strings are executed as slash commands with
+                      ``{nick}``, ``{channel}``, etc. expanded.  Multiple
+                      commands can be separated with `` | `` (space-pipe-space).
+                      Callables receive ``(variables_dict, conn)`` where
+                      variables_dict has keys like ``'nick'``, ``'channel'``,
+                      ``'message'``, etc.  Return truthy from a callable to
+                      suppress the event.
+                      A list can mix callables and strings, executed in order.
                       Optional if action flags are used.
             channel:  Optional channel filter (only fire in this channel).
             network:  Optional network filter (only fire on this network).
@@ -356,6 +360,8 @@ class _Irc:
                       or a ``.wav`` path.
             desktop:  If True, show a desktop notification.
             highlight_tab: If True, highlight the channel tab.
+            suppress: If True, suppress the default handler for the event
+                      (the message won't appear in the window).
             window:   Optional window to run the command in.  If omitted,
                       the active window at fire-time is used.
 
@@ -365,6 +371,8 @@ class _Irc:
             irc.on('chanmsg', 'vip', '*', sound='beep', desktop=True,
                    nick_mask='boss')
             irc.on('kick', 'kick_alert', '*', sound='beep', desktop=True)
+            # Suppress join messages from bots:
+            irc.on('join', 'hide_bots', '*', suppress=True, nick_mask='*bot*')
         """
         import state
         from exec_system import _ON_EVENT_MAP
@@ -382,6 +390,7 @@ class _Irc:
             'sound': sound,
             'desktop': desktop,
             'highlight_tab': highlight_tab,
+            'suppress': suppress,
             'window': window,    # None → resolved at fire-time
         }
         self._owned_hooks.append((event, name))

@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import (
     QWidget, QFormLayout, QCheckBox, QLineEdit,
 )
+from settings.page_general import _ck
 
 
 class LoggingPage(QWidget):
@@ -10,23 +11,19 @@ class LoggingPage(QWidget):
         super().__init__(parent)
         layout = QFormLayout(self)
 
-        self.log_dir = QLineEdit()
+        self.log_dir = _ck(QLineEdit(), 'logging.dir')
         layout.addRow("Log directory:", self.log_dir)
 
-        self.use_subdirs = QCheckBox()
+        self.use_subdirs = _ck(QCheckBox(), 'logging.use_subdirs')
         layout.addRow("Use subdirectories:", self.use_subdirs)
 
-        self.separate_by_month = QCheckBox()
+        self.separate_by_month = _ck(QCheckBox(), 'logging.separate_by_month')
         layout.addRow("Separate by month:", self.separate_by_month)
 
-        self.debug = QCheckBox()
+        self.debug = _ck(QCheckBox(), 'logging.debug')
         layout.addRow("Debug logging:", self.debug)
 
-        self.timestamp = QLineEdit()
-        self.timestamp.setPlaceholderText("YYYY-MM-DD HH:MM:SS")
-        self.timestamp.setToolTip(
-            "Tokens: YYYY YY MM DD HH hh MI SS AP ap DOW MON"
-        )
+        self.timestamp = _ck(QLineEdit(), 'logging.timestamp')
         layout.addRow("Log timestamp:", self.timestamp)
 
     def load_from_data(self, data):

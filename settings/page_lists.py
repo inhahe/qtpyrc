@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import (
     QWidget, QFormLayout, QPlainTextEdit, QLabel,
 )
+from settings.page_general import _ck
 
 
 class ListsPage(QWidget):
@@ -22,28 +23,20 @@ class ListsPage(QWidget):
         note.setStyleSheet("color: #666; font-size: 9pt;")
         layout.addRow(note)
 
-        self.ignores = QPlainTextEdit()
+        self.ignores = _ck(QPlainTextEdit(), 'ignores')
         self.ignores.setPlaceholderText("nick!*@host masks, one per line")
-        self.ignores.setToolTip("Global ignore list. Masks support wildcards:\n"
-                                "nick, nick!*@*, *!*@host, etc.")
         layout.addRow("Ignores:", self.ignores)
 
-        self.auto_ops = QPlainTextEdit()
+        self.auto_ops = _ck(QPlainTextEdit(), 'auto_ops')
         self.auto_ops.setPlaceholderText("nick!*@host masks, one per line")
-        self.auto_ops.setToolTip("Global auto-op list.")
         layout.addRow("Auto-ops:", self.auto_ops)
 
-        self.highlights = QPlainTextEdit()
+        self.highlights = _ck(QPlainTextEdit(), 'highlights')
         self.highlights.setPlaceholderText("words or /regex/ patterns, one per line")
-        self.highlights.setToolTip("Global highlight patterns. Use {me} for your nick.\n"
-                                   "Plain strings are case-insensitive substrings.\n"
-                                   "/regex/[ims] for regex patterns.")
         layout.addRow("Highlights:", self.highlights)
 
-        self.notify_list = QPlainTextEdit()
+        self.notify_list = _ck(QPlainTextEdit(), 'notify')
         self.notify_list.setPlaceholderText("nicks to watch, one per line")
-        self.notify_list.setToolTip("Global notify list. Alert when these nicks\n"
-                                    "come online or go offline.")
         layout.addRow("Notify:", self.notify_list)
 
     def load_from_data(self, data):

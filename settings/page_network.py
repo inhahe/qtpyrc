@@ -2,6 +2,7 @@ from PySide6.QtWidgets import (
     QWidget, QFormLayout, QCheckBox, QLineEdit, QSpinBox, QDoubleSpinBox, QLabel,
     QHBoxLayout, QPushButton, QPlainTextEdit,
 )
+from settings.page_general import _ck
 
 
 class NetworkPage(QWidget):
@@ -21,30 +22,29 @@ class NetworkPage(QWidget):
         note.setStyleSheet("color: #666; font-size: 9pt; margin-bottom: 4px;")
         layout.addRow(note)
 
-        self.name = QLineEdit()
-        self.name.setPlaceholderText("Reported network name (for matching)")
+        self.name = _ck(QLineEdit(), 'name')
+        self.name.setPlaceholderText("(auto-detected)")
         layout.addRow("Network name:", self.name)
 
-        self.nick = QLineEdit()
+        self.nick = _ck(QLineEdit(), 'nick')
         self.nick.setPlaceholderText("(global default)")
         layout.addRow("Nick:", self.nick)
 
-        self.alt_nicks = QPlainTextEdit()
+        self.alt_nicks = _ck(QPlainTextEdit(), 'alt_nicks')
         self.alt_nicks.setMaximumHeight(60)
         self.alt_nicks.setPlaceholderText("(global default) One per line")
-        self.alt_nicks.setToolTip("Alternative nicks, one per line. Overrides the global alt nicks list.")
         layout.addRow("Alt nicks:", self.alt_nicks)
 
-        self.user = QLineEdit()
+        self.user = _ck(QLineEdit(), 'user')
         self.user.setPlaceholderText("(global default)")
         layout.addRow("Username:", self.user)
 
-        self.realname = QLineEdit()
+        self.realname = _ck(QLineEdit(), 'realname')
         self.realname.setPlaceholderText("(global default)")
         layout.addRow("Real name:", self.realname)
 
         pw_row = QHBoxLayout()
-        self.password = QLineEdit()
+        self.password = _ck(QLineEdit(), 'password')
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         pw_row.addWidget(self.password)
         self._pw_show = QPushButton("Show")
@@ -57,24 +57,22 @@ class NetworkPage(QWidget):
         pw_row.addWidget(self._pw_show)
         layout.addRow("Server password:", pw_row)
 
-        self.auto_connect = QCheckBox()
+        self.auto_connect = _ck(QCheckBox(), 'auto_connect')
         layout.addRow("Auto-connect:", self.auto_connect)
 
-        self.persist_autojoins = QCheckBox()
+        self.persist_autojoins = _ck(QCheckBox(), 'persist_autojoins')
         layout.addRow("Persist auto-joins:", self.persist_autojoins)
 
-        self.flood_burst = QSpinBox()
+        self.flood_burst = _ck(QSpinBox(), 'flood.burst')
         self.flood_burst.setRange(0, 50)
         self.flood_burst.setSpecialValueText("(default: 5)")
-        self.flood_burst.setToolTip("Messages allowed in an initial burst before throttling")
         layout.addRow("Flood burst:", self.flood_burst)
 
-        self.flood_rate = QDoubleSpinBox()
+        self.flood_rate = _ck(QDoubleSpinBox(), 'flood.rate')
         self.flood_rate.setRange(0.0, 30.0)
         self.flood_rate.setDecimals(1)
         self.flood_rate.setSuffix(" s")
         self.flood_rate.setSpecialValueText("(default: 2.0)")
-        self.flood_rate.setToolTip("Seconds between messages after burst is exhausted")
         layout.addRow("Flood rate:", self.flood_rate)
 
 

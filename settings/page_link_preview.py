@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import (
     QWidget, QFormLayout, QCheckBox, QSpinBox, QDoubleSpinBox, QLineEdit,
 )
+from settings.page_general import _ck
 
 
 class LinkPreviewPage(QWidget):
@@ -10,38 +11,33 @@ class LinkPreviewPage(QWidget):
         super().__init__(parent)
         layout = QFormLayout(self)
 
-        self.link_preview = QCheckBox()
-        self.link_preview.setToolTip("Show inline previews for URLs posted in channels.\n"
-                                     "Off by default — fetching URLs reveals your IP.")
+        self.link_preview = _ck(QCheckBox(), 'link_preview.enabled')
         layout.addRow("Enable:", self.link_preview)
 
-        self.lp_timeout = QDoubleSpinBox()
+        self.lp_timeout = _ck(QDoubleSpinBox(), 'link_preview.timeout')
         self.lp_timeout.setRange(1.0, 30.0)
         self.lp_timeout.setDecimals(1)
         self.lp_timeout.setSuffix(" s")
         layout.addRow("Timeout:", self.lp_timeout)
 
-        self.lp_max_size = QSpinBox()
+        self.lp_max_size = _ck(QSpinBox(), 'link_preview.max_size')
         self.lp_max_size.setRange(4096, 1048576)
         self.lp_max_size.setSuffix(" bytes")
         self.lp_max_size.setSingleStep(4096)
         layout.addRow("Max download:", self.lp_max_size)
 
-        self.lp_width = QSpinBox()
+        self.lp_width = _ck(QSpinBox(), 'link_preview.width')
         self.lp_width.setRange(100, 800)
         self.lp_width.setSuffix(" px")
         layout.addRow("Width:", self.lp_width)
 
-        self.lp_height = QSpinBox()
+        self.lp_height = _ck(QSpinBox(), 'link_preview.height')
         self.lp_height.setRange(40, 400)
         self.lp_height.setSuffix(" px")
         layout.addRow("Height:", self.lp_height)
 
-        self.lp_proxy = QLineEdit()
+        self.lp_proxy = _ck(QLineEdit(), 'link_preview.proxy')
         self.lp_proxy.setPlaceholderText("e.g. socks5://127.0.0.1:9050")
-        self.lp_proxy.setToolTip("Route preview fetches through a proxy to hide your IP.\n"
-                                 "Supports http://, https://, socks5:// URLs.\n"
-                                 "Leave blank for direct connection.")
         layout.addRow("Proxy:", self.lp_proxy)
 
     def load_from_data(self, data):

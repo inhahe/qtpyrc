@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QColor
 from PySide6.QtCore import Qt
+from settings.page_general import _ck
 
 
 class NickColorsPage(QWidget):
@@ -16,8 +17,7 @@ class NickColorsPage(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self.enabled = QCheckBox("Enable nick colors")
-        self.enabled.setToolTip("Assign random colors to nicks in channel messages")
+        self.enabled = _ck(QCheckBox("Enable nick colors"), 'nick_colors.enabled')
         layout.addWidget(self.enabled)
 
         layout.addWidget(QLabel("Click a swatch to open the color picker."))

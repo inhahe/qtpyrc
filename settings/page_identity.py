@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import (
     QWidget, QFormLayout, QLineEdit, QPlainTextEdit,
 )
+from settings.page_general import _ck
 
 
 class IdentityPage(QWidget):
@@ -10,17 +11,17 @@ class IdentityPage(QWidget):
         super().__init__(parent)
         layout = QFormLayout(self)
 
-        self.nick = QLineEdit()
+        self.nick = _ck(QLineEdit(), 'nick')
         layout.addRow("Nick:", self.nick)
 
-        self.alt_nicks = QPlainTextEdit()
+        self.alt_nicks = _ck(QPlainTextEdit(), 'alt_nicks')
         self.alt_nicks.setMaximumHeight(80)
         layout.addRow("Alt nicks (one per line):", self.alt_nicks)
 
-        self.user = QLineEdit()
+        self.user = _ck(QLineEdit(), 'user')
         layout.addRow("Username:", self.user)
 
-        self.realname = QLineEdit()
+        self.realname = _ck(QLineEdit(), 'realname')
         layout.addRow("Real name:", self.realname)
 
         self.auto_connect = QLineEdit()

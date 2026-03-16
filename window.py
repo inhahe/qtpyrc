@@ -195,22 +195,22 @@ class ChatOutput(QTextEdit):
     super().mouseMoveEvent(event)
 
   def mouseReleaseEvent(self, event):
-    if event.button() == Qt.MouseButton.LeftButton:
-      anchor = self.anchorAt(event.pos())
-      if anchor and anchor.startswith('http'):
-        from PySide6.QtGui import QDesktopServices
-        from PySide6.QtCore import QUrl
-        QDesktopServices.openUrl(QUrl(anchor))
-        return
     super().mouseReleaseEvent(event)
-    # Auto-copy on select release (mIRC-style)
-    if (event.button() == Qt.MouseButton.LeftButton
-        and state.config.auto_copy_selection
-        and self.textCursor().hasSelection()):
-      self.copy()
-      c = self.textCursor()
-      c.clearSelection()
-      self.setTextCursor(c)
+    if event.button() == Qt.MouseButton.LeftButton:
+      if self.textCursor().hasSelection():
+        # Text was selected (drag) — auto-copy if enabled, don't open links
+        if state.config.auto_copy_selection:
+          self.copy()
+          c = self.textCursor()
+          c.clearSelection()
+          self.setTextCursor(c)
+      else:
+        # Plain click — open link if on one
+        anchor = self.anchorAt(event.pos())
+        if anchor and anchor.startswith('http'):
+          from PySide6.QtGui import QDesktopServices
+          from PySide6.QtCore import QUrl
+          QDesktopServices.openUrl(QUrl(anchor))
 
   def contextMenuEvent(self, event):
     import popups
@@ -218,9 +218,16 @@ class ChatOutput(QTextEdit):
     anchor = self.anchorAt(event.pos())
     if anchor and anchor.startswith("nick:"):
       nick = anchor[5:]
+      # Determine parent section for additive mode
+      wtype = getattr(self._parent_window, 'type', '')
+      parent_section = {'channel': 'channel', 'server': 'status',
+                        'query': 'query'}.get(wtype)
       popups.show_popup('nicklist', self._parent_window, event.globalPos(),
                         extra_vars={'nick': nick, '1': nick},
-                        copy_action=has_selection)
+                        copy_action=has_selection,
+                        parent_section=parent_section)
+    elif anchor and anchor.startswith('http'):
+      self._show_link_menu(event.globalPos(), anchor, has_selection)
     else:
       # Try window-type-specific popup
       wtype = getattr(self._parent_window, 'type', '')
@@ -230,6 +237,37 @@ class ChatOutput(QTextEdit):
           section, self._parent_window, event.globalPos(),
           copy_action=has_selection):
         super().contextMenuEvent(event)
+
+  def _show_link_menu(self, pos, url, has_selection):
+    """Show context menu for a URL link."""
+    from PySide6.QtWidgets import QMenu, QApplication
+    from PySide6.QtGui import QDesktopServices
+    from PySide6.QtCore import QUrl
+    menu = QMenu(self)
+    open_act = menu.addAction('Open Link')
+    copy_link_act = menu.addAction('Copy Link')
+    if has_selection:
+      menu.addSeparator()
+      copy_text_act = menu.addAction('Copy')
+    else:
+      copy_text_act = None
+    # Append normal channel/status/query popup entries below
+    import popups
+    wtype = getattr(self._parent_window, 'type', '')
+    section = {'channel': 'channel', 'server': 'status',
+               'query': 'query'}.get(wtype)
+    parent_action_map = popups.append_section_to_menu(
+        menu, section, self._parent_window)
+
+    action = menu.exec(pos)
+    if action is open_act:
+      QDesktopServices.openUrl(QUrl(url))
+    elif action is copy_link_act:
+      QApplication.clipboard().setText(url)
+    elif action is copy_text_act:
+      self.copy()
+    elif action and action in parent_action_map:
+      popups.exec_action(parent_action_map[action], self._parent_window)
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +513,24 @@ class _HistoryPopup(QListWidget):
       return
     if key == Qt.Key.Key_Down:
       self.select_next()
+      return
+    if key == Qt.Key.Key_Home:
+      self.setCurrentRow(0)
+      self._preview()
+      return
+    if key == Qt.Key.Key_End:
+      self.setCurrentRow(self.count() - 1)
+      self._preview()
+      return
+    if key == Qt.Key.Key_PageUp:
+      row = max(0, self.currentRow() - 10)
+      self.setCurrentRow(row)
+      self._preview()
+      return
+    if key == Qt.Key.Key_PageDown:
+      row = min(self.count() - 1, self.currentRow() + 10)
+      self.setCurrentRow(row)
+      self._preview()
       return
     # Printable key — jump to next entry starting with that character
     ch = event.text()
@@ -1444,7 +1500,8 @@ class NicksList(QListWidget):
       import popups
       nick = item._nick
       popups.show_popup('nicklist', self.channelwindow, event.globalPos(),
-                        extra_vars={'nick': nick, '1': nick})
+                        extra_vars={'nick': nick, '1': nick},
+                        parent_section='channel')
 
   def mouseDoubleClickEvent(self, event):
     """Double-click a nick to open a message window."""

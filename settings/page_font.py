@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtCore import Qt, Signal
+from settings.page_general import _ck
 
 _COMMON_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 36, 48, 72]
 
@@ -332,10 +333,10 @@ class BaseColorsPage(QWidget):
         super().__init__(parent)
         layout = QFormLayout(self)
 
-        self.fg_color = _ColorRow(default_hint='default: black')
+        self.fg_color = _ck(_ColorRow(default_hint='default: black'), 'colors.foreground')
         layout.addRow("Foreground:", self.fg_color)
 
-        self.bg_color = _ColorRow(default_hint='default: white')
+        self.bg_color = _ck(_ColorRow(default_hint='default: white'), 'colors.background')
         layout.addRow("Background:", self.bg_color)
 
         _connect_changed(self)
@@ -369,32 +370,38 @@ class ChatFontPage(QWidget):
         super().__init__(parent)
         layout = QFormLayout(self)
 
-        self.family = QFontComboBox()
+        self.family = _ck(QFontComboBox(), 'font.family')
         layout.addRow("Font family:", self.family)
 
-        self.size = _FontSizeCombo()
+        self.size = _ck(_FontSizeCombo(), 'font.size')
         layout.addRow("Font size:", self.size)
 
-        self.system_color = _ColorRow(default_hint='default: red')
+        self.system_color = _ck(_ColorRow(default_hint='default: red'), 'colors.system')
         layout.addRow("System:", self.system_color)
 
-        self.info_color = _ColorRow(default_hint='default: darkGreen')
+        self.info_color = _ck(_ColorRow(default_hint='default: darkGreen'), 'colors.info')
         layout.addRow("Info:", self.info_color)
 
-        self.action_color = _ColorRow(default_hint='default: darkMagenta')
+        self.action_color = _ck(_ColorRow(default_hint='default: darkMagenta'), 'colors.action')
         layout.addRow("Action:", self.action_color)
 
-        self.notice_color = _ColorRow(default_hint='default: darkCyan')
+        self.notice_color = _ck(_ColorRow(default_hint='default: darkCyan'), 'colors.notice')
         layout.addRow("Notice:", self.notice_color)
 
-        self.link_color = _ColorRow(default_hint='default: #0066cc')
+        self.link_color = _ck(_ColorRow(default_hint='default: #0066cc'), 'colors.link')
         layout.addRow("Link:", self.link_color)
 
-        self.highlight_color = _ColorRow(default_hint='default: red')
+        self.highlight_color = _ck(_ColorRow(default_hint='default: red'), 'colors.highlight')
         layout.addRow("Highlight:", self.highlight_color)
 
-        self.newmsg_color = _ColorRow(default_hint='default: blue')
+        self.newmsg_color = _ck(_ColorRow(default_hint='default: blue'), 'colors.new_message')
         layout.addRow("New message:", self.newmsg_color)
+
+        self.search_bg = _ck(_ColorRow(default_hint='default: yellow'), 'colors.search_bg')
+        layout.addRow("Search bg:", self.search_bg)
+
+        self.search_fg = _ck(_ColorRow(default_hint='default: black'), 'colors.search_fg')
+        layout.addRow("Search fg:", self.search_fg)
 
         _connect_changed(self)
 
@@ -411,6 +418,8 @@ class ChatFontPage(QWidget):
         self.link_color.setText(str(colors.get('link', '')))
         self.highlight_color.setText(str(colors.get('highlight', '')))
         self.newmsg_color.setText(str(colors.get('new_message', '')))
+        self.search_bg.setText(str(colors.get('search_bg', '')))
+        self.search_fg.setText(str(colors.get('search_fg', '')))
 
     def save_to_data(self, data):
         font = _ensure_font(data)
@@ -420,7 +429,8 @@ class ChatFontPage(QWidget):
         for key, widget in [('system', self.system_color), ('info', self.info_color),
                             ('action', self.action_color), ('notice', self.notice_color),
                             ('link', self.link_color),
-                            ('highlight', self.highlight_color), ('new_message', self.newmsg_color)]:
+                            ('highlight', self.highlight_color), ('new_message', self.newmsg_color),
+                            ('search_bg', self.search_bg), ('search_fg', self.search_fg)]:
             _save_color_val(colors, key, widget)
 
 

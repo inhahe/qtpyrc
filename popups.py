@@ -63,8 +63,14 @@ def _load_sections_text(text):
   Lines of the form ``name = value`` (outside any section, or within a
   ``[variables]`` section) define variables that can be referenced as
   ``{name}`` in labels and commands throughout the file.
+
+  Section directives:
+    ``@additive`` — when this popup triggers on a sub-element (e.g. a nick
+    anchor in a channel), append the parent popup's entries below.
+    ``@replace`` (default) — only show this section's entries.
   """
   sections = {}
+  modes = {}  # section_name -> 'additive' or 'replace'
   variables = {}
   current = None
   current_lines = []
@@ -85,9 +91,15 @@ def _load_sections_text(text):
           continue
       current_lines.append(line)
     else:
-      current_lines.append(line)
+      # Check for @directive
+      if stripped.lower() in ('@additive', '@replace'):
+        modes[current] = stripped[1:].lower()
+      else:
+        current_lines.append(line)
   if current is not None and current != 'variables':
     sections[current] = _parse_popups('\n'.join(current_lines), variables)
+  # Store modes alongside sections
+  sections['_modes'] = modes
   return sections
 
 
@@ -292,11 +304,20 @@ def _build_menu(entries, variables, window, parent=None):
   return menu, action_map
 
 
-def show_popup(section, window, pos, extra_vars=None, copy_action=False):
+def get_mode(section):
+  """Return 'additive' or 'replace' for a popup section."""
+  modes = _popups.get('_modes', {})
+  return modes.get(section, 'replace')
+
+
+def show_popup(section, window, pos, extra_vars=None, copy_action=False,
+               parent_section=None):
   """Show a popup menu for the given section name.
 
   *extra_vars* is an optional dict of additional variables (e.g. nick for
   nicklist popups).  *copy_action* adds a Copy item if True.
+  *parent_section* is the fallback section for additive mode (e.g. 'channel'
+  when showing 'nicklist' in a channel window).
   Returns True if a popup was shown, False otherwise.
   """
   entries = _popups.get(section)
@@ -324,6 +345,16 @@ def show_popup(section, window, pos, extra_vars=None, copy_action=False):
     variables.update(extra_vars)
 
   menu, action_map = _build_menu(entries, variables, window, window)
+
+  # Additive mode: append parent section entries below
+  if parent_section and get_mode(section) == 'additive':
+    parent_entries = _popups.get(parent_section)
+    if parent_entries:
+      menu.addSeparator()
+      parent_menu, parent_map = _build_menu(parent_entries, variables, window, menu)
+      for act in parent_menu.actions():
+        menu.addAction(act)
+      action_map.update(parent_map)
 
   # Add Copy action at the top when text is selected
   copy_act = None
@@ -366,6 +397,68 @@ def show_popup(section, window, pos, extra_vars=None, copy_action=False):
     _exec_popup_command(window, part)
 
   return True
+
+
+def append_section_to_menu(menu, section, window, extra_vars=None):
+  """Append a popup section's entries to an existing QMenu.
+
+  Returns an action_map dict for dispatching selected actions.
+  """
+  if not section:
+    return {}
+  entries = _popups.get(section)
+  if not entries:
+    return {}
+
+  variables = {}
+  client = getattr(window, 'client', None)
+  conn = client.conn if client else None
+  if client:
+    variables['me'] = getattr(conn, 'nickname', '') or '' if conn else ''
+    variables['network'] = getattr(client, 'network', '') or ''
+    variables['server'] = getattr(client, 'hostname', '') or ''
+  chan = getattr(window, 'channel', None)
+  if chan:
+    variables['chan'] = chan.name
+  else:
+    variables['chan'] = ''
+  query = getattr(window, 'query', None)
+  if query:
+    variables.setdefault('nick', query.nick or '')
+  if extra_vars:
+    variables.update(extra_vars)
+
+  menu.addSeparator()
+  sub_menu, action_map = _build_menu(entries, variables, window, menu)
+  for act in sub_menu.actions():
+    menu.addAction(act)
+  # Store variables on action_map entries for exec_action
+  for act in action_map:
+    act.setProperty('_popup_vars', variables)
+  return action_map
+
+
+def exec_action(command, window):
+  """Execute a popup command string with variable expansion."""
+  variables = {}
+  client = getattr(window, 'client', None)
+  conn = client.conn if client else None
+  if client:
+    variables['me'] = getattr(conn, 'nickname', '') or '' if conn else ''
+    variables['network'] = getattr(client, 'network', '') or ''
+    variables['server'] = getattr(client, 'hostname', '') or ''
+  chan = getattr(window, 'channel', None)
+  if chan:
+    variables['chan'] = chan.name
+  expanded = _expand_mirc_vars(command, variables, window)
+  if expanded is None:
+    return
+  from config import _expand_vars
+  expanded = _expand_vars(expanded, variables)
+  for part in expanded.split(' | '):
+    part = part.strip()
+    if part:
+      _exec_popup_command(window, part)
 
 
 def _exec_popup_command(window, text):

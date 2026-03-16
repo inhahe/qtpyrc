@@ -221,6 +221,7 @@ These are always available and reflect the active window's state. User-defined v
 | `{window_type}` | `server`, `channel`, or `query` |
 | `{networks}` | Number of connected networks |
 | `{channels}` | Total channel count across all networks |
+| `{replay}` | History replay progress (e.g. ` [history: 12/85]`), empty when not loading. Main titlebar only. |
 
 ### Function calls
 
@@ -430,9 +431,10 @@ Use `/popups` to reload the file after editing.
 | `-d` | Show a desktop notification |
 | `-h` | Highlight the channel tab |
 | `-p` | Persist by appending to the startup script |
+| `-x` | Suppress the default handler (event won't appear in window) |
 
 - **pattern** — matched against the event's primary text. Supports wildcards (`*`, `?`) or `/regex/` with optional flags: `i` (case-insensitive), `m` (multiline), `s` (dotall). Example: `/regex/i`, `/regex/ims`. Default `*` (match everything).
-- **command** — a command string to execute. Optional if action flags (`-s`, `-d`, `-h`) are used. `{variables}` are expanded before execution (`\{` / `\}` for literal braces, `\\` for literal backslash, so a literal `\{` requires `\\{`). If the command starts with `/exec`, variables are available as Python names instead (see below).
+- **command** — a command string to execute. Optional if action flags (`-s`, `-d`, `-h`) are used. Multiple commands can be separated with ` | ` (space-pipe-space), e.g. `/mode # +b nick!*@* | /kick # nick`. `{variables}` are expanded before execution (`\{` / `\}` for literal braces, `\\` for literal backslash, so a literal `\{` requires `\\{`). If the command starts with `/exec`, variables are available as Python names instead (see below).
 
 ### Examples
 
@@ -444,6 +446,8 @@ Use `/popups` to reload the file after editing.
 /on chanmsg vip -n boss -s sounds/vip.wav -d *
 /on kick kick_alert -s beep -d *
 /on mode ban_alert *+b* -s beep -d /echo Ban: {modes} {args}
+/on join hide_bots -x -n *bot* *
+/on chanmsg kban_spam -n spammer * /mode # +b {nick}!*@* | /kick # {nick} Spam
 /on -r chanmsg friend
 /on -l
 ```
@@ -648,6 +652,43 @@ class MyPlugin(plugin.Callbacks):
 
 Class = MyPlugin
 ```
+
+### `irc.on()` — Registering Hooks from Plugins
+
+```python
+irc.on(event, name, pattern, command='', *, channel=None, network=None,
+       nick_mask=None, sound=None, desktop=False, highlight_tab=False,
+       suppress=False, window=None)
+```
+
+The `command` argument can be:
+
+- A **string** — executed as a slash command. Multiple commands separated by ` | `:
+  ```python
+  irc.on('chanmsg', 'kban', '*', '/mode # +b {nick}!*@* | /kick # {nick}',
+         nick_mask='spammer')
+  ```
+
+- A **callable** — receives `(variables_dict, conn)`. Return truthy to suppress the event:
+  ```python
+  def my_filter(variables, conn):
+      if variables['nick'] == 'annoying':
+          return True  # suppress
+  irc.on('chanmsg', 'filter', '*', my_filter)
+  ```
+
+- A **list** of callables and/or strings — executed in order. Any callable returning truthy suppresses:
+  ```python
+  def log_it(variables, conn):
+      print('Join:', variables['nick'])
+
+  irc.on('join', 'multi', '*', [
+      log_it,
+      '/echo {nick} joined {channel}',
+  ])
+  ```
+
+Set `suppress=True` to always suppress the event when the hook matches (regardless of command return value).
 
 ---
 

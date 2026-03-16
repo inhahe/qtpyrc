@@ -2,6 +2,7 @@ from PySide6.QtWidgets import (
     QWidget, QFormLayout, QLineEdit, QComboBox, QCheckBox,
     QHBoxLayout, QPushButton,
 )
+from settings.page_general import _ck
 
 
 class SASLPage(QWidget):
@@ -11,18 +12,18 @@ class SASLPage(QWidget):
         super().__init__(parent)
         layout = QFormLayout(self)
 
-        self.enabled = QCheckBox()
+        self.enabled = _ck(QCheckBox(), 'sasl.enabled')
         layout.addRow("Enable SASL:", self.enabled)
 
-        self.mechanism = QComboBox()
+        self.mechanism = _ck(QComboBox(), 'sasl.mechanism')
         self.mechanism.addItems(["PLAIN", "EXTERNAL"])
         layout.addRow("Mechanism:", self.mechanism)
 
-        self.username = QLineEdit()
+        self.username = _ck(QLineEdit(), 'sasl.username')
         layout.addRow("Username:", self.username)
 
         pw_row = QHBoxLayout()
-        self.password = QLineEdit()
+        self.password = _ck(QLineEdit(), 'sasl.password')
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         pw_row.addWidget(self.password)
         self._pw_show = QPushButton("Show")
