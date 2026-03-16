@@ -49,11 +49,14 @@ class HistoryDB:
 
   def add(self, network, channel, event_type, nick=None, text=None, prefix=''):
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    self._conn.execute(
-      "INSERT INTO history (ts, network, channel, type, nick, text, prefix) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?)",
-      (ts, network or '', channel, event_type, nick, text, prefix or ''))
-    self._conn.commit()
+    try:
+      self._conn.execute(
+        "INSERT INTO history (ts, network, channel, type, nick, text, prefix) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (ts, network or '', channel, event_type, nick, text, prefix or ''))
+      self._conn.commit()
+    except sqlite3.ProgrammingError:
+      return  # DB already closed during shutdown
     # Prune every 500 inserts to keep the DB bounded
     self._add_count += 1
     if self._add_count >= 500:
@@ -89,11 +92,14 @@ class HistoryDB:
 
   def add_url(self, network, channel, nick, host, url):
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    self._conn.execute(
-      "INSERT INTO urls (ts, network, channel, nick, host, url) "
-      "VALUES (?, ?, ?, ?, ?, ?)",
-      (ts, network or '', channel or '', nick or '', host or '', url))
-    self._conn.commit()
+    try:
+      self._conn.execute(
+        "INSERT INTO urls (ts, network, channel, nick, host, url) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (ts, network or '', channel or '', nick or '', host or '', url))
+      self._conn.commit()
+    except sqlite3.ProgrammingError:
+      return
 
   def search_urls(self, network=None, channel=None, nick=None,
                   host=None, date_from=None, date_to=None, limit=1000):

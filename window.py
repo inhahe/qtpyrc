@@ -1398,6 +1398,10 @@ class Querywindow(Window):
     self._vlayout.addWidget(self._search_bar, 0)
     self._vlayout.addWidget(self.input, 0)
 
+  @property
+  def remotenick(self):
+    return self.query.nick if self.query else ''
+
   _TYPING_TIMEOUT = 6000
   _TYPING_SEND_INTERVAL = 3
 

@@ -1263,20 +1263,20 @@ def quit():
   _quitting = True
   if state.ui_state:
     state.ui_state.save()
+  # Cancel all async tasks first so IRC handlers stop processing
+  loop = asyncio.get_event_loop()
+  for task in asyncio.all_tasks(loop):
+    task.cancel()
   # Close all IRC connections
   for client in list(state.clients or []):
     if client.conn:
       client.conn.disconnect()
-  # Close history database
+  # Close history database (safe now — no handlers are running)
   if state.historydb:
     try:
       state.historydb.close()
     except Exception:
       pass
-  loop = asyncio.get_event_loop()
-  # Cancel pending async tasks
-  for task in asyncio.all_tasks(loop):
-    task.cancel()
   loop.stop()
 
 
@@ -1796,10 +1796,19 @@ if __name__ == '__main__':
     # Graceful shutdown on SIGTERM/SIGINT
     def _headless_shutdown():
       print('\nShutting down...')
+      # Cancel async tasks first so handlers stop
+      for task in asyncio.all_tasks(loop):
+        task.cancel()
       # Disconnect all clients
       for client in (state.clients or []):
         if client.conn:
           client.conn.disconnect()
+      # Close history database
+      if state.historydb:
+        try:
+          state.historydb.close()
+        except Exception:
+          pass
       loop.stop()
 
     try:
