@@ -68,7 +68,13 @@ window_mode: maximized
 # The title refreshes every 3s and immediately on connect/disconnect/nick change.
 # {replay} shows history replay progress (e.g. " [history: 12/85]"), empty when done.
 # Example: 'qtpyrc ({me} on {network_key}) - {channel}'
-#~ titlebar_format: ""
+titlebar_format: >-
+  qtpyrc{eval("' - ' + ', '.join(sorted('%s (%s)' % (c.network_key or c.network
+  or c.hostname, c.conn.nickname) for c in state.clients if c.connected))
+  if any(c.connected for c in state.clients) else ''")}{eval(" ' - ' +
+  (_v.get('network_label','') + '/' if _v.get('network_label') else '') +
+  _v['channel'] + (': ' + _v['topic'] if _v.get('topic') else '')
+  if _v.get('channel') else ''")}{replay}
 # How often (in seconds) to refresh the title bar.  Minimum 0.1.
 #~ titlebar_interval: 1
 
