@@ -278,7 +278,7 @@ def _build_menu(entries, variables, window, parent=None):
       if d > depth:
         continue  # skip (shouldn't happen if well-formed)
       if kind == 'separator':
-        menu.addSeparator()
+        _add_menu_separator(menu)
         i += 1
       elif command is None:
         # Submenu header — look ahead for children
@@ -292,7 +292,7 @@ def _build_menu(entries, variables, window, parent=None):
           # This item itself also has a command — add it as first entry
           act = submenu.addAction(label)
           action_map[act] = command
-          submenu.addSeparator()
+          _add_menu_separator(submenu)
           i += 1
           _add_items(submenu, i, depth + 1)
         else:
@@ -350,7 +350,7 @@ def show_popup(section, window, pos, extra_vars=None, copy_action=False,
   if parent_section and get_mode(section) == 'additive':
     parent_entries = _popups.get(parent_section)
     if parent_entries:
-      menu.addSeparator()
+      _add_menu_separator(menu)
       parent_menu, parent_map = _build_menu(parent_entries, variables, window, menu)
       for act in parent_menu.actions():
         menu.addAction(act)
@@ -428,14 +428,69 @@ def append_section_to_menu(menu, section, window, extra_vars=None):
   if extra_vars:
     variables.update(extra_vars)
 
-  menu.addSeparator()
-  sub_menu, action_map = _build_menu(entries, variables, window, menu)
-  for act in sub_menu.actions():
-    menu.addAction(act)
-  # Store variables on action_map entries for exec_action
-  for act in action_map:
-    act.setProperty('_popup_vars', variables)
+  # Build entries directly into the target menu, with separator if appending
+  action_map = {}
+  # Prepend separator if appending to existing menu, but skip if
+  # the section already starts with a separator (avoid double line)
+  need_sep = bool(menu.actions())
+  if need_sep and entries and entries[0][0] == 'separator':
+    need_sep = False
+  _build_into_menu(menu, entries, variables, action_map, prepend_sep=need_sep)
   return action_map
+
+
+def _add_menu_separator(menu):
+  """Add a visible separator to a QMenu using a widget action.
+
+  Works around Qt/Windows 11 rendering inconsistencies with addSeparator()
+  when QMenu has a custom stylesheet.
+  """
+  from PySide6.QtWidgets import QWidgetAction, QLabel
+  wa = QWidgetAction(menu)
+  lbl = QLabel(menu)
+  lbl.setFixedHeight(9)
+  lbl.setStyleSheet(
+      "background: transparent;"
+      "border-top: 1px solid #aaa;"
+      "margin: 4px 6px 0px 6px;")
+  wa.setDefaultWidget(lbl)
+  menu.addAction(wa)
+
+
+def _build_into_menu(menu, entries, variables, action_map, prepend_sep=False):
+  """Add parsed popup entries directly into an existing QMenu."""
+  if prepend_sep:
+    _add_menu_separator(menu)
+  i = 0
+  def _add_items(target, start, depth):
+    nonlocal i
+    i = start
+    while i < len(entries):
+      kind, d, label, command = entries[i]
+      if d < depth:
+        return
+      if d > depth:
+        continue
+      if kind == 'separator':
+        _add_menu_separator(target)
+        i += 1
+      elif command is None:
+        submenu = target.addMenu(label)
+        i += 1
+        _add_items(submenu, i, depth + 1)
+      else:
+        if i + 1 < len(entries) and entries[i + 1][1] > depth:
+          submenu = target.addMenu(label)
+          act = submenu.addAction(label)
+          action_map[act] = command
+          submenu.addSeparator()
+          i += 1
+          _add_items(submenu, i, depth + 1)
+        else:
+          act = target.addAction(label)
+          action_map[act] = command
+          i += 1
+  _add_items(menu, 0, 0)
 
 
 def exec_action(command, window):
