@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (
     QStackedWidget, QPushButton, QDialogButtonBox, QInputDialog,
     QMessageBox, QMenu, QLabel, QWidget, QFrame, QScrollArea,
     QStyledItemDelegate, QStyle, QLineEdit, QComboBox, QSpinBox,
-    QDoubleSpinBox, QAbstractSpinBox,
+    QDoubleSpinBox, QAbstractSpinBox, QApplication,
 )
 from PySide6.QtCore import Qt, QEvent
 from PySide6.QtGui import QShortcut, QKeySequence, QPalette, QColor, QPen, QBrush
@@ -197,6 +197,10 @@ class SettingsDialog(QDialog):
         self._reset_page_btn.clicked.connect(self._reset_current_page)
         buttons.addButton(self._reset_page_btn, QDialogButtonBox.ButtonRole.ResetRole)
         right.addWidget(buttons)
+        hint = QLabel('Tip: right-click any field for Help or Reset to Default')
+        hint.setStyleSheet('color: #888; font-size: 8pt;')
+        hint.setAlignment(Qt.AlignmentFlag.AlignRight)
+        right.addWidget(hint)
 
         splitter.addWidget(right_widget)
         splitter.setCollapsible(0, False)
@@ -262,12 +266,11 @@ class SettingsDialog(QDialog):
         No manual mapping dict needed — the config_key IS the YAML key.
         """
         from settings.widget_context import (
-            set_default, set_help,
+            set_default, set_help, show_widget_context_menu,
             QCheckBox, QLineEdit, QSpinBox, QDoubleSpinBox,
             QComboBox, QFontComboBox, QPlainTextEdit,
         )
-        widget_types = (QCheckBox, QLineEdit, QSpinBox, QDoubleSpinBox,
-                        QComboBox, QFontComboBox, QPlainTextEdit)
+        from PySide6.QtWidgets import QWidget as _QW
 
         # Load defaults from config.example.yaml
         default_data = {}
@@ -294,11 +297,16 @@ class SettingsDialog(QDialog):
                 if attr_name.startswith('_'):
                     continue
                 widget = getattr(page, attr_name, None)
-                if not isinstance(widget, widget_types):
+                if not isinstance(widget, _QW):
+                    continue
+                # Only process widgets that have a config_key
+                if not widget.property('config_key'):
                     continue
 
                 widget.installEventFilter(self._ctx_filter)
-                widget.setContextMenuPolicy(Qt.ContextMenuPolicy.DefaultContextMenu)
+                widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                widget.customContextMenuRequested.connect(
+                    lambda pos, w=widget: show_widget_context_menu(w, pos))
 
                 # Use config_key property to look up help and defaults
                 cfg_key = widget.property('config_key')
@@ -878,12 +886,21 @@ class SettingsDialog(QDialog):
 
     def _on_apply(self):
         """Apply changes to the running UI without saving to disk."""
-        self._collect_all()
-        self._apply_to_ui(self._data, visible_only=False)
-        self._applied = True
-        # Refresh settings dialog's own appearance
-        self._apply_dialog_style()
-        self._apply_tree_style()
+        self.setCursor(Qt.CursorShape.WaitCursor)
+        self._btn_apply.setEnabled(False)
+        self._btn_apply.setText('Applying...')
+        QApplication.processEvents()
+        try:
+            self._collect_all()
+            self._apply_to_ui(self._data, visible_only=True)
+            self._applied = True
+            # Refresh settings dialog's own appearance
+            self._apply_dialog_style()
+            self._apply_tree_style()
+        finally:
+            self._btn_apply.setText('Apply')
+            self._btn_apply.setEnabled(True)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
         # Defer font-dependent sizing until Qt processes the font change
         from PySide6.QtCore import QTimer
         QTimer.singleShot(0, self._refresh_dialog_fonts)

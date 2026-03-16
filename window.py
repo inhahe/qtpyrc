@@ -944,13 +944,13 @@ class Window(QWidget):
     sep_fmt.setForeground(QBrush(QColor(128, 128, 128)))
     width = self.output.viewport().width()
     fm = QFontMetrics(self.output.font())
-    label_width = fm.horizontalAdvance(label)
-    char_width = fm.horizontalAdvance('\u2500')
-    if char_width > 0:
-      total_chars = max((width // char_width) - 4, 20)
-      side = max((total_chars - len(label) - 2) // 2, 2)
+    label_px = fm.horizontalAdvance(' ' + label + ' ')
+    char_w = fm.horizontalAdvance('\u2500')
+    if char_w > 0:
+      avail = max(width - label_px - char_w * 4, char_w * 4)
+      side = max(int(avail / char_w / 2), 2)
     else:
-      side = 20
+      side = 10
     line = '\u2500' * side + ' ' + label + ' ' + '\u2500' * side
     self.cur.insertText(line, sep_fmt)
 

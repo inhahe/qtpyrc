@@ -33,6 +33,7 @@ class _FontSizeCombo(QComboBox):
         self._special_idx = -1
         for s in _COMMON_SIZES:
             self.addItem(str(s))
+        self.setMaxVisibleItems(len(_COMMON_SIZES) + 2)  # +2 for special item + margin
         # No validator — special items like "(system default)" need to be selectable
         # and value() handles non-numeric text gracefully
 
