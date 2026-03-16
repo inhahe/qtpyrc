@@ -1504,6 +1504,42 @@ def init_default_files(directory, config_name='config.yaml', overwrite=None):
   return created, skipped, overwritten
 
 
+def _load_scripts_and_plugins(cli_args, config_dir):
+  """Load variables, popups, plugins, and startup scripts."""
+  # Variables
+  state.load_variables()
+
+  # Popups
+  import popups
+  popups.load()
+
+  # Plugins (Python scripts)
+  scripts = loadscripts(suppress=cli_args.no_plugins or None,
+                        extra=cli_args.plugin or None)
+  state.activescripts = dict(scripts)
+
+  # Startup commands & command scripts
+  from commands import run_script
+  win = next(iter(state.clients)).window if state.clients else None
+  if not cli_args.no_startup:
+    if cli_args.startup:
+      run_script(cli_args.startup, win)
+    else:
+      startup = _startup_path()
+      if startup and os.path.isfile(startup):
+        run_script(startup, win)
+  from commands import _resolve_cmdscripts_dir
+  from plugins import _expand_auto_load
+  import fnmatch as _fnmatch
+  cmdscripts_dir = _resolve_cmdscripts_dir()
+  for name in _expand_auto_load(state.config.scripts_auto_run, cmdscripts_dir, None):
+    if cli_args.no_scripts and any(_fnmatch.fnmatch(name, p) for p in cli_args.no_scripts):
+      continue
+    run_script(name, win)
+  for name in _expand_auto_load(cli_args.run, cmdscripts_dir, None):
+    run_script(name, win)
+
+
 def _init_config(app_dir, path_arg, set_opts):
   """Generate a new config file and exit."""
   path_arg = path_arg.strip()
@@ -1649,6 +1685,9 @@ if __name__ == '__main__':
                       help='Override a config option at runtime without saving '
                            '(dot path, repeatable, e.g. -o font.size=15). '
                            'With --init, seeds the value into the new file')
+  parser.add_argument('--headless', action='store_true',
+                      help='Run without GUI (for bots and scripts). IRC connections, '
+                           'plugins, and commands work; no windows are created.')
   parser.add_argument('--ui', default=None, metavar='PATH',
                       help='Trigger a UI path on startup (e.g. --ui menu.tools.colorpicker)')
   parser.add_argument('--ui-list', action='store_true',
@@ -1716,6 +1755,53 @@ if __name__ == '__main__':
     hf = os.path.join(config_dir, hf)
   state.historydb = HistoryDB(hf, keep_limit=state.config.backscroll_limit)
 
+  # --- Headless mode ---
+  if cli_args.headless:
+    from headless import install_headless, StubMainWindow
+    install_headless()
+
+    # Minimal QCoreApplication for event loop (no GUI)
+    from PySide6.QtCore import QCoreApplication
+    _app = QCoreApplication([sys.argv[0]])
+    state.app = type('App', (), {'mainwin': StubMainWindow()})()
+    state.ui_registry = {}
+    state.ui_descriptions = {}
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    apply_hooks()
+
+    state.clients = set()
+    init_irc()
+    if state.config.networks:
+      for netkey in state.config.networks:
+        if state.config.resolve(netkey, 'auto_connect'):
+          client = Client(network_key=netkey)
+          state.clients.add(client)
+          asyncio.ensure_future(client.connect_to_server())
+    if not state.clients:
+      state.clients.add(Client())
+
+    # Load scripts/plugins
+    _load_scripts_and_plugins(cli_args, config_dir)
+
+    # CLI -e commands
+    win = next(iter(state.clients)).window if state.clients else None
+    if win and cli_args.exec_cmds:
+      for cmd in cli_args.exec_cmds:
+        from commands import docommand
+        docommand(win, *(cmd.split(' ', 1)))
+
+    print('Running in headless mode. Press Ctrl+C to quit.')
+    try:
+      loop.run_forever()
+    except KeyboardInterrupt:
+      print('\nShutting down...')
+    finally:
+      loop.close()
+    sys.exit(0)
+
   # --- Qt app ---
   state.app = makeapp([sys.argv[0]] + qt_args)
 
@@ -1775,42 +1861,10 @@ if __name__ == '__main__':
       state.tray_icon.show()
   state.notifications.start_polling()
 
-  # --- Variables ---
-  state.load_variables()
-
-  # --- Popups ---
-  import popups
-  popups.load()
-
-  # --- Plugins (Python scripts) ---
-  scripts = loadscripts(suppress=cli_args.no_plugins or None,
-                        extra=cli_args.plugin or None)
-  state.activescripts = dict(scripts)
-
-  # --- Startup commands & command scripts ---
-  from commands import run_script
-  win = next(iter(state.clients)).window if state.clients else None
-  # Startup commands file
-  if not cli_args.no_startup:
-    if cli_args.startup:
-      run_script(cli_args.startup, win)
-    else:
-      startup = _startup_path()
-      if startup and os.path.isfile(startup):
-        run_script(startup, win)
-  # Additional command scripts from config (with suppression)
-  from commands import _resolve_cmdscripts_dir
-  from plugins import _expand_auto_load
-  import fnmatch as _fnmatch
-  cmdscripts_dir = _resolve_cmdscripts_dir()
-  for name in _expand_auto_load(state.config.scripts_auto_run, cmdscripts_dir, None):
-    if cli_args.no_scripts and any(_fnmatch.fnmatch(name, p) for p in cli_args.no_scripts):
-      continue
-    run_script(name, win)
-  # Additional command scripts from CLI (supports wildcards and paths)
-  for name in _expand_auto_load(cli_args.run, cmdscripts_dir, None):
-    run_script(name, win)
+  # --- Variables, popups, plugins, scripts ---
+  _load_scripts_and_plugins(cli_args, config_dir)
   # CLI -e commands
+  win = next(iter(state.clients)).window if state.clients else None
   if win and cli_args.exec_cmds:
     for cmd in cli_args.exec_cmds:
       win.lineinput(cmd)
