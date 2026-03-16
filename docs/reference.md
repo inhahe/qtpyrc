@@ -10,6 +10,7 @@ python qtpyrc.py [options]
 |--------|-------------|
 | `-c`, `--config FILE` | Path to YAML configuration file |
 | `-d`, `--debug LEVEL` | Debug output level (0=silent .. 5=trace) |
+| `--headless` | Run without GUI (for bots, scripts, headless servers) |
 | `--startup FILE` | Run this startup script instead of the configured one |
 | `--no-startup` | Suppress loading the startup script |
 | `-r`, `--run PATTERN` | Run additional command scripts (repeatable, wildcards) |
