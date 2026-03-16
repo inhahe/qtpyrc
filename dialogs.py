@@ -26,8 +26,8 @@ def install_input_focus_handler(dialog):
           w.clearFocus()
           return True
       elif key == Qt.Key.Key_Escape:
-        if isinstance(w, QLineEdit):
-          if hasattr(w, '_focus_saved_text'):
+        if isinstance(w, (QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox)):
+          if isinstance(w, QLineEdit) and hasattr(w, '_focus_saved_text'):
             w.setText(w._focus_saved_text)
           w.clearFocus()
           return True

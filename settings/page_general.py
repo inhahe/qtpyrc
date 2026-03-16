@@ -27,11 +27,9 @@ class GeneralPage(QWidget):
 
         self.input_lines = _ck(QSpinBox(), 'input_lines')
         self.input_lines.setRange(1, 10)
-        self.input_lines.setMaximumWidth(60)
         layout.addRow("Input lines:", self.input_lines)
 
         self.command_prefix = _ck(QLineEdit(), 'command_prefix')
-        self.command_prefix.setMaximumWidth(60)
         layout.addRow("Command prefix:", self.command_prefix)
 
         self.timestamp_display = _ck(QLineEdit(), 'timestamps.display')
@@ -54,7 +52,6 @@ class GeneralPage(QWidget):
         self.tab_complete_age.setRange(0, 86400)
         self.tab_complete_age.setSpecialValueText("(no limit)")
         self.tab_complete_age.setSuffix(" s")
-        self.tab_complete_age.setMaximumWidth(100)
         layout.addRow("Tab complete age:", self.tab_complete_age)
 
         self.auto_connect = _ck(QCheckBox(), 'auto_connect')
@@ -225,7 +222,6 @@ class InterfacePage(QWidget):
         self.tab_rows = _ck(QSpinBox(), 'tab_rows')
         self.tab_rows.setRange(0, 20)
         self.tab_rows.setSpecialValueText("(auto)")
-        self.tab_rows.setMaximumWidth(80)
         layout.addRow("Tab rows:", self.tab_rows)
 
         self.new_tab_state = _ck(QComboBox(), 'new_tab_state')
@@ -238,7 +234,6 @@ class InterfacePage(QWidget):
         self.toolbar_icon_size = _ck(QSpinBox(), 'toolbar_icon_size')
         self.toolbar_icon_size.setRange(0, 64)
         self.toolbar_icon_size.setSpecialValueText("(default)")
-        self.toolbar_icon_size.setMaximumWidth(80)
         layout.addRow("Toolbar icon size:", self.toolbar_icon_size)
 
     def _load_combo(self, combo, value):
@@ -292,7 +287,6 @@ class TitlesPage(QWidget):
         self.titlebar_interval.setRange(0.1, 60.0)
         self.titlebar_interval.setDecimals(1)
         self.titlebar_interval.setSuffix(" s")
-        self.titlebar_interval.setMaximumWidth(80)
         layout.addRow("Titlebar interval:", self.titlebar_interval)
 
         _separator(layout, 'Window Titles')
