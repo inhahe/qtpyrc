@@ -1,7 +1,8 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QSpinBox,
-    QCheckBox, QPushButton, QListWidget, QGroupBox,
+    QCheckBox, QPushButton, QListWidget, QGroupBox, QMenu,
 )
+from PySide6.QtCore import Qt
 from settings.page_general import _ck
 
 
@@ -16,15 +17,14 @@ class ServerPage(QWidget):
         list_layout = QHBoxLayout()
         self._server_list = QListWidget()
         self._server_list.currentRowChanged.connect(self._on_row_changed)
+        self._server_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._server_list.customContextMenuRequested.connect(self._server_context_menu)
         list_layout.addWidget(self._server_list, 1)
 
         btn_layout = QVBoxLayout()
         self._add_btn = QPushButton("Add")
         self._add_btn.clicked.connect(self._add_server)
         btn_layout.addWidget(self._add_btn)
-        self._remove_btn = QPushButton("Remove")
-        self._remove_btn.clicked.connect(self._remove_server)
-        btn_layout.addWidget(self._remove_btn)
         self._up_btn = QPushButton("Up")
         self._up_btn.clicked.connect(self._move_up)
         btn_layout.addWidget(self._up_btn)
@@ -138,12 +138,26 @@ class ServerPage(QWidget):
         self._refresh_list()
         self._server_list.setCurrentRow(len(self._servers) - 1)
 
-    def _remove_server(self):
-        row = self._server_list.currentRow()
+    def _remove_server(self, row=None):
+        if row is None:
+            row = self._server_list.currentRow()
         if row < 0 or row >= len(self._servers):
             return
         self._servers.pop(row)
         self._refresh_list()
+
+    def _server_context_menu(self, pos):
+        item = self._server_list.itemAt(pos)
+        if not item:
+            return
+        row = self._server_list.row(item)
+        menu = QMenu(self)
+        menu.addAction('Remove', lambda: self._remove_server(row))
+        if row > 0:
+            menu.addAction('Move Up', self._move_up)
+        if row < len(self._servers) - 1:
+            menu.addAction('Move Down', self._move_down)
+        menu.exec(self._server_list.viewport().mapToGlobal(pos))
 
     def _move_up(self):
         row = self._server_list.currentRow()

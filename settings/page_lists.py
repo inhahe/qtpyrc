@@ -20,23 +20,30 @@ class ListsPage(QWidget):
                          "add to these, they don't replace them. One entry per line.")
         note = QLabel(note_text)
         note.setWordWrap(True)
-        note.setStyleSheet("color: #666; font-size: 9pt;")
+        from settings import SETTINGS_NOTE_STYLE
+        note.setStyleSheet(SETTINGS_NOTE_STYLE)
         layout.addRow(note)
+
+        from settings import SETTINGS_LIST_STYLE as _ls
 
         self.ignores = _ck(QPlainTextEdit(), 'ignores')
         self.ignores.setPlaceholderText("nick!*@host masks, one per line")
+        self.ignores.setStyleSheet(_ls)
         layout.addRow("Ignores:", self.ignores)
 
         self.auto_ops = _ck(QPlainTextEdit(), 'auto_ops')
         self.auto_ops.setPlaceholderText("nick!*@host masks, one per line")
+        self.auto_ops.setStyleSheet(_ls)
         layout.addRow("Auto-ops:", self.auto_ops)
 
         self.highlights = _ck(QPlainTextEdit(), 'highlights')
         self.highlights.setPlaceholderText("words or /regex/ patterns, one per line")
+        self.highlights.setStyleSheet(_ls)
         layout.addRow("Highlights:", self.highlights)
 
         self.notify_list = _ck(QPlainTextEdit(), 'notify')
         self.notify_list.setPlaceholderText("nicks to watch, one per line")
+        self.notify_list.setStyleSheet(_ls)
         layout.addRow("Notify:", self.notify_list)
 
     def load_from_data(self, data):

@@ -571,9 +571,17 @@ class AppConfig:
     self.editor_font_family = font.get('editor_family') or 'Consolas'
     self.editor_font_size = int(font.get('editor_size', 10))
     self.settings_font_family = font.get('settings_family', None)
-    self.settings_font_size = font.get('settings_size', None)
-    if self.settings_font_size is not None:
-      self.settings_font_size = int(self.settings_font_size)
+    self.settings_font_size = int(font.get('settings_size', 11))
+    if self.settings_font_size == 0:
+      self.settings_font_size = 11
+    # Settings dialog element sizes (pt or px depending on element)
+    settings_sizes = font.get('settings_sizes') or {}
+    self.settings_title_size = int(settings_sizes.get('title', 13))
+    self.settings_label_size = int(settings_sizes.get('label', 0))
+    self.settings_list_size = int(settings_sizes.get('list', 0))
+    self.settings_note_size = int(settings_sizes.get('note', 0))
+    self.settings_hint_size = int(settings_sizes.get('hint', 0))
+    self.settings_delete_size = int(settings_sizes.get('delete', 0))
     self.tab_rows = data.get('tab_rows', 0)  # 0 = dynamic
 
     # Window title format strings

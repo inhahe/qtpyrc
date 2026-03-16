@@ -586,6 +586,29 @@ class Commands:
     except Exception as e:
       window.redmessage('[Error opening debug log: %s]' % e)
 
+  def list(window, text):
+    """Open the channel list browser.
+    /list              — open browser, click Fetch to request
+    /list [params]     — open and immediately fetch with ELIST params
+    ELIST params (server-side filters, can be combined):
+      >N     channels with more than N users
+      <N     channels with fewer than N users
+      *mask* channel name wildcard
+      C>N    created more than N minutes ago
+      C<N    created less than N minutes ago
+      T>N    topic changed more than N minutes ago
+      T<N    topic changed less than N minutes ago
+    Example: /list >10 <500 *chat*"""
+    conn = window.client.conn if window.client else None
+    if not conn:
+      window.redmessage('[Not connected]')
+      return
+    from channel_list import show_channel_list
+    dlg = show_channel_list(window.client, parent=state.app.mainwin)
+    args = text.strip()
+    if args:
+      dlg._fetch(args)
+
   def chaninfo(window, text):
     """Show channel details dialog (modes, bans, topic)."""
     if window.type != "channel":
@@ -2037,7 +2060,18 @@ def _wmsg(window, text):
 
 
 def run_script(name, window=None):
-  """Run a command script file.  Each line is executed as a command."""
+  """Run a command script file.  Each line is executed as a command.
+
+  Multiline /exec blocks are supported::
+
+      /exec {
+        for i in range(5):
+          echo("line %d" % i)
+      }
+
+  Lines between ``/exec {`` and ``}`` are joined and executed as one
+  Python block.  Indentation is preserved relative to the first line.
+  """
   import os
   path = _resolve_file(name, _resolve_cmdscripts_dir())
   if not path:
@@ -2052,10 +2086,37 @@ def run_script(name, window=None):
       window.redmessage("[Error reading script: %s]" % e)
     return False
   win = window
+  exec_block = None  # accumulator for multiline /exec
   for line in lines:
-    line = line.strip()
+    stripped = line.rstrip()
+
+    # Accumulating a multiline /exec block
+    if exec_block is not None:
+      if stripped.strip() == '}':
+        # End of block — execute
+        code = '\n'.join(exec_block)
+        if win:
+          docommand(win, 'exec', code)
+        exec_block = None
+      else:
+        exec_block.append(stripped)
+      continue
+
+    line = stripped.strip()
     if not line or line.startswith(';'):
       continue
+
+    # Check for multiline /exec { opener
+    prefix = state.config.cmdprefix
+    exec_opener = None
+    if line.startswith('/exec '):
+      exec_opener = line[6:]
+    elif prefix != '/' and line.startswith(prefix + 'exec '):
+      exec_opener = line[len(prefix) + 5:]
+    if exec_opener is not None and exec_opener.strip() == '{':
+      exec_block = []
+      continue
+
     # Use the active window at time of execution for each line
     if not win:
       win = getattr(getattr(state, 'app', None), 'mainwin', None)
@@ -2067,7 +2128,6 @@ def run_script(name, window=None):
             win = win.widget()
     if not win:
       continue
-    prefix = state.config.cmdprefix
     if line.startswith('/'):
       parts = line[1:].split(' ', 1)
       docommand(win, parts[0], parts[1] if len(parts) > 1 else '')
@@ -2178,8 +2238,8 @@ def _window_context_vars(window):
     v['key'] = window.channel.key
   v['network_name'] = getattr(conn, '_network_name', '') or '' if conn else ''
   v['window_type'] = getattr(window, 'type', '')
-  v['networks'] = str(sum(1 for c in state.clients if c.hostname))
-  v['channels'] = str(sum(len(c.channels) for c in state.clients))
+  v['networks'] = str(sum(1 for c in (state.clients or []) if c.hostname))
+  v['channels'] = str(sum(len(c.channels) for c in (state.clients or [])))
   return v
 
 

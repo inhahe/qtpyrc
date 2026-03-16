@@ -93,7 +93,9 @@ class NotificationsPage(QWidget):
         # Hint about highlight patterns
         self._highlight_hint = QLabel()
         self._highlight_hint.setWordWrap(True)
-        self._highlight_hint.setStyleSheet("color: #996600; font-size: 11px;")
+        from settings import SETTINGS_HINT_STYLE
+        # Use hint style but with warning color instead of gray
+        self._highlight_hint.setStyleSheet(SETTINGS_HINT_STYLE.replace('gray', '#996600'))
         self._highlight_hint.setTextFormat(Qt.TextFormat.PlainText)
         layout.addRow(self._highlight_hint)
 
@@ -106,7 +108,8 @@ class NotificationsPage(QWidget):
                      "use /on commands with -s/-d/-h flags. Add them to "
                      "your startup commands file to persist across restarts.")
         tip.setWordWrap(True)
-        tip.setStyleSheet("color: gray; font-size: 11px;")
+        from settings import SETTINGS_HINT_STYLE
+        tip.setStyleSheet(SETTINGS_HINT_STYLE)
         layout.addRow(tip)
 
 
