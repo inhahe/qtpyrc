@@ -234,6 +234,7 @@ symbolic_to_numeric = {
     "RPL_NAMREPLY": '353', "RPL_ENDOFNAMES": '366',
     "RPL_LINKS": '364', "RPL_ENDOFLINKS": '365',
     "RPL_BANLIST": '367', "RPL_ENDOFBANLIST": '368',
+    "RPL_QUIETLIST": '728', "RPL_ENDOFQUIETLIST": '729',
     "RPL_INFO": '371', "RPL_ENDOFINFO": '374',
     "RPL_MOTDSTART": '375', "RPL_MOTD": '372', "RPL_ENDOFMOTD": '376',
     "RPL_YOUREOPER": '381', "RPL_REHASHING": '382',
@@ -336,6 +337,7 @@ class IRCClient:
         self._monitor_limit = 0          # max targets (0 = unlimited)
         # Make a mutable copy so ISUPPORT can update per-connection
         self._modeAcceptsArg = dict(self.__class__._modeAcceptsArg)
+        self._chanmodes_raw = ''  # CHANMODES=A,B,C,D from ISUPPORT
         # IRCv3 state
         self._current_tags = {}           # message tags for the line being processed
         self._cap_negotiating = False
@@ -1028,6 +1030,7 @@ class IRCClient:
                     if key == 'CASEMAPPING' and value in _irclower_tables:
                         self._casemapping = value
                     elif key == 'CHANMODES':
+                        self._chanmodes_raw = value
                         self._parseChanModes(value)
                     elif key == 'PREFIX':
                         self._parsePrefix(value)

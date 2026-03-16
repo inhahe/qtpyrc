@@ -67,8 +67,20 @@ def _build_app_stylesheet():
   # Tree selection
   tfg = cfg.tree_fgcolor.name()
   tbg = cfg.tree_bgcolor.name()
+  fg = cfg.fgcolor.name()
+  bg = cfg.bgcolor.name()
+  # Nick list colors
+  nfg = cfg.nicklist_fgcolor.name()
+  nbg = cfg.nicklist_bgcolor.name()
+  nicks_font = ''
+  if cfg.nicklist_font_family:
+    nicks_font += "font-family: '%s'; " % cfg.nicklist_font_family
+  if cfg.nicklist_font_size:
+    nicks_font += "font-size: %dpt; " % cfg.nicklist_font_size
   parts = [
-    # Menu rules need pseudo-states — can't be done with QPalette
+    # Main window background
+    "QMainWindow { background-color: %s; color: %s; }" % (bg, fg),
+    # Menu rules
     "QMenuBar { background-color: %s; color: %s; padding: 0px; %s}" % (mbg, mfg, menu_font),
     "QMenuBar::item { padding: 4px 8px; }",
     "QMenuBar::item:selected { background-color: %s; color: %s; }" % (mfg, mbg),
@@ -76,41 +88,36 @@ def _build_app_stylesheet():
     "QMenu::item { padding: 4px 12px; }",
     "QMenu::item:disabled { color: %s; }" % m_disabled,
     "QMenu::item:selected { background-color: %s; color: %s; }" % (mfg, mbg),
-    # Tree selection needs pseudo-state
+    # Chat text areas
+    "QTextEdit { background-color: %s; color: %s; }" % (bg, fg),
+    # Tree
+    "QTreeWidget { background-color: %s; color: %s; }" % (tbg, tfg),
     "QTreeWidget::item:selected { background-color: %s; color: %s; }" % (tfg, tbg),
+    # Nick list
+    "QListWidget#nicklist { background-color: %s; color: %s; %s}" % (nbg, nfg, nicks_font),
+    # MDI area
+    "QMdiArea { background-color: %s; }" % bg,
+    # Splitter handle
+    "QSplitter::handle { background-color: %s; }" % (
+        '#cccccc' if cfg.bgcolor.lightness() > 128 else '#555555'),
   ]
   return ' '.join(parts)
 
 
 def _apply_palette():
-  """Set application and widget colors via QPalette (fast path).
+  """Apply per-widget settings that can't go in the global stylesheet.
 
-  QPalette is the native Qt coloring mechanism and doesn't require
-  stylesheet rule matching on every paint event. This replaces the
-  stylesheet rules for QMainWindow, QTextEdit, QTreeWidget, QListWidget,
-  and QMdiArea colors.
+  Currently just the tree font (which is optional and per-widget).
+  All colors are in the global stylesheet.
   """
-  from PySide6.QtGui import QPalette, QColor, QFont
   cfg = state.config
-  # App-wide palette
-  pal = QApplication.instance().palette()
-  pal.setColor(QPalette.ColorRole.Window, QColor(cfg.bgcolor))
-  pal.setColor(QPalette.ColorRole.WindowText, QColor(cfg.fgcolor))
-  pal.setColor(QPalette.ColorRole.Base, QColor(cfg.bgcolor))
-  pal.setColor(QPalette.ColorRole.Text, QColor(cfg.fgcolor))
-  QApplication.instance().setPalette(pal)
-
   mw = state.app.mainwin if state.app else None
   if not mw:
     return
 
-  # Tree widget palette
+  # Tree font (colors handled by global stylesheet)
   tree = getattr(mw, 'network_tree', None)
   if tree:
-    tp = tree.palette()
-    tp.setColor(QPalette.ColorRole.Base, QColor(cfg.tree_bgcolor))
-    tp.setColor(QPalette.ColorRole.Text, QColor(cfg.tree_fgcolor))
-    tree.setPalette(tp)
     tree_font = ''
     if cfg.tree_font_family:
       tree_font += "font-family: '%s'; " % cfg.tree_font_family
@@ -120,12 +127,6 @@ def _apply_palette():
       tree.setStyleSheet("QTreeWidget { %s }" % tree_font)
     else:
       tree.setStyleSheet('')
-
-  # Nick list palette (applied per-window in _refresh_all_window_fonts)
-  # Store as state for new windows to pick up
-  state._nicklist_palette = QPalette()
-  state._nicklist_palette.setColor(QPalette.ColorRole.Base, QColor(cfg.nicklist_bgcolor))
-  state._nicklist_palette.setColor(QPalette.ColorRole.Text, QColor(cfg.nicklist_fgcolor))
 
 
 def _refresh_all_window_fonts():
@@ -149,8 +150,6 @@ def _refresh_all_window_fonts():
       win.input.setFixedHeight(QFontMetrics(f).height() * lines + 10)
       if hasattr(win, 'nicklist'):
         win.nicklist.setFont(nf)
-        if hasattr(state, '_nicklist_palette'):
-          win.nicklist.setPalette(state._nicklist_palette)
 
 
 def _refresh_navigation(mw=None):
@@ -1575,6 +1574,10 @@ if __name__ == '__main__':
                       help='Path to YAML configuration file')
   parser.add_argument('-d', '--debug', type=int, default=None,
                       help='Debug output level (0=silent, 1=error, 2=warn, 3=info, 4=debug, 5=trace)')
+  parser.add_argument('--debuglog', default=None, metavar='FILE',
+                      help='Log debug output to a file (appends)')
+  parser.add_argument('--debuglog-overwrite', action='store_true',
+                      help='Overwrite the debug log file instead of appending')
   # Script/plugin control
   parser.add_argument('--startup', default=None,
                       help='Startup script to run instead of the configured one')
@@ -1642,6 +1645,12 @@ if __name__ == '__main__':
     state.debug_level = cli_args.debug
   elif state.config.log_debug:
     state.debug_level = state.LOG_DEBUG
+  if cli_args.debuglog:
+    mode = 'w' if cli_args.debuglog_overwrite else 'a'
+    try:
+      state._dbg_file = open(cli_args.debuglog, mode, encoding='utf-8')
+    except Exception as e:
+      print('Error opening debug log %s: %s' % (cli_args.debuglog, e))
 
   # --- Logger ---
   config_dir = os.path.dirname(os.path.abspath(state.config.path))

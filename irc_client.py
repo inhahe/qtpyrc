@@ -551,6 +551,122 @@ class IRCClient(asyncirc.IRCClient):
   # are common non-standard WHOIS numerics — they arrive as irc_unknown
   # since they're not in the symbolic map, so we intercept in handleCommand.
 
+  # --- Channel details numerics ---
+
+  def irc_RPL_CHANNELMODEIS(self, prefix, params):
+    # params: [me, #channel, +modes, arg1, arg2, ...]
+    if len(params) < 3:
+      return
+    channel = params[1]
+    mode_string = params[2]
+    mode_args = params[3:]
+    chnlower = self.irclower(channel)
+    chan = self.client.channels.get(chnlower)
+    if chan:
+      chan.modes = mode_string
+      chan.mode_args = list(mode_args)
+      dlg = getattr(chan, '_details_dialog', None)
+      if dlg:
+        dlg.update_modes(mode_string, mode_args)
+
+  def irc_TOPICDATE(self, prefix, params):
+    # 333: [me, #channel, setter, timestamp]
+    if len(params) < 4:
+      return
+    channel = params[1]
+    setter = params[2]
+    try:
+      from datetime import datetime
+      ts = datetime.fromtimestamp(int(params[3])).strftime('%Y-%m-%d %H:%M:%S')
+    except (ValueError, OSError):
+      ts = params[3]
+    chnlower = self.irclower(channel)
+    chan = self.client.channels.get(chnlower)
+    if chan:
+      chan.topic_setter = setter
+      chan.topic_time = ts
+
+  def _list_entry(self, mode_char, params):
+    """Generic handler for list mode entry numerics (367, 348, 346, 728)."""
+    if len(params) < 3:
+      return
+    channel = params[1]
+    mask = params[2]
+    setter = params[3] if len(params) > 3 else ''
+    try:
+      from datetime import datetime
+      ts_raw = params[4] if len(params) > 4 else ''
+      ts = datetime.fromtimestamp(int(ts_raw)).strftime('%Y-%m-%d %H:%M:%S') if ts_raw else ''
+    except (ValueError, OSError):
+      ts = params[4] if len(params) > 4 else ''
+    chnlower = self.irclower(channel)
+    chan = self.client.channels.get(chnlower)
+    if chan:
+      pending = chan._pending_lists.setdefault(mode_char, [])
+      pending.append((mask, setter, ts))
+
+  def _list_end(self, mode_char, params):
+    """Generic handler for end-of-list numerics (368, 349, 347, 729)."""
+    if len(params) < 2:
+      return
+    channel = params[1]
+    chnlower = self.irclower(channel)
+    chan = self.client.channels.get(chnlower)
+    if chan:
+      entries = list(chan._pending_lists.pop(mode_char, []))
+      dlg = getattr(chan, '_details_dialog', None)
+      if dlg:
+        dlg.update_list(mode_char, entries)
+
+  # Bans (+b): 367 / 368
+  def irc_RPL_BANLIST(self, prefix, params):
+    self._list_entry('b', params)
+
+  def irc_RPL_ENDOFBANLIST(self, prefix, params):
+    self._list_end('b', params)
+
+  # Ban exceptions (+e): 348 / 349
+  def irc_RPL_EXCEPTLIST(self, prefix, params):
+    self._list_entry('e', params)
+
+  def irc_RPL_ENDOFEXCEPTLIST(self, prefix, params):
+    self._list_end('e', params)
+
+  # Invite exceptions (+I): 346 / 347
+  def irc_RPL_INVITELIST(self, prefix, params):
+    self._list_entry('I', params)
+
+  def irc_RPL_ENDOFINVITELIST(self, prefix, params):
+    self._list_end('I', params)
+
+  # Quiets (+q): 728 / 729 (non-standard, Libera/freenode)
+  def irc_RPL_QUIETLIST(self, prefix, params):
+    # 728 params: [me, #channel, q, mask, setter, timestamp]
+    # The 'q' at index 2 is the mode char; shift params to match standard format
+    if len(params) >= 4 and params[2] == 'q':
+      shifted = [params[0], params[1]] + list(params[3:])
+      self._list_entry('q', shifted)
+    else:
+      self._list_entry('q', params)
+
+  def irc_RPL_ENDOFQUIETLIST(self, prefix, params):
+    self._list_end('q', params)
+
+  def irc_ERR_CHANOPRIVSNEEDED(self, prefix, params):
+    # params: [me, #channel, "You're not a channel operator"]
+    if len(params) < 2:
+      return
+    channel = params[1]
+    chnlower = self.irclower(channel)
+    chan = self.client.channels.get(chnlower)
+    if chan:
+      dlg = getattr(chan, '_details_dialog', None)
+      if dlg:
+        dlg.update_access_denied(channel)
+        return
+    # Default: show in server window
+    self.window.addline(' '.join(params[1:]))
+
   def irc_RPL_WELCOME(self, prefix, params):
     super().irc_RPL_WELCOME(prefix, params)
     # Use network_key as default; ISUPPORT NETWORK= will correct it later if available
@@ -585,9 +701,12 @@ class IRCClient(asyncirc.IRCClient):
       if tree:
         tree.update_client_label(self.client)
 
-    # Autojoin channels
+    # Autojoin channels — mark them so the drain queue can skip them
+    # if the bouncer already joined us before they get sent
+    self._autojoin_pending = set()
     autojoins = state.config.get_autojoins(self.client.network_key)
     for channel, key in autojoins.items():
+      self._autojoin_pending.add(self.irclower(channel))
       self.join(channel, key)
 
     # If MONITOR just became available, send the notify list
@@ -730,6 +849,14 @@ class IRCClient(asyncirc.IRCClient):
   def joined(self, chname):
     chnlower = self.irclower(chname)
     self._hopping.discard(chnlower)
+    # If this channel was an autojoin and the bouncer already joined us,
+    # remove the redundant JOIN from the send queue.
+    autojoin_pending = getattr(self, '_autojoin_pending', None)
+    if autojoin_pending and chnlower in autojoin_pending:
+      autojoin_pending.discard(chnlower)
+      self._queue = [line for line in self._queue
+                     if not (line.startswith('JOIN ') and
+                             self.irclower(line.split()[1]) == chnlower)]
     pending_key = self._pending_keys.pop(chnlower, None)
     if chnlower in self.channels:
       chan = self.channels[chnlower]
@@ -1053,6 +1180,8 @@ class IRCClient(asyncirc.IRCClient):
     chan = self.client.channels.get(chnlower)
     if chan:
       chan.topic = newTopic
+      chan.topic_setter = usermask
+      chan.topic_time = ts
       entry = HistoryTopicChange(setter, nick, newTopic)
       chan.history.append(entry)
       chan.window.addline_nick(["* ", (self._pnick(nick, channel),), " changed the topic to: %s" % newTopic], state.infoformat,
