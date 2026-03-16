@@ -197,8 +197,9 @@ class SettingsDialog(QDialog):
         self._reset_page_btn.clicked.connect(self._reset_current_page)
         buttons.addButton(self._reset_page_btn, QDialogButtonBox.ButtonRole.ResetRole)
         right.addWidget(buttons)
+        from settings import SETTINGS_HINT_STYLE
         hint = QLabel('Tip: right-click any field for Help or Reset to Default')
-        hint.setStyleSheet('color: #888; font-size: 8pt;')
+        hint.setStyleSheet(SETTINGS_HINT_STYLE)
         hint.setAlignment(Qt.AlignmentFlag.AlignRight)
         right.addWidget(hint)
 
