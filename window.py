@@ -247,7 +247,8 @@ class ChatOutput(QTextEdit):
     open_act = menu.addAction('Open Link')
     copy_link_act = menu.addAction('Copy Link')
     if has_selection:
-      menu.addSeparator()
+      from popups import _add_menu_separator
+      _add_menu_separator(menu)
       copy_text_act = menu.addAction('Copy')
     else:
       copy_text_act = None
