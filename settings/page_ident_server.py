@@ -10,6 +10,7 @@ class IdentServerPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
         self.enabled = _ck(QCheckBox(), 'ident.enabled')
         layout.addRow("Enable ident server:", self.enabled)

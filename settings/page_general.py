@@ -13,7 +13,7 @@ def _separator(layout, text):
 
 
 def _ck(widget, key):
-    """Tag a widget with its config.example.yaml key for auto-tooltip/defaults."""
+    """Tag a widget with its config.defaults.yaml key for auto-tooltip/defaults."""
     widget.setProperty('config_key', key)
     return widget
 
@@ -24,6 +24,7 @@ class GeneralPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
         self.input_lines = _ck(QSpinBox(), 'input_lines')
         self.input_lines.setRange(1, 10)
@@ -206,6 +207,7 @@ class InterfacePage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
         self.window_mode = _ck(QComboBox(), 'window_mode')
         self.window_mode.addItems(["Maximized", "Normal"])

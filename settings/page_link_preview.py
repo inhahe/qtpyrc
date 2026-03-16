@@ -10,6 +10,7 @@ class LinkPreviewPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
         self.link_preview = _ck(QCheckBox(), 'link_preview.enabled')
         layout.addRow("Enable:", self.link_preview)
@@ -38,6 +39,7 @@ class LinkPreviewPage(QWidget):
 
         self.lp_proxy = _ck(QLineEdit(), 'link_preview.proxy')
         self.lp_proxy.setPlaceholderText("e.g. socks5://127.0.0.1:9050")
+        self.lp_proxy.setMinimumWidth(250)
         layout.addRow("Proxy:", self.lp_proxy)
 
     def load_from_data(self, data):

@@ -71,8 +71,8 @@ class NickColorsPage(QWidget):
         row_layout.addWidget(swatch)
 
         hex_input = QLineEdit(color_str)
-        _char = hex_input.fontMetrics().horizontalAdvance('0')
-        hex_input.setFixedWidth(_char * 10)
+        _fm = hex_input.fontMetrics()
+        hex_input.setMinimumWidth(_fm.horizontalAdvance('#000000') + _fm.height() * 2)
         hex_input.setMaxLength(7)
         hex_input.textChanged.connect(lambda text, i=idx: self._on_hex_typing(i))
         row_layout.addWidget(hex_input)
@@ -163,12 +163,23 @@ class NickColorsPage(QWidget):
             self._rebuild(colors)
 
     def _reset_default(self):
-        self._rebuild([
-            '#cc0000', '#0066cc', '#009900', '#9933cc', '#cc6600',
-            '#00999e', '#cc0066', '#6633cc', '#008844', '#aa4400',
-            '#2255aa', '#cc3399', '#337700', '#7744aa', '#006688',
-            '#994400', '#2266cc', '#880044', '#448800', '#663399',
-        ])
+        # Read default palette from config.defaults.yaml
+        import os
+        from ruamel.yaml import YAML
+        try:
+            example_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                'defaults', 'config.defaults.yaml')
+            yaml = YAML()
+            yaml.preserve_quotes = True
+            with open(example_path, 'r', encoding='utf-8') as f:
+                data = yaml.load(f)
+            palette = (data.get('nick_colors') or {}).get('palette') or []
+        except Exception:
+            palette = []
+        if not palette:
+            palette = ['#cc0000', '#0066cc', '#009900', '#9933cc', '#cc6600']
+        self._rebuild(palette)
 
     def load_from_data(self, data):
         nc = data.get('nick_colors') or {}

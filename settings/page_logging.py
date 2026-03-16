@@ -10,6 +10,7 @@ class LoggingPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
         self.log_dir = _ck(QLineEdit(), 'logging.dir')
         layout.addRow("Log directory:", self.log_dir)

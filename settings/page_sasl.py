@@ -11,6 +11,7 @@ class SASLPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
         self.enabled = _ck(QCheckBox(), 'sasl.enabled')
         layout.addRow("Enable SASL:", self.enabled)
