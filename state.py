@@ -17,9 +17,18 @@ debug_level = LOG_INFO
 _dbg_labels = {LOG_ERROR: 'ERROR', LOG_WARN: 'WARN', LOG_INFO: 'INFO',
                LOG_DEBUG: 'DEBUG', LOG_TRACE: 'TRACE'}
 
+_dbg_file = None  # file object for debug log, set by /debuglog command
+
 def dbg(level, *args):
   if level <= debug_level:
-    print('[%s]' % _dbg_labels.get(level, '?'), *args)
+    line = '[%s] %s' % (_dbg_labels.get(level, '?'), ' '.join(str(a) for a in args))
+    print(line)
+    if _dbg_file:
+      try:
+        _dbg_file.write(line + '\n')
+        _dbg_file.flush()
+      except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Shared mutable globals (set at startup by qtpyrc.py)

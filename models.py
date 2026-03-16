@@ -147,7 +147,12 @@ class Channel:
     self.users = {}  # irclower(nick) -> User — per-channel references
     self.history = deque(maxlen=HISTORY_MAX)
     self.topic = None
-    self.key = None      # channel key (+k), from config/join/mode
+    self.topic_setter = None   # nick!user@host who set the topic
+    self.topic_time = None     # human-readable time when topic was set
+    self.key = None            # channel key (+k), from config/join/mode
+    self.modes = ''            # current mode string (e.g. '+nt')
+    self.mode_args = []        # mode parameters
+    self._pending_lists = {}   # mode_char -> [(mask, setter, ts)] for list numerics
     self.client = client
     self.name = name
     self.active = True   # False when kicked/disconnected but window kept open

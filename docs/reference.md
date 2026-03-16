@@ -89,6 +89,7 @@ Parameters that accept arbitrary text (messages, reasons, titles) must be quoted
 | `/kick` | `/kick <nick> [reason]` | Kick a user from the current channel |
 | `/ban` | `/ban <nick\|mask>` | Ban a user (nicks are expanded to `nick!*@*`) |
 | `/kban` | `/kban <nick> [reason]` | Ban and kick a user in one command |
+| `/chaninfo` | `/chaninfo` | Show channel details dialog (modes, bans, topic) |
 | `/op` | `/op <nick>` | Give operator status (+o) |
 | `/deop` | `/deop <nick>` | Remove operator status (-o) |
 | `/halfop` | `/halfop <nick>` | Give halfop status (+h) |

@@ -552,6 +552,48 @@ class Commands:
     else:
       window.client.conn.sendLine("KICK %s %s" % (window.channel.name, target))
 
+  def debuglog(window, text):
+    """Toggle debug output logging to a file.
+    /debuglog <filename>    — start logging (append)
+    /debuglog -o <filename> — start logging (overwrite)
+    /debuglog               — stop logging"""
+    import os
+    args = text.strip()
+    if not args:
+      if state._dbg_file:
+        name = state._dbg_file.name
+        state._dbg_file.close()
+        state._dbg_file = None
+        window.addline('[Debug logging stopped (%s)]' % name)
+      else:
+        window.redmessage('[Debug logging is not active. Usage: /debuglog [-o] <filename>]')
+      return
+    mode = 'a'
+    if args.startswith('-o '):
+      mode = 'w'
+      args = args[3:].strip()
+    path = args
+    if not path:
+      window.redmessage('[Usage: /debuglog [-o] <filename>]')
+      return
+    if state._dbg_file:
+      state._dbg_file.close()
+      state._dbg_file = None
+    try:
+      state._dbg_file = open(path, mode, encoding='utf-8')
+      window.addline('[Debug logging to %s (%s)]'
+                     % (os.path.abspath(path), 'overwrite' if mode == 'w' else 'append'))
+    except Exception as e:
+      window.redmessage('[Error opening debug log: %s]' % e)
+
+  def chaninfo(window, text):
+    """Show channel details dialog (modes, bans, topic)."""
+    if window.type != "channel":
+      window.redmessage("[Error: /chaninfo only works in a channel window]")
+      return
+    from channel_details import show_channel_details
+    show_channel_details(window.channel, parent=state.app.mainwin)
+
   def op(window, text):
     if window.type != "channel":
       window.redmessage("[Error: /op only works in a channel window]")
