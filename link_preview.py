@@ -3,7 +3,6 @@
 import asyncio
 import re
 import ssl
-import traceback
 from urllib.parse import urlparse
 
 from PySide6.QtWidgets import QTextEdit
@@ -14,8 +13,6 @@ import state
 from irc_client import _URL_RE
 
 
-def _dbg(*args):
-    state.dbg(state.LOG_DEBUG, '[link_preview]', *args)
 
 
 # ---------------------------------------------------------------------------
@@ -104,18 +101,14 @@ async def _fetch_head(url, max_size=65536, timeout=10.0, proxy=''):
                                    proxy=proxy or None,
                                    headers={'User-Agent': _UA, 'Cookie': _COOKIES}) as resp:
                 if resp.status != 200:
-                    _dbg('fetch_head %s: HTTP %d' % (url, resp.status))
                     return None
                 ct = resp.headers.get('content-type', '')
                 if 'text/html' not in ct and 'application/xhtml' not in ct:
-                    _dbg('fetch_head %s: bad content-type %r' % (url, ct))
                     return None
                 # Read up to max_size bytes
                 data = await resp.content.read(max_size)
-                _dbg('fetch_head %s: got %d bytes' % (url, len(data)))
                 return data
     except Exception as e:
-        _dbg('fetch_head %s: %s' % (url, e))
         return None
 
 
@@ -145,18 +138,15 @@ async def _fetch_head_stdlib(url, max_size=65536, timeout=10.0, proxy=''):
                 with opener.open(req, timeout=timeout) as resp:
                     ct = resp.headers.get('content-type', '')
                     if 'text/html' not in ct and 'application/xhtml' not in ct:
-                        _dbg('fetch_head_stdlib %s: bad content-type %r' % (url, ct))
                         return None
                     return resp.read(max_size)
             else:
                 with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
                     ct = resp.headers.get('content-type', '')
                     if 'text/html' not in ct and 'application/xhtml' not in ct:
-                        _dbg('fetch_head_stdlib %s: bad content-type %r' % (url, ct))
                         return None
                     return resp.read(max_size)
         except Exception as e:
-            _dbg('fetch_head_stdlib %s: %s' % (url, e))
             return None
 
     loop = asyncio.get_event_loop()
@@ -179,26 +169,20 @@ async def _fetch_image(url, max_size=262144, timeout=10.0, proxy=''):
                                        proxy=proxy or None,
                                        headers={'User-Agent': _UA, 'Cookie': _COOKIES}) as resp:
                     if resp.status != 200:
-                        _dbg('fetch_image %s: HTTP %d' % (url, resp.status))
                         return None
                     ct = resp.headers.get('content-type', '')
                     if 'image/' not in ct:
-                        _dbg('fetch_image %s: bad content-type %r' % (url, ct))
                         return None
                     # Check Content-Length — skip if too large
                     cl = resp.headers.get('content-length')
                     if cl and int(cl) > max_size:
-                        _dbg('fetch_image %s: too large (%s bytes)' % (url, cl))
                         return None
                     data = await resp.content.read(max_size)
                     # Verify we got the full image (not truncated)
                     if cl and len(data) < int(cl):
-                        _dbg('fetch_image %s: truncated (%d/%s bytes)' % (url, len(data), cl))
                         return None
-                    _dbg('fetch_image %s: got %d bytes' % (url, len(data)))
                     return data
         except Exception as e:
-            _dbg('fetch_image %s: %s' % (url, e))
             return None
     else:
         import urllib.request
@@ -217,19 +201,15 @@ async def _fetch_image(url, max_size=262144, timeout=10.0, proxy=''):
                 with resp:
                     ct = resp.headers.get('content-type', '')
                     if 'image/' not in ct:
-                        _dbg('fetch_image_stdlib %s: bad content-type %r' % (url, ct))
                         return None
                     cl = resp.headers.get('content-length')
                     if cl and int(cl) > max_size:
-                        _dbg('fetch_image_stdlib %s: too large (%s bytes)' % (url, cl))
                         return None
                     data = resp.read(max_size)
                     if cl and len(data) < int(cl):
-                        _dbg('fetch_image_stdlib %s: truncated' % url)
                         return None
                     return data
             except Exception as e:
-                _dbg('fetch_image_stdlib %s: %s' % (url, e))
                 return None
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _do)
@@ -290,11 +270,9 @@ async def _fetch_json(url, timeout=10.0, proxy=''):
                                        proxy=proxy or None,
                                        headers={'User-Agent': _UA}) as resp:
                     if resp.status != 200:
-                        _dbg('fetch_json %s: HTTP %d' % (url, resp.status))
                         return None
                     return await resp.json(content_type=None)
         except Exception as e:
-            _dbg('fetch_json %s: %s' % (url, e))
             return None
     else:
         import urllib.request
@@ -307,7 +285,6 @@ async def _fetch_json(url, timeout=10.0, proxy=''):
                 with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
                     return json.loads(resp.read(65536))
             except Exception as e:
-                _dbg('fetch_json_stdlib %s: %s' % (url, e))
                 return None
         return await asyncio.get_event_loop().run_in_executor(None, _do)
 
@@ -319,10 +296,8 @@ async def _try_twitter(url, timeout=10.0, proxy=''):
         return None
     tweet_id = m.group(1)
     api_url = 'https://api.fxtwitter.com/status/%s' % tweet_id
-    _dbg('trying fxtwitter: %s' % api_url)
     data = await _fetch_json(api_url, timeout=timeout, proxy=proxy)
     if not data or not data.get('tweet'):
-        _dbg('fxtwitter: no tweet data')
         return None
     tweet = data['tweet']
     author = tweet.get('author', {})
@@ -342,8 +317,6 @@ async def _try_twitter(url, timeout=10.0, proxy=''):
         thumb = media['videos'][0].get('thumbnail_url', '')
         if thumb:
             info['image'] = thumb
-    _dbg('fxtwitter result:', {k: v[:80] + '...' if isinstance(v, str) and len(v) > 80 else v
-                               for k, v in info.items()})
     return info
 
 
@@ -357,10 +330,8 @@ async def _try_wikipedia(url, timeout=10.0, proxy=''):
     article = article.split('#')[0]
     from urllib.parse import unquote
     api_url = 'https://%s.wikipedia.org/api/rest_v1/page/summary/%s' % (lang, article)
-    _dbg('trying Wikipedia API: %s' % api_url)
     data = await _fetch_json(api_url, timeout=timeout, proxy=proxy)
     if not data or not data.get('title'):
-        _dbg('Wikipedia API: no data')
         return None
     info = {'title': data['title']}
     if data.get('extract'):
@@ -368,8 +339,6 @@ async def _try_wikipedia(url, timeout=10.0, proxy=''):
     thumb = data.get('thumbnail', {})
     if thumb.get('source'):
         info['image'] = thumb['source']
-    _dbg('Wikipedia result:', {k: v[:80] + '...' if isinstance(v, str) and len(v) > 80 else v
-                               for k, v in info.items()})
     return info
 
 
@@ -379,7 +348,6 @@ async def _try_oembed(url, timeout=10.0, proxy=''):
     for pattern, endpoint_tmpl in _OEMBED_PROVIDERS:
         if pattern.search(url):
             endpoint = endpoint_tmpl.replace('{url}', quote(url, safe=''))
-            _dbg('trying oEmbed: %s' % endpoint)
             data = await _fetch_json(endpoint, timeout=timeout, proxy=proxy)
             if data and data.get('title'):
                 info = {'title': data['title']}
@@ -387,10 +355,7 @@ async def _try_oembed(url, timeout=10.0, proxy=''):
                     info['description'] = data['author_name']
                 if data.get('thumbnail_url'):
                     info['image'] = data['thumbnail_url']
-                _dbg('oEmbed result:', info)
                 return info
-            elif data:
-                _dbg('oEmbed returned data but no title:', data)
             break
     return None
 
@@ -415,9 +380,6 @@ async def fetch_preview(url, max_size=65536, timeout=10.0, proxy=''):
     (YouTube, Vimeo, Reddit, Spotify, etc.) first, then falls back to
     scraping OG tags from <head>.
     """
-    _dbg('fetch_preview %s (max_size=%d, timeout=%.1f, aiohttp=%s)'
-         % (url, max_size, timeout, _USE_AIOHTTP))
-
     # Try site-specific handlers and oEmbed first
     info = await _try_special_handlers(url, timeout=timeout, proxy=proxy)
     if info:
@@ -429,16 +391,9 @@ async def fetch_preview(url, max_size=65536, timeout=10.0, proxy=''):
         else:
             data = await _fetch_head_stdlib(url, max_size, timeout, proxy)
         if not data:
-            _dbg('fetch_preview %s: no data returned' % url)
             return None
-        _dbg('fetch_preview %s: got %d bytes, first 500: %s'
-             % (url, len(data), data[:500].decode('utf-8', errors='replace')))
         info = _parse_head(data)
-        _dbg('fetch_preview %s: parsed ->' % url,
-             {k: (v[:80] + '...' if isinstance(v, str) and len(v) > 80 else v)
-              for k, v in info.items() if k != 'image_data'})
         if not info.get('title'):
-            _dbg('fetch_preview %s: no title found' % url)
             return None
         info['url'] = url
 
@@ -636,14 +591,11 @@ async def _fetch_and_insert(window, url, marker_name=None):
             timeout=state.config.link_preview_timeout,
             proxy=state.config.link_preview_proxy)
         if info:
-            _dbg('inserting preview for %s: %s' % (url, info.get('title', '')))
             _insert_preview(window, info, marker_name)
             _previewed.add(url)
             if len(_previewed) > 500:
                 _previewed.clear()
-        else:
-            _dbg('no preview for %s' % url)
-    except Exception as e:
-        _dbg('_fetch_and_insert %s: %s' % (url, e))
+    except Exception:
+        pass
     finally:
         _pending.discard(url)

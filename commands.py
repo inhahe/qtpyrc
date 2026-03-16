@@ -2082,15 +2082,17 @@ def _wmsg(window, text):
 def run_script(name, window=None):
   """Run a command script file.  Each line is executed as a command.
 
-  Multiline /exec blocks are supported::
+  Multiline /exec blocks are supported (when run from a file, not typed)::
 
       /exec {
         for i in range(5):
           echo("line %d" % i)
       }
 
-  Lines between ``/exec {`` and ``}`` are joined and executed as one
-  Python block.  Indentation is preserved relative to the first line.
+  Lines between ``/exec {`` and a closing ``}`` at column 0 are joined
+  and executed as one Python block.  Indentation is auto-dedented.
+  The closing ``}`` must be unindented (no leading spaces) to avoid
+  confusion with Python dict/set braces.
   """
   import os
   path = _resolve_file(name, _resolve_cmdscripts_dir())
@@ -2112,9 +2114,11 @@ def run_script(name, window=None):
 
     # Accumulating a multiline /exec block
     if exec_block is not None:
-      if stripped.strip() == '}':
-        # End of block — execute
-        code = '\n'.join(exec_block)
+      if stripped.strip() == '}' and not stripped.startswith(' ') and not stripped.startswith('\t'):
+        # End of block — closing } must be unindented (column 0)
+        # Find the common leading whitespace and remove it
+        import textwrap
+        code = textwrap.dedent('\n'.join(exec_block))
         if win:
           docommand(win, 'exec', code)
         exec_block = None
