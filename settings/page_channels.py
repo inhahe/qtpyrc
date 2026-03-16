@@ -168,10 +168,10 @@ class ChannelsPage(QWidget):
             item.setSizeHint(row_widget.sizeHint())
             self._chan_list.addItem(item)
             self._chan_list.setItemWidget(item, row_widget)
-        if 0 <= row < self._chan_list.count():
-            self._chan_list.setCurrentRow(row)
-        elif self._chan_list.count() > 0:
-            self._chan_list.setCurrentRow(0)
+        if self._chan_list.count() > 0:
+            new_row = min(row, self._chan_list.count() - 1)
+            self._chan_list.setCurrentRow(new_row)
+            self._chan_list.scrollToItem(self._chan_list.item(new_row))
         self._updating = False
         if self._chan_list.currentRow() >= 0:
             self._on_row_changed(self._chan_list.currentRow())

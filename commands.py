@@ -148,6 +148,26 @@ class Commands:
 
   disconnect = quit
 
+  def exit(window, text):
+    """Exit the application. In GUI mode, closes the main window.
+    In headless mode, stops the event loop.
+    /exit [quit_message]"""
+    # Disconnect all clients first
+    msg = _unquote(text.strip()) if text.strip() else 'Leaving'
+    for client in (state.clients or []):
+      if client.conn:
+        client._intentional_disconnect = True
+        client.conn.quit(msg)
+    # Exit
+    import asyncio
+    loop = asyncio.get_event_loop()
+    if hasattr(state.app, 'mainwin') and hasattr(state.app.mainwin, 'close'):
+      from PySide6.QtWidgets import QApplication
+      QApplication.instance().quit()
+    else:
+      # Headless
+      loop.call_soon(loop.stop)
+
   def server(window, text):
     parts = text.split()
     if not parts:

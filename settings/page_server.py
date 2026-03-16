@@ -38,7 +38,9 @@ class ServerPage(QWidget):
         # Edit form for selected server
         self._edit_group = QGroupBox("Server details")
         form = QFormLayout(self._edit_group)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         self.host = _ck(QLineEdit(), 'server.host')
+        self.host.setMinimumWidth(200)
         form.addRow("Host:", self.host)
         self.port = _ck(QSpinBox(), 'server.port')
         self.port.setRange(1, 65535)
@@ -74,10 +76,10 @@ class ServerPage(QWidget):
         self._server_list.clear()
         for srv in self._servers:
             self._server_list.addItem(self._label_for(srv))
-        if row >= 0 and row < len(self._servers):
-            self._server_list.setCurrentRow(row)
-        elif self._servers:
-            self._server_list.setCurrentRow(0)
+        if self._servers:
+            new_row = min(row, len(self._servers) - 1) if row >= 0 else 0
+            self._server_list.setCurrentRow(new_row)
+            self._server_list.scrollToItem(self._server_list.item(new_row))
         self._server_list.blockSignals(False)
 
     def _on_row_changed(self, row):

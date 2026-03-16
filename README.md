@@ -49,6 +49,7 @@ It should be cross-platform, but I haven't tested that yet either.
 - Per-channel notification suppression
 
 **Other**
+- Headless mode (`--headless`) for running bots and scripts without a GUI
 - Channel history replay from SQLite database
 - IRC log files with optional per-network and per-channel subdirectories and monthly rotation
 - URL catcher
