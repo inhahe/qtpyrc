@@ -10,6 +10,7 @@ python qtpyrc.py [options]
 |--------|-------------|
 | `-c`, `--config FILE` | Path to YAML configuration file |
 | `-d`, `--debug LEVEL` | Debug output level (0=silent .. 5=trace) |
+| `--headless` | Run without GUI (for bots, scripts, headless servers) |
 | `--startup FILE` | Run this startup script instead of the configured one |
 | `--no-startup` | Suppress loading the startup script |
 | `-r`, `--run PATTERN` | Run additional command scripts (repeatable, wildcards) |
@@ -75,6 +76,8 @@ Parameters that accept arbitrary text (messages, reasons, titles) must be quoted
 | `/ctcp` | `/ctcp <nick> <type> [data]` | Send a CTCP query (PING, VERSION, TIME, etc.) |
 | `/invite` | `/invite <nick> [#channel]` | Invite a user to a channel (defaults to current) |
 | `/raw` | `/raw <line>` | Send a raw IRC command to the server |
+| `/openurl` | `/openurl <url>` | Open a URL in the system browser |
+| `/clipboard` | `/clipboard <text>` | Copy text to the system clipboard |
 | `/quote` | `/quote <line>` | Alias for `/raw` |
 | `/echo` | `/echo [-w target] <text>` | Print text to the current window (or target window with `-w`) |
 | `/log` | `/log [-w target] "text"` | Write a line to the log file for the current window (or target) |

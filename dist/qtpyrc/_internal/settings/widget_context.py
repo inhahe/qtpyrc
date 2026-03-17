@@ -97,13 +97,24 @@ def show_widget_context_menu(widget, pos):
 
 
 class SettingsContextFilter(QObject):
-    """Event filter that adds right-click context menus to settings widgets."""
+    """Event filter that adds right-click context menus to settings widgets.
+
+    Handles compound widgets like _ColorRow by walking up to find
+    the parent that has the config_key property.
+    """
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.ContextMenu:
-            default = _get_default(obj)
-            help_text = _get_help(obj)
-            if default is not None or help_text:
-                show_widget_context_menu(obj, event.pos())
-                return True
+        from PySide6.QtCore import Qt as _Qt
+        # Intercept right-click via mouse press (more reliable than ContextMenu
+        # which editable QComboBox/QLineEdit may consume)
+        if (event.type() == QEvent.Type.MouseButtonPress
+                and event.button() == _Qt.MouseButton.RightButton):
+            target = obj
+            while target:
+                default = _get_default(target)
+                help_text = _get_help(target)
+                if default is not None or help_text:
+                    show_widget_context_menu(target, event.pos())
+                    return True
+                target = target.parent()
         return False

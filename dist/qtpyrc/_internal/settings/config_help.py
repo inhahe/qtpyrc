@@ -1,9 +1,9 @@
-"""Extract help text from config.example.yaml for settings tooltips.
+"""Extract help text from config.defaults.yaml for settings tooltips.
 
 Parses the YAML file as text and associates comment blocks with the
 config key that follows them.
 
-Format conventions in config.example.yaml:
+Format conventions in config.defaults.yaml:
   # comment text           — help text (accumulated for the next key)
   key: value               — active config key (help buffer assigned to it)
   #~ key: value            — commented-out config key (same as active key)
@@ -17,7 +17,7 @@ _help_cache = None
 
 
 def _parse_help(path):
-    """Parse config.example.yaml and return {dotted_key: help_text}.
+    """Parse config.defaults.yaml and return {dotted_key: help_text}.
 
     A comment block (consecutive # lines) is associated with the next
     key (active or #~ commented-out). Nested keys use dot notation
@@ -127,7 +127,7 @@ def get_help(key):
     if _help_cache is None:
         path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            'defaults', 'config.example.yaml')
+            'defaults', 'config.defaults.yaml')
         _help_cache = _parse_help(path)
     return _help_cache.get(key, '')
 

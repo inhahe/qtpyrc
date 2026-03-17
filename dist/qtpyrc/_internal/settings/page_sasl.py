@@ -11,6 +11,7 @@ class SASLPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
         self.enabled = _ck(QCheckBox(), 'sasl.enabled')
         layout.addRow("Enable SASL:", self.enabled)
@@ -20,10 +21,12 @@ class SASLPage(QWidget):
         layout.addRow("Mechanism:", self.mechanism)
 
         self.username = _ck(QLineEdit(), 'sasl.username')
+        self.username.setMinimumWidth(200)
         layout.addRow("Username:", self.username)
 
         pw_row = QHBoxLayout()
         self.password = _ck(QLineEdit(), 'sasl.password')
+        self.password.setMinimumWidth(200)
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         pw_row.addWidget(self.password)
         self._pw_show = QPushButton("Show")

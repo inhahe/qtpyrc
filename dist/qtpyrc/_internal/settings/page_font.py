@@ -98,8 +98,21 @@ class _ColorRow(QWidget):
         for name in _NAMED_COLORS:
             self._combo.addItem(name)
         self._combo.addItem('Custom...')
-        self._combo.setMinimumWidth(140)
+        # Size combo to fit the widest item (default hint or color name)
+        from PySide6.QtGui import QFontMetrics
+        fm = QFontMetrics(self._combo.font())
+        max_text_w = fm.horizontalAdvance(default_hint) if default_hint else 0
+        for name in _NAMED_COLORS:
+            w = fm.horizontalAdvance(name)
+            if w > max_text_w:
+                max_text_w = w
+        combo_w = max_text_w + fm.height() * 5  # generous padding + arrow
+        self._combo.setMinimumWidth(max(combo_w, 160))
         self._combo.setStyleSheet("QComboBox { padding-left: 4px; }")
+        # Set minimum width on the whole row: swatch + Pick + combo + spacing
+        pick_w = fm.horizontalAdvance('Pick...') + 20
+        row_w = 24 + pick_w + max(combo_w, 160) + 16
+        self.setMinimumWidth(row_w)
         self._combo.currentTextChanged.connect(self._on_text_changed)
         self._combo.activated.connect(self._on_activated)
         self._combo.lineEdit().editingFinished.connect(self.colorChanged.emit)
@@ -334,6 +347,7 @@ class BaseColorsPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
         self.fg_color = _ck(_ColorRow(default_hint='default: black'), 'colors.foreground')
         layout.addRow("Foreground:", self.fg_color)
@@ -371,6 +385,7 @@ class ChatFontPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
         self.family = _ck(QFontComboBox(), 'font.family')
         layout.addRow("Font family:", self.family)
@@ -443,24 +458,27 @@ class TabFontPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         self.tab_family, self.tab_size = _make_optional_font()
+        self.tab_family = _ck(self.tab_family, 'font.tab_family')
+        self.tab_size = _ck(self.tab_size, 'font.tab_size')
         layout.addRow("Font family:", self.tab_family)
         layout.addRow("Font size:", self.tab_size)
         layout.addRow("", QLabel(""))  # spacer
         layout.addRow(QLabel("Tab colors:"))
-        self.active_fg = _ColorRow(default_hint='default: background')
+        self.active_fg = _ck(_ColorRow(default_hint='default: background'), 'colors.tabs.active_fg')
         layout.addRow("Active foreground:", self.active_fg)
-        self.active_bg = _ColorRow(default_hint='default: foreground')
+        self.active_bg = _ck(_ColorRow(default_hint='default: foreground'), 'colors.tabs.active_bg')
         layout.addRow("Active background:", self.active_bg)
-        self.normal_fg = _ColorRow(default_hint='default: foreground')
+        self.normal_fg = _ck(_ColorRow(default_hint='default: foreground'), 'colors.tabs.normal_fg')
         layout.addRow("Normal foreground:", self.normal_fg)
-        self.normal_bg = _ColorRow(default_hint='default: background')
+        self.normal_bg = _ck(_ColorRow(default_hint='default: background'), 'colors.tabs.normal_bg')
         layout.addRow("Normal background:", self.normal_bg)
-        self.skipped_fg = _ColorRow(default_hint='default: gray')
+        self.skipped_fg = _ck(_ColorRow(default_hint='default: gray'), 'colors.tabs.skipped_fg')
         layout.addRow("Skipped foreground:", self.skipped_fg)
-        self.skipped_bg = _ColorRow(default_hint='default: light gray')
+        self.skipped_bg = _ck(_ColorRow(default_hint='default: light gray'), 'colors.tabs.skipped_bg')
         layout.addRow("Skipped background:", self.skipped_bg)
-        self.bar_bg = _ColorRow(default_hint='default: normal background')
+        self.bar_bg = _ck(_ColorRow(default_hint='default: normal background'), 'colors.tabs.bar_bg')
         layout.addRow("Bar background:", self.bar_bg)
         _connect_changed(self)
 
@@ -501,12 +519,15 @@ class MenuFontPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         self.menu_family, self.menu_size = _make_optional_font()
+        self.menu_family = _ck(self.menu_family, 'font.menu_family')
+        self.menu_size = _ck(self.menu_size, 'font.menu_size')
         layout.addRow("Font family:", self.menu_family)
         layout.addRow("Font size:", self.menu_size)
-        self.menu_fg = _ColorRow(default_hint='default: foreground')
+        self.menu_fg = _ck(_ColorRow(default_hint='default: foreground'), 'colors.menu.foreground')
         layout.addRow("Foreground:", self.menu_fg)
-        self.menu_bg = _ColorRow(default_hint='default: background')
+        self.menu_bg = _ck(_ColorRow(default_hint='default: background'), 'colors.menu.background')
         layout.addRow("Background:", self.menu_bg)
         _connect_changed(self)
 
@@ -537,12 +558,15 @@ class TreeFontPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         self.tree_family, self.tree_size = _make_optional_font()
+        self.tree_family = _ck(self.tree_family, 'font.tree_family')
+        self.tree_size = _ck(self.tree_size, 'font.tree_size')
         layout.addRow("Font family:", self.tree_family)
         layout.addRow("Font size:", self.tree_size)
-        self.tree_fg = _ColorRow(default_hint='default: foreground')
+        self.tree_fg = _ck(_ColorRow(default_hint='default: foreground'), 'colors.tree.foreground')
         layout.addRow("Foreground:", self.tree_fg)
-        self.tree_bg = _ColorRow(default_hint='default: background')
+        self.tree_bg = _ck(_ColorRow(default_hint='default: background'), 'colors.tree.background')
         layout.addRow("Background:", self.tree_bg)
         _connect_changed(self)
 
@@ -573,14 +597,17 @@ class NicklistFontPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         self.nicks_family, self.nicks_size = _make_optional_font()
+        self.nicks_family = _ck(self.nicks_family, 'font.nicklist_family')
         self.nicks_family.lineEdit().setPlaceholderText("(use chat font)")
+        self.nicks_size = _ck(self.nicks_size, 'font.nicklist_size')
         self.nicks_size.setSpecialValueText("(use chat font)")
         layout.addRow("Font family:", self.nicks_family)
         layout.addRow("Font size:", self.nicks_size)
-        self.nicks_fg = _ColorRow(default_hint='default: foreground')
+        self.nicks_fg = _ck(_ColorRow(default_hint='default: foreground'), 'colors.nicklist.foreground')
         layout.addRow("Foreground:", self.nicks_fg)
-        self.nicks_bg = _ColorRow(default_hint='default: background')
+        self.nicks_bg = _ck(_ColorRow(default_hint='default: background'), 'colors.nicklist.background')
         layout.addRow("Background:", self.nicks_bg)
         _connect_changed(self)
 
@@ -611,10 +638,13 @@ class ToolbarFontPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
         self.toolbar_family, self.toolbar_size = _make_optional_font()
+        self.toolbar_family = _ck(self.toolbar_family, 'font.toolbar_family')
+        self.toolbar_size = _ck(self.toolbar_size, 'font.toolbar_size')
         layout.addRow("Font family:", self.toolbar_family)
         layout.addRow("Font size:", self.toolbar_size)
-        self.toolbar_fg = _ColorRow(default_hint='default: foreground')
+        self.toolbar_fg = _ck(_ColorRow(default_hint='default: foreground'), 'colors.toolbar.foreground')
         layout.addRow("Icon color:", self.toolbar_fg)
         _connect_changed(self)
 
@@ -782,13 +812,14 @@ class EditorFontPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
-        self.editor_family = QFontComboBox()
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        self.editor_family = _ck(QFontComboBox(), 'font.editor_family')
         layout.addRow("Font family:", self.editor_family)
-        self.editor_size = _FontSizeCombo()
+        self.editor_size = _ck(_FontSizeCombo(), 'font.editor_size')
         layout.addRow("Font size:", self.editor_size)
-        self.editor_fg = _ColorRow(default_hint='default: foreground')
+        self.editor_fg = _ck(_ColorRow(default_hint='default: foreground'), 'colors.editor.foreground')
         layout.addRow("Foreground:", self.editor_fg)
-        self.editor_bg = _ColorRow(default_hint='default: background')
+        self.editor_bg = _ck(_ColorRow(default_hint='default: background'), 'colors.editor.background')
         layout.addRow("Background:", self.editor_bg)
         _connect_changed(self)
 
