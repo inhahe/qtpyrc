@@ -54,6 +54,31 @@ def _query_history_key(nick, ident):
   return '=%s:%s' % (nick.lower(), ident.lower())
 
 
+def _find_or_create_query(conn, nick, ident, host):
+  """Find an existing query by nick or create a new one.
+  If an existing query was opened without ident/host (e.g. via /query),
+  re-keys it with the proper (ident, host) tuple.
+  Returns (query, is_new)."""
+  from models import Query
+  key = (ident, host)
+  if key in conn.queries:
+    return conn.queries[key], False
+  # Check for query under a different key (e.g. (None, None) from /query)
+  for qk, qv in list(conn.queries.items()):
+    if qv.nick and conn.irclower(qv.nick) == conn.irclower(nick):
+      q = conn.queries.pop(qk)
+      q.ident = ident
+      conn.queries[key] = q
+      return q, False
+  # Create new
+  q = Query(conn.client, nick, ident)
+  conn.queries[key] = q
+  qhkey = _query_history_key(nick, ident)
+  _history_replay(q.window, conn.client.network,
+                  qhkey, limit=state.config.history_replay_queries)
+  return q, True
+
+
 def _history_save(network, channel, event_type, nick=None, text=None, prefix=''):
   """Save an event to the history database if available."""
   db = state.historydb
@@ -855,13 +880,8 @@ class IRCClient(asyncirc.IRCClient):
         chan.window.set_activity(Window.ACTIVITY_MESSAGE)
     else:
       # Private action
-      from models import Query
-      if (ident, host) not in self.queries:
-        self.queries[ident, host] = Query(self.client, nick, ident)
-        qkey = _query_history_key(nick, ident)
-        _history_replay(self.queries[ident, host].window, self.client.network,
-                        qkey, limit=state.config.history_replay_queries)
-      self.queries[ident, host].window.addline_nick(["* ", (nick,), " %s" % data], state.actionformat,
+      q, _ = _find_or_create_query(self, nick, ident, host)
+      q.window.addline_nick(["* ", (nick,), " %s" % data], state.actionformat,
                                                     timestamp_override=ts)
       self.queries[ident, host].window.set_activity(Window.ACTIVITY_HIGHLIGHT)
       if not playback:
@@ -990,14 +1010,8 @@ class IRCClient(asyncirc.IRCClient):
     self._parse_user(user)
     nick, ident, host = asyncirc.usersplit(user).groups()
     ts = self._get_server_time()
-    from models import Query
-    new_query = (ident, host) not in self.queries
-    if new_query:
-      self.queries[ident, host] = Query(self.client, nick, ident)
-      qkey = _query_history_key(nick, ident)
-      _history_replay(self.queries[ident, host].window, self.client.network,
-                      qkey, limit=state.config.history_replay_queries)
-    qwin = self.queries[ident, host].window
+    q, new_query = _find_or_create_query(self, nick, ident, host)
+    qwin = q.window
     qwin.addline_msg(nick, message, timestamp_override=ts)
     qwin.set_activity(Window.ACTIVITY_HIGHLIGHT)
     if hasattr(qwin, '_typing_timer') and qwin._typing_timer is not None:

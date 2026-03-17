@@ -100,13 +100,17 @@ class Commands:
       user = '%s!%s@%s' % (conn.nickname, conn.username or '', '')
       _dispatch_to_plugins('chanmsg', conn, (user, window.channel.name, text), {})
     elif window.type == "query":
-      window.client.conn.say(window.remotenick, text)
-      window.addline_msg(window.client.conn.nickname, text)
+      conn = window.client.conn if window.client else None
+      if not conn:
+        window.redmessage('[Not connected]')
+        return
+      conn.msg(window.remotenick, text)
+      window.addline_msg(conn.nickname, text)
       if state.historydb and window.query:
         from irc_client import _query_history_key
         state.historydb.add(window.client.network,
                             _query_history_key(window.query.nick, window.query.ident),
-                            'message', window.client.conn.nickname, text)
+                            'message', conn.nickname, text)
       from link_preview import check_and_preview
       check_and_preview(window, text)
 
@@ -130,12 +134,21 @@ class Commands:
                             'message', conn.nickname, text)
 
   def msg(window, text):
-    recip, text = text.split(" ", 1)
-    text = _unquote(text)
-    window.client.conn.msg(recip, text)
-    recip = window.client.conn.irclower(recip)
-    if recip in window.client.queries:
-      window.client.queries[recip].window.addline_msg(window.client.conn.nickname, text)
+    parts = text.split(" ", 1)
+    recip = parts[0]
+    if len(parts) < 2 or not parts[1]:
+      # No message text — open/focus the query window
+      Commands.query(window, recip)
+      return
+    text = _unquote(parts[1])
+    conn = window.client.conn if window.client else None
+    if not conn:
+      window.redmessage('[Not connected]')
+      return
+    conn.msg(recip, text)
+    _, existing = _find_query(window.client, recip)
+    if existing and existing.window:
+      existing.window.addline_msg(conn.nickname, text)
 
   def quit(window, text):
     conn = window.client.conn
@@ -1204,14 +1217,17 @@ class Commands:
       return
     # Find or create the query window
     nicklower = conn.irclower(nick)
-    user = window.client.users.get(nicklower)
-    ident = user.ident if user else None
-    host = user.host if user else None
-    qkey = (ident, host)
-    if qkey not in conn.queries:
+    qkey, existing = _find_query(window.client, nick)
+    if existing:
+      qwin = existing.window
+    else:
+      user = window.client.users.get(nicklower)
+      ident = user.ident if user else None
+      host = user.host if user else None
+      qkey = (ident, host)
       from models import Query
-      conn.queries[qkey] = Query(window.client, nick, ident)
-    qwin = conn.queries[qkey].window
+      window.client.queries[qkey] = Query(window.client, nick, ident)
+      qwin = window.client.queries[qkey].window
     # Activate the query window
     ws = state.app.mainwin.workspace
     ws.setActiveSubWindow(qwin.subwindow)
@@ -1966,6 +1982,19 @@ def _show_event_help(window, ref, event_name, re):
   window.addline('  (all events also have {network} and {me})')
 
 
+def _find_query(client, nick):
+  """Find an existing query by nick (case-insensitive).
+  Returns the (key, Query) tuple or (None, None)."""
+  conn = client.conn
+  if not conn:
+    return None, None
+  lower = conn.irclower(nick)
+  for qkey, q in client.queries.items():
+    if q.nick and conn.irclower(q.nick) == lower:
+      return qkey, q
+  return None, None
+
+
 def _find_client(name):
   """Find a Client by network key, network name, or hostname (case-insensitive)."""
   name_lower = name.lower()
@@ -1989,11 +2018,10 @@ def _find_window(name, client=None):
     # Channel
     if lower in c.channels and c.channels[lower].window:
       return c.channels[lower].window
-    # Query (with or without = prefix)
-    qname = lower.lstrip('=')
-    for qkey, q in c.queries.items():
-      if qkey.split(':')[0].lstrip('=') == qname and q.window:
-        return q.window
+    # Query
+    _, q = _find_query(c, name)
+    if q and q.window:
+      return q.window
     # Server window (match network key or hostname)
     if c.window:
       nk = (c.network_key or '').lower()

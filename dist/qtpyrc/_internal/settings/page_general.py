@@ -13,7 +13,7 @@ def _separator(layout, text):
 
 
 def _ck(widget, key):
-    """Tag a widget with its config.example.yaml key for auto-tooltip/defaults."""
+    """Tag a widget with its config.defaults.yaml key for auto-tooltip/defaults."""
     widget.setProperty('config_key', key)
     return widget
 
@@ -24,14 +24,13 @@ class GeneralPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
         self.input_lines = _ck(QSpinBox(), 'input_lines')
         self.input_lines.setRange(1, 10)
-        self.input_lines.setMaximumWidth(60)
         layout.addRow("Input lines:", self.input_lines)
 
         self.command_prefix = _ck(QLineEdit(), 'command_prefix')
-        self.command_prefix.setMaximumWidth(60)
         layout.addRow("Command prefix:", self.command_prefix)
 
         self.timestamp_display = _ck(QLineEdit(), 'timestamps.display')
@@ -54,11 +53,13 @@ class GeneralPage(QWidget):
         self.tab_complete_age.setRange(0, 86400)
         self.tab_complete_age.setSpecialValueText("(no limit)")
         self.tab_complete_age.setSuffix(" s")
-        self.tab_complete_age.setMaximumWidth(100)
         layout.addRow("Tab complete age:", self.tab_complete_age)
 
         self.auto_connect = _ck(QCheckBox(), 'auto_connect')
         layout.addRow("Auto-connect:", self.auto_connect)
+
+        self.persist_autojoins = _ck(QCheckBox(), 'persist_autojoins')
+        layout.addRow("Persist auto-joins:", self.persist_autojoins)
 
         _separator(layout, 'History')
         self.backscroll_limit = _ck(QSpinBox(), 'backscroll_limit')
@@ -122,6 +123,7 @@ class GeneralPage(QWidget):
         self.auto_copy_selection.setChecked(bool(data.get('auto_copy_selection', False)))
         self.tab_complete_age.setValue(int(data.get('tab_complete_age', 0) or 0))
         self.auto_connect.setChecked(bool(data.get('auto_connect', True)))
+        self.persist_autojoins.setChecked(bool(data.get('persist_autojoins', False)))
         self.backscroll_limit.setValue(int(data.get('backscroll_limit', 10000)))
         hr = data.get('history_replay') or {}
         if isinstance(hr, int):
@@ -168,6 +170,7 @@ class GeneralPage(QWidget):
         elif 'tab_complete_age' in data:
             del data['tab_complete_age']
         data['auto_connect'] = self.auto_connect.isChecked()
+        data['persist_autojoins'] = self.persist_autojoins.isChecked()
         data['backscroll_limit'] = self.backscroll_limit.value()
         hr = data.get('history_replay')
         if not isinstance(hr, dict):
@@ -209,6 +212,7 @@ class InterfacePage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
         self.window_mode = _ck(QComboBox(), 'window_mode')
         self.window_mode.addItems(["Maximized", "Normal"])
@@ -225,7 +229,6 @@ class InterfacePage(QWidget):
         self.tab_rows = _ck(QSpinBox(), 'tab_rows')
         self.tab_rows.setRange(0, 20)
         self.tab_rows.setSpecialValueText("(auto)")
-        self.tab_rows.setMaximumWidth(80)
         layout.addRow("Tab rows:", self.tab_rows)
 
         self.new_tab_state = _ck(QComboBox(), 'new_tab_state')
@@ -238,7 +241,6 @@ class InterfacePage(QWidget):
         self.toolbar_icon_size = _ck(QSpinBox(), 'toolbar_icon_size')
         self.toolbar_icon_size.setRange(0, 64)
         self.toolbar_icon_size.setSpecialValueText("(default)")
-        self.toolbar_icon_size.setMaximumWidth(80)
         layout.addRow("Toolbar icon size:", self.toolbar_icon_size)
 
     def _load_combo(self, combo, value):
@@ -292,7 +294,6 @@ class TitlesPage(QWidget):
         self.titlebar_interval.setRange(0.1, 60.0)
         self.titlebar_interval.setDecimals(1)
         self.titlebar_interval.setSuffix(" s")
-        self.titlebar_interval.setMaximumWidth(80)
         layout.addRow("Titlebar interval:", self.titlebar_interval)
 
         _separator(layout, 'Window Titles')

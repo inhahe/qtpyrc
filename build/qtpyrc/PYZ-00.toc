@@ -275,6 +275,7 @@
   ('glob', 'D:\\python314\\Lib\\glob.py', 'PYMODULE'),
   ('gzip', 'D:\\python314\\Lib\\gzip.py', 'PYMODULE'),
   ('hashlib', 'D:\\python314\\Lib\\hashlib.py', 'PYMODULE'),
+  ('headless', 'D:\\github\\qtpyrc.github\\qtpyrc\\headless.py', 'PYMODULE'),
   ('history', 'D:\\github\\qtpyrc.github\\qtpyrc\\history.py', 'PYMODULE'),
   ('hmac', 'D:\\python314\\Lib\\hmac.py', 'PYMODULE'),
   ('html', 'D:\\python314\\Lib\\html\\__init__.py', 'PYMODULE'),
