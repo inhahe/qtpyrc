@@ -334,9 +334,9 @@ def loadscripts(suppress=None, extra=None):
       p = load_plugin(name, mod)
       if p:
         loaded[name] = p
-        dbg(LOG_INFO, 'Auto-loaded script: %s' % name)
+        dbg(LOG_INFO, 'Auto-loaded plugin: %s' % name)
       else:
-        dbg(LOG_WARN, 'Script "%s" has no Class or Script attribute' % name)
+        dbg(LOG_WARN, 'Plugin "%s" has no Class or Script attribute' % name)
     except (ImportError, ModuleNotFoundError) as e:
       req = _find_requirements(scripts_dir, name)
       if req and _prompt_install_requirements(req, name):
@@ -345,7 +345,7 @@ def loadscripts(suppress=None, extra=None):
           p = load_plugin(name, mod)
           if p:
             loaded[name] = p
-            dbg(LOG_INFO, 'Auto-loaded script: %s (after installing deps)' % name)
+            dbg(LOG_INFO, 'Auto-loaded plugin: %s (after installing deps)' % name)
             continue
         except Exception as e2:
           dbg(LOG_ERROR, 'Still could not load "%s" after install: %s' % (name, e2))

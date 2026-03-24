@@ -12,15 +12,20 @@ class Commands:
   def join(window, text):
     args = text.split(None)
     if not args:
-      window.redmessage('[Usage: /join [-n] <channel> [key]  or  /join <network>/<channel> [key]]')
+      window.redmessage('[Usage: /join [-n] [-z] <channel> [key]  or  /join <network>/<channel> [key]]')
       return
-    # -n flag: don't parse network/ prefix (for channels with / in the name)
+    # Parse flags
     no_net = False
-    if args[0] == '-n':
-      no_net = True
-      args.pop(0)
+    no_activate = False
+    while args and args[0].startswith('-'):
+      flag = args.pop(0)
+      for ch in flag[1:]:
+        if ch == 'n':
+          no_net = True
+        elif ch == 'z':
+          no_activate = True
     if not args:
-      window.redmessage('[Usage: /join [-n] <channel> [key]]')
+      window.redmessage('[Usage: /join [-n] [-z] <channel> [key]]')
       return
     target = args[0]
     key = args[1] if len(args) > 1 else None
@@ -39,7 +44,8 @@ class Commands:
       # If already in the channel, just switch to it
       chan = conn.client.channels.get(chnlower)
       if chan and chan.window:
-        state.app.mainwin.workspace.setActiveSubWindow(chan.window.subwindow)
+        if not no_activate:
+          state.app.mainwin.workspace.setActiveSubWindow(chan.window.subwindow)
         return
       # Mark as user-initiated so persist_autojoins only fires for /join
       conn._user_joins.add(chnlower)
@@ -254,13 +260,108 @@ class Commands:
       loop.call_soon(loop.stop)
 
   def server(window, text):
-    parts = text.split()
-    if not parts:
-      window.redmessage('[Error: /server requires a hostname]')
+    """/server [switches] [host[:[+*]port]] [password]
+    Switches: -m -n -z -e -t -d -o -c -u -4 -6 -46
+      -l <method> [password]  -nick <n>  -altnick <n>  -user <u>
+      -realname <name>  -w <password>
+    See /help server for details."""
+    opts = _parse_server_args(text)
+    if opts.get('_error'):
+      window.redmessage('[/server: %s]' % opts['_error'])
       return
-    host = parts[0]
-    port = int(parts[1]) if len(parts) > 1 else 6667
-    window.client.reconnect(host, port)
+
+    flags = opts.get('flags', set())
+
+    # -m or -n: create new server window
+    if 'm' in flags or 'n' in flags:
+      from models import Client
+      netkey = opts.get('network_key')
+      client = Client(network_key=netkey)
+      state.clients.add(client)
+      if 'z' not in flags:
+        ws = state.app.mainwin.workspace
+        ws.setActiveSubWindow(client.window.subwindow)
+    else:
+      client = window.client
+
+    # If host looks like a network key, resolve it
+    host = opts.get('host')
+    if host and not opts.get('port'):
+      networks = state.config.networks or {}
+      for key in networks:
+        if key.lower() == host.lower():
+          opts['network_key'] = key
+          client.net.key = key
+          client._server_list = state.config.get_servers(key)
+          if client._server_list:
+            client._apply_server(client._server_list[0])
+          host = None
+          opts['host'] = None
+          break
+
+    # No host and no network: reconnect to last server
+    if not host and not opts.get('network_key') and 'n' not in flags:
+      if client.hostname:
+        client.reconnect()
+      elif 'm' not in flags:
+        window.redmessage('[Usage: /server [switches] <host>[:<port>] | /server <network>]')
+      return
+
+    # -d: set details without connecting
+    if 'd' in flags:
+      if host:
+        client.hostname = host
+      if opts.get('port'):
+        client.port = opts['port']
+      if 'e' in flags or opts.get('tls'):
+        client.tls = True
+      return
+
+    # -n: don't connect
+    if 'n' in flags:
+      if host:
+        client.hostname = host
+      if opts.get('port'):
+        client.port = opts['port']
+      return
+
+    # Build overrides dict
+    overrides = {}
+    if opts.get('tls') is not None:
+      overrides['tls'] = opts['tls']
+    if opts.get('starttls'):
+      overrides['starttls'] = True
+    if opts.get('ip_version'):
+      overrides['ip_version'] = opts['ip_version']
+    if opts.get('nick'):
+      overrides['nick'] = opts['nick']
+    if opts.get('altnicks'):
+      overrides['altnicks'] = opts['altnicks']
+    if opts.get('user'):
+      overrides['user'] = opts['user']
+    if opts.get('realname'):
+      overrides['realname'] = opts['realname']
+    if opts.get('login_method'):
+      overrides['login_method'] = opts['login_method']
+    if opts.get('login_password'):
+      overrides['login_password'] = opts['login_password']
+    if 'o' in flags:
+      overrides['skip_autojoin'] = True
+    if 'c' in flags:
+      overrides['skip_on_connect'] = True
+    if 'u' in flags:
+      overrides['bypass_sts'] = True
+
+    tls_override = opts.get('tls')
+    if tls_override is not None:
+      client.tls = tls_override
+
+    client.reconnect(
+      hostname=host,
+      port=opts.get('port'),
+      password=opts.get('password'),
+      **overrides
+    )
 
   def connect(window, text):
     name = text.strip()
@@ -1179,26 +1280,26 @@ class Commands:
 
   # --- window layout commands ---
   def tile(window, text):
-    from qtpyrc import _apply_view_mode, _tile_vertically
+    """/tile [v] — tile windows side by side, or 'v' for stacked rows."""
+    ws = state.app.mainwin.workspace
     t = text.strip().lower()
-    _apply_view_mode('mdi')
     if t.startswith('v'):
-      _tile_vertically()
+      ws.tileVertically()
     else:
-      state.app.mainwin.workspace.tileSubWindows()
+      ws.tileSubWindows()
 
   def cascade(window, text):
-    from qtpyrc import _apply_view_mode
-    _apply_view_mode('mdi')
+    """/cascade — cascade all windows."""
     state.app.mainwin.workspace.cascadeSubWindows()
 
   def tabbed(window, text):
-    from qtpyrc import _apply_view_mode
-    _apply_view_mode('tabbed')
+    """/tabbed — maximize the active window (return to tabbed look)."""
+    state.app.mainwin.workspace.maximizeActive()
+  maximize = tabbed
 
   def mdi(window, text):
-    from qtpyrc import _apply_view_mode
-    _apply_view_mode('mdi')
+    """/mdi — tile all windows side by side."""
+    state.app.mainwin.workspace.tileSubWindows()
 
   def save(window, text):
     """Flush the current configuration to disk."""
@@ -1277,11 +1378,19 @@ class Commands:
     print(_unquote(text), file=sys.stderr)
 
   def query(window, text):
-    """Open a query window.  /query <nick> ["message"]"""
+    """Open a query window.  /query [-z] <nick> ["message"]"""
     parts = text.split(None, 1)
     if not parts:
-      window.redmessage("[Usage: /query <nick> [message]]")
+      window.redmessage("[Usage: /query [-z] <nick> [message]]")
       return
+    no_activate = False
+    if parts[0] == '-z':
+      no_activate = True
+      text = parts[1] if len(parts) > 1 else ''
+      parts = text.split(None, 1)
+      if not parts:
+        window.redmessage("[Usage: /query [-z] <nick> [message]]")
+        return
     nick = parts[0]
     conn = window.client.conn if window.client else None
     if not conn:
@@ -1301,8 +1410,9 @@ class Commands:
       window.client.queries[qkey] = Query(window.client, nick, ident)
       qwin = window.client.queries[qkey].window
     # Activate the query window
-    ws = state.app.mainwin.workspace
-    ws.setActiveSubWindow(qwin.subwindow)
+    if not no_activate:
+      ws = state.app.mainwin.workspace
+      ws.setActiveSubWindow(qwin.subwindow)
     # Send a message if provided
     if len(parts) > 1:
       msg = _unquote(parts[1])
@@ -1655,12 +1765,12 @@ class Commands:
         src = ' (temp)' if name in state._temp_vars else ''
         window.redmessage('  {%s} = %s%s' % (name, val, src))
       return
-    parts = text.split(None, 1)
-    if parts[0] == '-r':
-      if len(parts) < 2:
+    tokens = _tokenize(text, max_tokens=3)
+    if tokens[0] == '-r':
+      if len(tokens) < 2:
         window.redmessage('[Usage: /set -r <name>]')
         return
-      name = parts[1].strip()
+      name = tokens[1]
       if name in state._persistent_vars:
         del state._persistent_vars[name]
         state._merge_variables()
@@ -1669,8 +1779,8 @@ class Commands:
       else:
         window.redmessage('[No persistent variable named {%s}]' % name)
       return
-    if len(parts) < 2:
-      name = parts[0]
+    if len(tokens) < 2:
+      name = tokens[0]
       val = state._variables.get(name)
       if val is not None:
         src = ' (temp)' if name in state._temp_vars else ''
@@ -1678,8 +1788,8 @@ class Commands:
       else:
         window.redmessage('[No variable named {%s}]' % name)
       return
-    name = parts[0]
-    val = parts[1]
+    name = tokens[0]
+    val = tokens[1]
     state._persistent_vars[name] = val
     state._merge_variables()
     state.save_variables()
@@ -1701,12 +1811,12 @@ class Commands:
       for name, val in sorted(state._temp_vars.items()):
         window.redmessage('  {%s} = %s (temp)' % (name, val))
       return
-    parts = text.split(None, 1)
-    if parts[0] == '-r':
-      if len(parts) < 2:
+    tokens = _tokenize(text, max_tokens=3)
+    if tokens[0] == '-r':
+      if len(tokens) < 2:
         window.redmessage('[Usage: /var -r <name>]')
         return
-      name = parts[1].strip()
+      name = tokens[1]
       if name in state._temp_vars:
         del state._temp_vars[name]
         state._merge_variables()
@@ -1714,11 +1824,11 @@ class Commands:
       else:
         window.redmessage('[No temp variable named {%s}]' % name)
       return
-    if len(parts) < 2:
+    if len(tokens) < 2:
       window.redmessage('[Usage: /var <name> <value>]')
       return
-    name = parts[0]
-    val = parts[1]
+    name = tokens[0]
+    val = tokens[1]
     state._temp_vars[name] = val
     state._merge_variables()
     window.redmessage('[Temp {%s} = %s]' % (name, val))
@@ -1818,12 +1928,15 @@ class Commands:
       window.redmessage('[Examples: /config font.family, /config font.size 15]')
       return
     expand = False
-    if text.startswith('-e '):
+    tokens = _tokenize(text, max_tokens=3)
+    if tokens and tokens[0] == '-e':
       expand = True
-      text = text[3:].lstrip()
-    parts = text.split(None, 1)
-    key_path = parts[0]
-    value_str = parts[1] if len(parts) > 1 else None
+      tokens.pop(0)
+    if not tokens:
+      window.redmessage('[Usage: /config [-e] <key.path> [value]]')
+      return
+    key_path = tokens[0]
+    value_str = tokens[1] if len(tokens) > 1 else None
     if expand and value_str:
       from config import _expand_vars
       variables = _window_context_vars(window)
@@ -1926,9 +2039,114 @@ class Commands:
       window.clear_custom_title()
 
   def newserver(window, text):
-    """Open a new server window."""
-    from models import newclient
-    newclient()
+    """/newserver — alias for /server -m"""
+    Commands.server(window, '-m ' + (text or '').strip())
+
+  def dcc(window, text):
+    """/dcc send <nick> [file]  — send a file (opens file picker if no path given)
+    /dcc chat <nick>          — open a DCC chat
+    /dcc get [id|nick]        — accept a pending transfer
+    /dcc cancel <id>          — cancel a transfer
+    /dcc list                 — show the transfers window
+    /dcc close <id>           — close a transfer or chat"""
+    import asyncio
+    parts = text.split(None, 1) if text.strip() else []
+    if not parts:
+      window.redmessage('[Usage: /dcc send|chat|get|cancel|list|close ...]')
+      return
+    sub = parts[0].lower()
+    args = parts[1] if len(parts) > 1 else ''
+    mgr = state.dcc_manager
+    if not mgr:
+      window.redmessage('[DCC not initialized]')
+      return
+
+    if sub == 'send':
+      nick_file = _tokenize(args, max_tokens=2) if args else []
+      if not nick_file:
+        window.redmessage('[Usage: /dcc send <nick> [filepath]]')
+        return
+      nick = nick_file[0]
+      if len(nick_file) > 1:
+        filepath = nick_file[1]
+      else:
+        from PySide6.QtWidgets import QFileDialog, QApplication
+        filepath, _ = QFileDialog.getOpenFileName(
+          QApplication.activeWindow(), 'Select file to send')
+        if not filepath:
+          return
+      import os
+      if not os.path.isfile(filepath):
+        window.redmessage('[DCC SEND: file not found: %s]' % filepath)
+        return
+      window.redmessage('[DCC SEND: sending %s to %s (%s)]' % (
+        os.path.basename(filepath), nick,
+        '%.1f MB' % (os.path.getsize(filepath) / 1048576)))
+      async def _do_send():
+        try:
+          await mgr.initiate_send(window.client, nick, filepath)
+        except Exception as e:
+          window.redmessage('[DCC SEND error: %s]' % e)
+          import traceback; traceback.print_exc()
+      asyncio.ensure_future(_do_send())
+
+    elif sub == 'chat':
+      nick = args.strip()
+      if not nick:
+        window.redmessage('[Usage: /dcc chat <nick>]')
+        return
+      async def _do_chat():
+        try:
+          await mgr.initiate_chat(window.client, nick)
+        except Exception as e:
+          window.redmessage('[DCC CHAT error: %s]' % e)
+          import traceback; traceback.print_exc()
+      asyncio.ensure_future(_do_chat())
+
+    elif sub == 'get':
+      # Accept a pending transfer by ID or most recent from nick
+      target = args.strip()
+      if not target:
+        window.redmessage('[Usage: /dcc get <id|nick>]')
+        return
+      from dcc import Direction, Status
+      if target.isdigit():
+        xfer = mgr.transfers.get(int(target))
+        if xfer and xfer.status == Status.PENDING and xfer.direction == Direction.RECEIVE:
+          asyncio.ensure_future(mgr.accept_receive(xfer))
+        else:
+          window.redmessage('[No pending transfer with ID %s]' % target)
+      else:
+        # Find most recent pending from nick
+        found = None
+        for xfer in reversed(list(mgr.transfers.values())):
+          if (xfer.nick.lower() == target.lower() and
+              xfer.status == Status.PENDING and
+              xfer.direction == Direction.RECEIVE):
+            found = xfer
+            break
+        if found:
+          asyncio.ensure_future(mgr.accept_receive(found))
+        else:
+          window.redmessage('[No pending transfer from %s]' % target)
+
+    elif sub in ('cancel', 'close'):
+      target = args.strip()
+      if not target or not target.isdigit():
+        window.redmessage('[Usage: /dcc %s <id>]' % sub)
+        return
+      tid = int(target)
+      if mgr.cancel(tid):
+        window.redmessage('[DCC #%d cancelled]' % tid)
+      else:
+        window.redmessage('[No active DCC with ID %d]' % tid)
+
+    elif sub == 'list':
+      from dcc_ui import DCCTransfersWindow
+      DCCTransfersWindow.show_instance()
+
+    else:
+      window.redmessage('[Unknown DCC subcommand: %s]' % sub)
 
   def toolbar(window, text):
     """Reload the toolbar from toolbar.ini."""
@@ -1987,6 +2205,57 @@ def _unquote(s):
   return s
 
 
+def _tokenize(s, max_tokens=0):
+  r"""Split a string into tokens, respecting "quoted strings" with \" escape.
+
+  Returns a list of strings with quotes stripped.
+  If *max_tokens* > 0, stops splitting after that many tokens and returns
+  the remainder as the last element (like str.split(None, n)).
+
+  Examples:
+    _tokenize('hello world')             -> ['hello', 'world']
+    _tokenize('"hello world" foo')        -> ['hello world', 'foo']
+    _tokenize(r'say "he said \"hi\""')   -> ['say', 'he said "hi"']
+    _tokenize('a b c d', max_tokens=2)   -> ['a', 'b c d']
+  """
+  tokens = []
+  i = 0
+  s = s.strip()
+  while i < len(s):
+    if max_tokens > 0 and len(tokens) == max_tokens - 1:
+      # Last token: take everything remaining
+      tokens.append(s[i:].strip())
+      break
+    # Skip whitespace
+    while i < len(s) and s[i] in ' \t':
+      i += 1
+    if i >= len(s):
+      break
+    if s[i] in ('"', "'"):
+      # Quoted token
+      q = s[i]
+      i += 1
+      token = []
+      while i < len(s):
+        if s[i] == '\\' and i + 1 < len(s) and s[i + 1] in (q, '\\'):
+          token.append(s[i + 1])
+          i += 2
+        elif s[i] == q:
+          i += 1
+          break
+        else:
+          token.append(s[i])
+          i += 1
+      tokens.append(''.join(token))
+    else:
+      # Unquoted token
+      start = i
+      while i < len(s) and s[i] not in ' \t':
+        i += 1
+      tokens.append(s[start:i])
+  return tokens
+
+
 def _split_quoted(s):
   """Extract the first quoted or unquoted token from *s*.
   Returns (token, rest) where token has quotes stripped."""
@@ -1998,6 +2267,121 @@ def _split_quoted(s):
       return s[1:end], s[end + 1:].lstrip()
   parts = s.split(None, 1)
   return (parts[0] if parts else '', parts[1] if len(parts) > 1 else '')
+
+
+def _parse_server_args(text):
+  """Parse /server command arguments into a dict.
+
+  Returns dict with keys: flags (set), host, port, tls, starttls,
+  ip_version, nick, altnicks, user, realname, password,
+  login_method, login_password, network_key, _error.
+  """
+  result = {
+    'flags': set(), 'host': None, 'port': None, 'tls': None,
+    'starttls': False, 'ip_version': None, 'nick': None,
+    'altnicks': [], 'user': None, 'realname': None, 'password': None,
+    'login_method': None, 'login_password': None, 'network_key': None,
+  }
+  # Tokenize respecting quotes (supports \" escapes)
+  tokens = _tokenize(text)
+
+  simple_flags = set('mndocuetz')
+  valued_args = {'-nick', '-altnick', '-user', '-realname', '-w', '-l'}
+
+  i = 0
+  while i < len(tokens):
+    tok = tokens[i]
+    # Combined IPv4/6 flag
+    if tok == '-46':
+      result['ip_version'] = '46'
+    elif tok == '-4':
+      result['ip_version'] = '4'
+    elif tok == '-6':
+      result['ip_version'] = '6'
+    elif tok in ('-e',):
+      result['tls'] = True
+    elif tok in ('-t',):
+      result['starttls'] = True
+    elif tok == '-l':
+      # -l <method> [password]
+      i += 1
+      if i < len(tokens):
+        result['login_method'] = tokens[i]
+        # Check if next token looks like a password (not a flag)
+        if i + 1 < len(tokens) and not tokens[i + 1].startswith('-'):
+          i += 1
+          result['login_password'] = tokens[i]
+    elif tok == '-nick':
+      i += 1
+      if i < len(tokens):
+        result['nick'] = tokens[i]
+    elif tok == '-altnick':
+      i += 1
+      if i < len(tokens):
+        result['altnicks'].append(tokens[i])
+    elif tok == '-user':
+      i += 1
+      if i < len(tokens):
+        result['user'] = tokens[i]
+    elif tok == '-realname':
+      i += 1
+      if i < len(tokens):
+        result['realname'] = tokens[i]
+    elif tok == '-w':
+      i += 1
+      if i < len(tokens):
+        result['password'] = tokens[i]
+    elif tok.startswith('-') and len(tok) > 1 and tok[1:].isalpha():
+      # Single-char flags (possibly combined like -mz)
+      for ch in tok[1:]:
+        if ch in simple_flags:
+          result['flags'].add(ch)
+        else:
+          result['_error'] = 'Unknown flag: -%s' % ch
+          return result
+    elif tok.startswith('+') and tok[1:].isdigit():
+      # +port = TLS
+      result['port'] = int(tok[1:])
+      result['tls'] = True
+    elif tok.startswith('*') and tok[1:].isdigit():
+      # *port = STARTTLS
+      result['port'] = int(tok[1:])
+      result['starttls'] = True
+    elif result['host'] is None:
+      # First positional: host[:port] or network_key
+      host_port = tok
+      if ':' in host_port:
+        host, port_str = host_port.rsplit(':', 1)
+        # Check for +port or *port after colon
+        if port_str.startswith('+') and port_str[1:].isdigit():
+          result['host'] = host
+          result['port'] = int(port_str[1:])
+          result['tls'] = True
+        elif port_str.startswith('*') and port_str[1:].isdigit():
+          result['host'] = host
+          result['port'] = int(port_str[1:])
+          result['starttls'] = True
+        elif port_str.isdigit():
+          result['host'] = host
+          result['port'] = int(port_str)
+        else:
+          # Not a port — treat whole thing as host (e.g. IPv6 or weird hostname)
+          result['host'] = host_port
+      else:
+        result['host'] = host_port
+    elif result['password'] is None:
+      # Second positional: legacy password
+      result['password'] = tok
+    i += 1
+
+  # -e flag sets TLS
+  if 'e' in result['flags'] and result['tls'] is None:
+    result['tls'] = True
+  # -t flag sets STARTTLS
+  if 't' in result['flags']:
+    result['starttls'] = True
+
+  return result
 
 
 def _show_help_section(window, ref, heading, start_match=None):

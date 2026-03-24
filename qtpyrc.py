@@ -44,7 +44,7 @@ from PySide6.QtGui import *
 from PySide6.QtCore import *
 
 APP_NAME = 'qtpyrc'
-APP_VERSION = '0.1.0'
+APP_VERSION = '1.1.0'
 
 import state
 from config import loadconfig, UIState
@@ -286,21 +286,6 @@ class _MenuTooltipFilter(QObject):
         return True
     return super().eventFilter(obj, event)
 
-def _tile_vertically():
-  """Tile subwindows vertically (stacked top-to-bottom). MDI only."""
-  ws = state.app.mainwin.workspace
-  if not hasattr(ws, 'viewport'):
-    return
-  subs = ws.subWindowList()
-  if not subs:
-    return
-  vp = ws.viewport()
-  w = vp.width()
-  h = vp.height() // len(subs)
-  for i, sub in enumerate(subs):
-    sub.showNormal()
-    sub.setGeometry(0, i * h, w, h)
-
 def _on_treeview_splitter_moved(pos, index):
   if not state.app or not state.app.mainwin:
     return
@@ -480,6 +465,7 @@ def _bg_replay_tick():
           del window._deferred_replay
         _bg_replay_queue.pop(0)
         continue
+      window._suppress_activity = True
       window._bg_replay = {
         'rows': rows,
         'index': 0,
@@ -548,6 +534,7 @@ def _bg_replay_tick():
       del window._bg_replay
       if hasattr(window, '_deferred_replay'):
         del window._deferred_replay
+      window._suppress_activity = False
       _bg_replay_queue.pop(0)
       _bg_replay_done += 1
       _update_replay_status()
@@ -864,17 +851,13 @@ def makeapp(args):
   app.setStyleSheet(_build_app_stylesheet())
   app.mainwin = QMainWindow()
   app.mainwin._custom_titlebar = None
-  # Apply initial view mode
-  if state.config.view_mode == 'mdi':
-    app.mainwin.workspace = QMdiArea()
-    app.mainwin.workspace.setViewMode(QMdiArea.ViewMode.SubWindowView)
-  else:
-    app.mainwin.workspace = TabbedWorkspace()
-    tab_rows = state.config.tab_rows
-    if tab_rows:
-      app.mainwin.workspace.set_max_rows(tab_rows)
-    if not state.config.show_tabs:
-      app.mainwin.workspace.set_tabs_visible(False)
+  # Unified workspace: tab bar + QMdiArea
+  app.mainwin.workspace = TabbedWorkspace()
+  tab_rows = state.config.tab_rows
+  if tab_rows:
+    app.mainwin.workspace.set_max_rows(tab_rows)
+  if not state.config.show_tabs:
+    app.mainwin.workspace.set_tabs_visible(False)
 
   content = app.mainwin.workspace
 
@@ -1053,29 +1036,22 @@ def makeapp(args):
 
   # Window menu
   mnuwindow = app.mainwin.menubar.addMenu('&Window')
-  _is_mdi = state.config.view_mode == 'mdi'
-  _a = mnuwindow.addAction('Tile &Horizontally', lambda:
+  _a = mnuwindow.addAction('Tile &Side by Side', lambda:
     app.mainwin.workspace.tileSubWindows())
-  _a.setEnabled(_is_mdi)
   _ui['menu.window.tileh'] = _a
-  _desc['menu.window.tileh'] = _d('Window', 'Tile Horizontally')
-  _a = mnuwindow.addAction('Tile &Vertically', _tile_vertically)
-  _a.setEnabled(_is_mdi)
+  _desc['menu.window.tileh'] = _d('Window', 'Tile Side by Side')
+  _a = mnuwindow.addAction('Tile S&tacked', lambda:
+    app.mainwin.workspace.tileVertically())
   _ui['menu.window.tilev'] = _a
-  _desc['menu.window.tilev'] = _d('Window', 'Tile Vertically')
+  _desc['menu.window.tilev'] = _d('Window', 'Tile Stacked')
   _a = mnuwindow.addAction('&Cascade', lambda:
     app.mainwin.workspace.cascadeSubWindows())
-  _a.setEnabled(_is_mdi)
   _ui['menu.window.cascade'] = _a
   _desc['menu.window.cascade'] = _d('Window', 'Cascade')
-  if not _is_mdi:
-    _info = QWidgetAction(mnuwindow)
-    _lbl = QLabel('\u2139 Requires MDI mode \u2014 click to change')
-    _lbl.setStyleSheet('color: #6688cc; padding: 4px 12px;')
-    _lbl.setCursor(Qt.CursorShape.PointingHandCursor)
-    _lbl.mousePressEvent = lambda e: (mnuwindow.close(), open_settings('general'))
-    _info.setDefaultWidget(_lbl)
-    mnuwindow.addAction(_info)
+  _a = mnuwindow.addAction('&Maximize', lambda:
+    app.mainwin.workspace.maximizeActive())
+  _ui['menu.window.maximize'] = _a
+  _desc['menu.window.maximize'] = _d('Window', 'Maximize')
 
   # Tools menu
   mnutools = app.mainwin.menubar.addMenu('&Tools')
@@ -1095,6 +1071,10 @@ def makeapp(args):
   _a.triggered.connect(lambda: __import__('dialogs').show_color_picker())
   _ui['menu.tools.colorpicker'] = _a
   _desc['menu.tools.colorpicker'] = _d('Tools', 'Color Picker')
+  _a = mnutools.addAction('&DCC Transfers')
+  _a.triggered.connect(lambda: __import__('dcc_ui').DCCTransfersWindow.show_instance())
+  _ui['menu.tools.dcctransfers'] = _a
+  _desc['menu.tools.dcctransfers'] = _d('Tools', 'DCC Transfers')
 
   # Toolbar menu — mirrors toolbar buttons as menu items
   app.mainwin.mnutoolbar = app.mainwin.menubar.addMenu('T&oolbar')
@@ -1263,6 +1243,8 @@ def quit():
   if _quitting:
     return
   _quitting = True
+  if state.dcc_manager:
+    state.dcc_manager.cleanup()
   if state.ui_state:
     state.ui_state.save()
   # Cancel all async tasks first so IRC handlers stop processing
@@ -1774,6 +1756,9 @@ if __name__ == '__main__':
 
     apply_hooks()
 
+    from dcc import DCCManager
+    state.dcc_manager = DCCManager()
+
     state.clients = set()
     init_irc()
     if state.config.networks:
@@ -1859,7 +1844,10 @@ if __name__ == '__main__':
     if wizard.exec() == QDialog.DialogCode.Accepted and wizard.result_data:
       apply_wizard_result(state.config, wizard.result_data)
 
-  # --- Initialise plugin.irc singleton and auto-connect ---
+  # --- Initialise DCC, plugin.irc singleton, and auto-connect ---
+  if not state.dcc_manager:
+    from dcc import DCCManager
+    state.dcc_manager = DCCManager()
   state.clients = set()
   init_irc()
   if state.config.networks:
@@ -1929,6 +1917,31 @@ if __name__ == '__main__':
   _crash_log = os.path.join(os.path.dirname(os.path.abspath(state.config.path)), 'crash.log')
   _crash_fh = open(_crash_log, 'a')
   faulthandler.enable(file=_crash_fh)
+  # Dump all thread tracebacks to crash.log every 15s as a watchdog —
+  # if the process dies silently, the last dump shows what it was doing
+  faulthandler.dump_traceback_later(15, repeat=True, file=_crash_fh)
+
+  # Windows: register an unhandled exception filter to catch crashes that
+  # Python's faulthandler misses (e.g. C++ exceptions in Qt)
+  if sys.platform == 'win32':
+    try:
+      import ctypes
+      from ctypes import wintypes
+      _EXCEPTION_CONTINUE_SEARCH = 0
+      @ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)
+      def _win_exception_filter(exception_pointers):
+        from datetime import datetime
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        try:
+          _crash_fh.write('[%s] *** Windows unhandled exception (SEH) ***\n' % ts)
+          faulthandler.dump_traceback(file=_crash_fh, all_threads=True)
+          _crash_fh.flush()
+        except Exception:
+          pass
+        return _EXCEPTION_CONTINUE_SEARCH
+      ctypes.windll.kernel32.SetUnhandledExceptionFilter(_win_exception_filter)
+    except Exception:
+      pass
 
   # Log all exceptions to crash.log as well as stderr
   def _log_exception(header, exc_type=None, exc_value=None, exc_tb=None):

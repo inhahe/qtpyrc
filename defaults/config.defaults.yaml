@@ -92,10 +92,6 @@ titles:
   channel: "{channel}"                   # e.g. "{channel} ({network_label})" to include network
   query: "{query_nick}"                  # e.g. "{query_nick} ({network_label})"
 
-# View mode: "tabbed" (one window at a time with tabs) or
-# "mdi" (free-floating tiled/cascaded subwindows).
-view_mode: tabbed
-
 # Maximum rows for the tab bar.  0 = dynamic (grow as needed).
 tab_rows: 0
 
@@ -188,6 +184,63 @@ link_preview:
   proxy: ""
                            # Supports http://, https://, socks5:// URLs.
                            # Example for Tor: socks5://127.0.0.1:9050
+
+
+# ---------------------------------------------------------------------------
+# DCC (Direct Client Connection)
+# ---------------------------------------------------------------------------
+
+dcc:
+  # Directory to save received files. Empty = prompt each time.
+  #~ download_dir: ""
+
+  # Port range for incoming DCC connections.
+  port_min: 1024
+  port_max: 65535
+
+  # Auto-accept incoming file transfers: never, known, always.
+  # "known" accepts from users in your channels.
+  auto_accept: never
+
+  # Maximum file size to accept (MB). 0 = no limit.
+  max_filesize: 0
+
+  # NAT traversal method: disabled, upnp, natpmp, auto.
+  # "auto" tries UPnP first, then NAT-PMP.
+  nat_traversal: auto
+
+  # Passive only: true = always use passive DCC (never listen).
+  # false = try active first (listen for connections), fall back to
+  # passive automatically if the connection times out.
+  passive: false
+
+  # Timeout in seconds for DCC connection attempts.
+  timeout: 120
+
+  # What to do when a received file already exists: ask, resume, rename, overwrite.
+  on_exists: ask
+
+  # Trusted user hostmasks (nick!ident@host wildcards).
+  # Transfers from trusted users bypass the get dialog.
+  #~ trusted_hosts:
+  #~   - "friend!*@trusted.host"
+
+  # Only accept DCC from trusted hostmasks (reject all others).
+  trust_only: false
+
+  # Show a get/accept dialog for transfers from non-trusted users.
+  # If false, non-trusted transfers follow auto_accept setting silently.
+  show_get_dialog: true
+
+  # File type filter: disabled, whitelist, blacklist.
+  # whitelist: only accept these extensions.  blacklist: reject these extensions.
+  file_filter_mode: disabled
+
+  # File extensions for the filter (e.g. ".exe", ".zip", ".mp3").
+  #~ file_filter:
+  #~   - ".exe"
+  #~   - ".bat"
+  #~   - ".scr"
 
 
 # ---------------------------------------------------------------------------

@@ -365,13 +365,13 @@ def _expand_vars(s, variables, warn_unknown=False, pattern_label=None,
           result = eval(arg, {'__builtins__': __builtins__}, func_ns)
           return str(result) if result is not None else ''
         except Exception as e:
-          state.dbg(state.LOG_WARN, '[config] eval(%r) failed: %s' % (arg, e))
+          _state.dbg(_state.LOG_WARN, '[config] eval(%r) failed: %s' % (arg, e))
           return ''
       elif name == 'stdin':
         try:
           return input(arg)
         except Exception as e:
-          state.dbg(state.LOG_WARN, '[config] stdin(%r) failed: %s' % (arg, e))
+          _state.dbg(_state.LOG_WARN, '[config] stdin(%r) failed: %s' % (arg, e))
           return ''
       elif name == 'input':
         try:
@@ -380,14 +380,13 @@ def _expand_vars(s, variables, warn_unknown=False, pattern_label=None,
           text, ok = QInputDialog.getText(parent, 'Input', arg or 'Enter value:')
           return text.strip() if ok else ''
         except Exception as e:
-          state.dbg(state.LOG_WARN, '[config] input(%r) failed: %s' % (arg, e))
+          _state.dbg(_state.LOG_WARN, '[config] input(%r) failed: %s' % (arg, e))
           return ''
     # 3. Unknown
     unknown.append(name)
     return full
   result = _NAME_RE.sub(_repl, s)
   if warn_unknown and unknown:
-    import state
     label = pattern_label or s
     for name in unknown:
       _warn_once('highlight_var_%s' % name,
@@ -757,7 +756,6 @@ class AppConfig:
     self.show_tabs = self.navigation in ('tabs', 'both')
     self.show_tree = self.navigation in ('tree', 'both')
     self.treeview = self.show_tree  # compat
-    self.view_mode = _choice(data.get('view_mode'), {'tabbed', 'mdi'}, 'tabbed')
     self.new_tab_state = _choice(data.get('new_tab_state'), {'active', 'normal', 'skipped'}, 'active')
     self.close_on_kick = data.get('close_on_kick', False)
     self.close_on_disconnect = data.get('close_on_disconnect', False)
@@ -772,6 +770,23 @@ class AppConfig:
       self.show_mode_prefix_messages = data.get('show_mode_prefix_messages', True)
     self.auto_copy_selection = data.get('auto_copy_selection', False)
     self.whois_on_query = data.get('whois_on_query', False)
+
+    # DCC
+    dcc = data.get('dcc') or {}
+    self.dcc_download_dir = dcc.get('download_dir', '')
+    self.dcc_port_min = int(dcc.get('port_min', 1024))
+    self.dcc_port_max = int(dcc.get('port_max', 65535))
+    self.dcc_auto_accept = dcc.get('auto_accept', 'never')
+    self.dcc_max_filesize = int(dcc.get('max_filesize', 0))
+    self.dcc_nat_traversal = dcc.get('nat_traversal', 'auto')
+    self.dcc_passive = dcc.get('passive', False)
+    self.dcc_timeout = int(dcc.get('timeout', 120))
+    self.dcc_on_exists = dcc.get('on_exists', 'ask')  # ask, resume, rename, overwrite
+    self.dcc_trusted_hosts = list(dcc.get('trusted_hosts') or [])
+    self.dcc_trust_only = dcc.get('trust_only', False)
+    self.dcc_show_get_dialog = dcc.get('show_get_dialog', True)  # for non-trusted
+    self.dcc_file_filter_mode = dcc.get('file_filter_mode', 'disabled')  # disabled, whitelist, blacklist
+    self.dcc_file_filter = list(dcc.get('file_filter') or [])
 
     # Nick colors
     nc = data.get('nick_colors') or {}

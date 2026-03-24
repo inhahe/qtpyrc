@@ -62,7 +62,7 @@ Parameters that accept arbitrary text (messages, reasons, titles) must be quoted
 | Command | Syntax | Description |
 |---------|--------|-------------|
 | `/connect` | `/connect <network>` | Connect to a network defined in config |
-| `/server` | `/server <host> [port]` | Connect to an IRC server (default port 6667) |
+| `/server` | `/server [switches] [host[:[+*]port]]` | Connect to a server (see below for switches) |
 | `/quit` | `/quit [message]` | Disconnect from the server (default message: "Leaving") |
 | `/away` | `/away ["message"]` | Set away status with message, or clear away if no message |
 | `/nick` | `/nick <newnick>` | Change your nickname |
@@ -76,6 +76,7 @@ Parameters that accept arbitrary text (messages, reasons, titles) must be quoted
 | `/me` | `/me <action>` | Send a CTCP ACTION (/me) to the current channel or query |
 | `/notice` | `/notice <target> <message>` | Send a NOTICE to a user or channel |
 | `/ctcp` | `/ctcp <nick> <type> [data]` | Send a CTCP query (PING, VERSION, TIME, etc.) |
+| `/dcc` | `/dcc <subcommand> [args]` | DCC file transfer and chat (see below) |
 | `/invite` | `/invite <nick> [#channel]` | Invite a user to a channel (defaults to current) |
 | `/raw` | `/raw <line>` | Send a raw IRC command to the server |
 | `/openurl` | `/openurl <url>` | Open a URL in the system browser |
@@ -324,7 +325,53 @@ Aliases are not persistent — add `/alias` commands to your startup script to r
 | `/mdi` | `/mdi` | Switch to MDI (multi-document) view mode |
 | `/tile` | `/tile [v]` | Tile windows horizontally, or vertically with `v` |
 | `/cascade` | `/cascade` | Cascade windows (MDI mode) |
-| `/newserver` | `/newserver` | Open a new server window |
+| `/newserver` | `/newserver [args...]` | Alias for `/server -m` |
+
+### /server switches
+
+| Switch | Description |
+|--------|-------------|
+| (no args) | Reconnect to the last server used |
+| `<network>` | Connect to a network defined in config |
+| `-m` | Create a new server window and connect |
+| `-n` | Create a new server window without connecting |
+| `-z` | Don't activate the new window (with `-m`/`-n`) |
+| `-e` / `+port` | Use TLS (e.g. `/server host:+6697`) |
+| `-t` / `*port` | Use STARTTLS (e.g. `/server host:*6667`) |
+| `-4` `-6` `-46` | Force IPv4, IPv6, or both |
+| `-d` | Set connection details without connecting |
+| `-o` | Skip autojoining channels |
+| `-c` | Skip on-connect events/notifications |
+| `-u` | Bypass STS (Strict Transport Security) |
+| `-w <pass>` | Server password |
+| `-l <method> [pass]` | Login method: `sasl`, `external`, `msg`, `nickserv` |
+| `-nick <nick>` | Override nickname |
+| `-altnick <nick>` | Add alternate nick (repeatable) |
+| `-user <user>` | Override username |
+| `-realname <name>` | Override realname (use quotes for spaces) |
+
+Examples:
+```
+/server irc.libera.chat:+6697
+/server -e -l sasl mypassword irc.libera.chat:6697
+/server -m -nick botnick -w serverpass irc.rizon.net:6667
+/server Libera
+/server
+```
+
+### /dcc subcommands
+
+| Subcommand | Description |
+|------------|-------------|
+| `/dcc send <nick> [filepath]` | Send a file (opens file picker if no path) |
+| `/dcc chat <nick>` | Open a DCC chat session |
+| `/dcc get <id\|nick>` | Accept a pending file transfer |
+| `/dcc cancel <id>` | Cancel a transfer |
+| `/dcc close <id>` | Close a transfer or chat |
+| `/dcc list` | Show the DCC transfers window |
+
+DCC supports both normal and reverse (passive) mode. When behind NAT, enable
+passive DCC in config or qtpyrc will automatically attempt UPnP port forwarding.
 
 ---
 

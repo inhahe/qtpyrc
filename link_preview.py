@@ -75,11 +75,27 @@ def _parse_head(html_bytes, encoding='utf-8'):
             elif 'date' not in result:
                 result['date'] = val
 
+    # Fallback: article:published_time without og: prefix
+    if 'date' not in result:
+        _ART_RE = re.compile(
+            r'<meta\s[^>]*?property\s*=\s*["\']article:(published_time|modified_time)["\']'
+            r'[^>]*?content\s*=\s*["\']([^"\']*)["\']',
+            re.IGNORECASE | re.DOTALL)
+        am = _ART_RE.search(text)
+        if am:
+            result['date'] = _decode_entities(am.group(2).strip())
+
     # Fallback: <meta name="date/last-modified/..." content="...">
     if 'date' not in result:
         dm = _DATE_META_RE.search(text)
         if dm:
             result['date'] = _decode_entities(dm.group(1).strip())
+
+    # Fallback: <time datetime="..."> (common in blog posts)
+    if 'date' not in result:
+        tm = re.search(r'<time[^>]*?datetime\s*=\s*["\']([^"\']*)["\']', text, re.IGNORECASE)
+        if tm:
+            result['date'] = _decode_entities(tm.group(1).strip())
 
     # Fallback to <title> tag
     if 'title' not in result:
@@ -518,9 +534,9 @@ def _insert_preview(window, info, marker_name=None):
         '<tr>'
         % (border_color, bg_color, width)
     )
-    # Thumbnail cell
+    # Thumbnail cell (clickable — opens the URL)
     if img_name:
-        html += '<td style="vertical-align: top; padding-right: 6px;"><img src="%s"></td>' % img_name
+        html += '<td style="vertical-align: top; padding-right: 6px;"><a href="%s"><img src="%s"></a></td>' % (url, img_name)
     # Text cell
     html += (
         '<td style="vertical-align: top;">'
