@@ -27,6 +27,7 @@ from settings.page_plugin_config import SinglePluginConfigPage, get_plugin_names
 from settings.page_link_preview import LinkPreviewPage
 from settings.page_nick_colors import NickColorsPage
 from settings.page_notifications import NotificationsPage
+from settings.page_dcc import DCCPage
 from settings.page_scripts import ScriptsPage
 from settings.page_file_editor import FileEditorPage
 
@@ -60,6 +61,7 @@ SETTINGS_PAGES = [
         ('fonts.nickcolors', 'nick_colors', 'Nick Colors', []),
     ]),
     ('notifications', 'notifications', 'Notifications', []),
+    ('dcc', 'dcc', 'DCC', []),
     ('scripts', 'scripts', 'Scripts', []),
     ('plugins', 'plugin_config', 'Plugins', []),
     ('editor', 'editor', 'File Editor', []),
@@ -504,6 +506,7 @@ class SettingsDialog(QDialog):
         self._add_page('ident_server', 'Ident Server', IdentServerPage())
         self._add_page('logging', 'Logging', LoggingPage())
         self._add_page('notifications', 'Notifications', NotificationsPage())
+        self._add_page('dcc', 'DCC', DCCPage())
 
         for pid, page in self._pages.items():
             page.load_from_data(self._data)

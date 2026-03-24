@@ -366,6 +366,8 @@ class Client:
     self._intentional_disconnect = False
     self._server_list = []   # list of server dicts from config
     self._server_index = 0   # index into _server_list for cycling
+    self._connect_overrides = {}  # per-connection overrides from /server switches
+    self._password = None     # ad-hoc server password from /server
     # Create the server window AFTER all attributes are set, because
     # addSubWindow can trigger title updates that access them.
     from window import Serverwindow
@@ -408,11 +410,16 @@ class Client:
     self._apply_server(self._server_list[self._server_index])
     return True
 
-  def reconnect(self, hostname=None, port=None):
+  def reconnect(self, hostname=None, port=None, password=None, **overrides):
     if hostname is not None:
       self.hostname = hostname
     if port is not None:
       self.port = port
+    if password is not None:
+      self._password = password  # stored for IRCClient to pick up
+    if 'tls' in overrides:
+      self.tls = overrides.pop('tls')
+    self._connect_overrides = overrides
     self._intentional_disconnect = True
     if self.conn:
       self.conn.disconnect()
@@ -433,12 +440,23 @@ class Client:
     while True:
       if not self._window_alive():
         return
-      self.window.redmessage("[Connecting to %s:%s]" % (self.hostname, self.port))
+      ov = getattr(self, '_connect_overrides', {})
+      tls_label = ' (TLS)' if self.tls else ''
+      self.window.redmessage("[Connecting to %s:%s%s]" % (self.hostname, self.port, tls_label))
       from irc_client import IRCClient
       conn = IRCClient(self)
       connected = False
       try:
-        await conn.connect(self.hostname, self.port, tls=self.tls, tls_verify=self.tls_verify)
+        ip_version = ov.get('ip_version')
+        family = 0  # any
+        if ip_version == '4':
+          import socket; family = socket.AF_INET
+        elif ip_version == '6':
+          import socket; family = socket.AF_INET6
+        await conn.connect(self.hostname, self.port, tls=self.tls,
+                           tls_verify=self.tls_verify,
+                           starttls=ov.get('starttls', False),
+                           family=family)
         connected = True
       except Exception as e:
         if self._window_alive():

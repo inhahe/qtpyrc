@@ -278,6 +278,8 @@ symbolic_to_numeric = {
     "ERR_SASLFAIL": '904', "ERR_SASLTOOLONG": '905',
     "ERR_SASLABORTED": '906', "ERR_SASLALREADY": '907',
     "RPL_SASLMECHS": '908',
+    # STARTTLS
+    "RPL_STARTTLS": '670', "ERR_STARTTLS": '691',
 }
 
 numeric_to_symbolic = {v: k for k, v in symbolic_to_numeric.items()}
@@ -351,16 +353,21 @@ class IRCClient:
 
     # --- Connection ---
 
-    async def connect(self, host, port=6667, tls=False, tls_verify=True):
+    async def connect(self, host, port=6667, tls=False, tls_verify=True,
+                      starttls=False, family=0):
         """Connect to an IRC server. Returns when the connection is lost."""
+        self._tls_verify = tls_verify
+        self._starttls_requested = starttls
+        self._starttls_done = False
         ssl_ctx = None
-        if tls:
+        if tls and not starttls:
             import ssl
             ssl_ctx = ssl.create_default_context()
             if not tls_verify:
                 ssl_ctx.check_hostname = False
                 ssl_ctx.verify_mode = ssl.CERT_NONE
-        self._reader, self._writer = await asyncio.open_connection(host, port, ssl=ssl_ctx)
+        self._reader, self._writer = await asyncio.open_connection(
+            host, port, ssl=ssl_ctx, family=family)
         self.connectionMade()
         try:
             await self._read_loop()
@@ -665,13 +672,50 @@ class IRCClient:
         self._cap_ls_buffer = []
         self._batches = {}
         self._current_tags = {}
-        # Start CAP negotiation before registration
-        self._send_raw("CAP LS 302")
-        if self.performLogin:
-            self.register(self.nickname)
+        if self._starttls_requested and not self._starttls_done:
+            # Request STARTTLS before anything else
+            self._send_raw("STARTTLS")
+        else:
+            # Start CAP negotiation before registration
+            self._send_raw("CAP LS 302")
+            if self.performLogin:
+                self.register(self.nickname)
 
     def connectionLost(self, reason):
         pass
+
+    # --- STARTTLS ---
+
+    def irc_RPL_STARTTLS(self, prefix, params):
+        """Server is ready for TLS upgrade."""
+        asyncio.ensure_future(self._upgrade_tls())
+
+    def irc_ERR_STARTTLS(self, prefix, params):
+        """STARTTLS failed — continue unencrypted."""
+        msg = ' '.join(params[1:]) if len(params) > 1 else 'STARTTLS failed'
+        state.dbg(state.LOG_WARN, '[irc] STARTTLS failed:', msg)
+        # Continue with registration
+        if self.performLogin:
+            self.register(self.nickname)
+
+    async def _upgrade_tls(self):
+        """Upgrade the plain connection to TLS after STARTTLS."""
+        import ssl
+        ssl_ctx = ssl.create_default_context()
+        if not self._tls_verify:
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+        transport = self._writer.transport
+        protocol = transport.get_protocol()
+        loop = asyncio.get_event_loop()
+        new_transport = await loop.start_tls(transport, protocol, ssl_ctx)
+        self._writer._transport = new_transport
+        self._starttls_done = True
+        state.dbg(state.LOG_INFO, '[irc] TLS upgrade complete')
+        # Now proceed with CAP negotiation + registration
+        self._send_raw("CAP LS 302")
+        if self.performLogin:
+            self.register(self.nickname)
 
     # --- Event callbacks (override in subclass) ---
 

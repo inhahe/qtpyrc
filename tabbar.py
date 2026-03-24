@@ -1,4 +1,8 @@
-# tabbar.py - mIRC-style multi-row tab bar with QStackedWidget
+# tabbar.py - Unified workspace: multi-row tab bar with QStackedWidget + QMdiArea
+#
+# Normal mode: QStackedWidget (one window visible at a time, like the old tabbed mode).
+# Tiled/cascaded mode: QMdiArea (free-floating windows for drag/resize).
+# The tab bar is always available for switching windows in either mode.
 
 from PySide6.QtWidgets import *
 from PySide6.QtGui import *
@@ -21,15 +25,15 @@ class TabLabel(QLabel):
     if event.button() == Qt.MouseButton.LeftButton:
       self.clicked.emit()
     elif event.button() == Qt.MouseButton.RightButton:
-      self.rightClicked.emit(event.globalPosition().toPoint())
+      self.rightClicked.emit(QCursor.pos())
     super().mousePressEvent(event)
 
 
-class SubWindowProxy:
+class _SubWindowProxy:
   """Lightweight stand-in for QMdiSubWindow so code using self.subwindow still works."""
-
   def __init__(self, widget):
     self._widget = widget
+    self._mdi_sub = None  # set when in MDI mode
 
   def widget(self):
     return self._widget
@@ -40,23 +44,22 @@ class SubWindowProxy:
   def setFocus(self):
     self._widget.setFocus()
 
-  # These are no-ops since the stacked widget handles visibility
   def show(self): pass
   def showNormal(self): pass
   def showMaximized(self): pass
   def hide(self): pass
-  def setGeometry(self, *a): pass
+  def setGeometry(self, *a):
+    if self._mdi_sub:
+      self._mdi_sub.setGeometry(*a)
   def setWindowFlags(self, *a): pass
 
 
 class TabbedWorkspace(QWidget):
   """
-  Replaces QMdiArea for tabbed mode.  Contains a MultiRowTabBar on top
-  and a QStackedWidget below.  Exposes the subset of QMdiArea API that
-  the rest of the codebase uses.
+  Unified workspace: multi-row tab bar on top, with QStackedWidget for
+  normal (maximized) mode and QMdiArea for tiled/cascaded mode.
   """
 
-  # Emitted when a different window becomes active (mirrors QMdiArea signal)
   subWindowActivated = Signal(object)
 
   ACTIVE = 0
@@ -65,10 +68,11 @@ class TabbedWorkspace(QWidget):
 
   def __init__(self, parent=None):
     super().__init__(parent)
-    self._tabs = []        # list of {proxy, widget, label, state, activity_color}
-    self._active = None    # active entry
-    self._max_rows = 0     # 0 = dynamic
+    self._tabs = []
+    self._active = None
+    self._max_rows = 0
     self._activating = False
+    self._tiled = False       # True when in MDI tiled/cascaded mode
     self._relayout_timer = QTimer(self)
     self._relayout_timer.setSingleShot(True)
     self._relayout_timer.timeout.connect(self._do_relayout)
@@ -78,7 +82,7 @@ class TabbedWorkspace(QWidget):
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(0)
 
-    # Tab bar area — override minimum size so it doesn't force a wide window
+    # Tab bar area
     class _TabBarWidget(QWidget):
       def minimumSizeHint(self):
         return QSize(100, 0)
@@ -94,23 +98,28 @@ class TabbedWorkspace(QWidget):
     self._separator.setFixedHeight(1)
     layout.addWidget(self._separator)
 
-    # Stacked widget for content
+    # QStackedWidget for normal (maximized/tabbed) mode
     self._stack = QStackedWidget(self)
     self._blank = QWidget(self)
     self._stack.addWidget(self._blank)
     layout.addWidget(self._stack, 1)
 
+    # QMdiArea for tiled/cascaded mode (hidden initially)
+    self._mdi = QMdiArea(self)
+    self._mdi.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    self._mdi.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    self._mdi.subWindowActivated.connect(self._on_mdi_activated)
+    self._mdi.hide()
+    layout.addWidget(self._mdi, 1)
+
     self._load_colors()
 
   def _load_colors(self):
     cfg = state.config
-    # Normal tab colors (default: same as global fg/bg)
     self._fg = cfg.tab_normal_fg or cfg.fgcolor
     self._bg = cfg.tab_normal_bg or cfg.bgcolor
-    # Active tab colors (default: inverted)
     self._active_fg = cfg.tab_active_fg or cfg.bgcolor
     self._active_bg = cfg.tab_active_bg or cfg.fgcolor
-    # Skipped tab colors (default: gray text, light gray background)
     self._skipped_fg = cfg.tab_skipped_fg or QColor(Qt.gray)
     self._skipped_bg = cfg.tab_skipped_bg or QColor(Qt.lightGray)
     self._sep_color = cfg.fgcolor
@@ -138,14 +147,15 @@ class TabbedWorkspace(QWidget):
   # --- QMdiArea-compatible API ---
 
   def addSubWindow(self, widget):
-    """Add a widget; returns a SubWindowProxy (stands in for QMdiSubWindow)."""
-    proxy = SubWindowProxy(widget)
+    """Add a widget. Returns a _SubWindowProxy."""
+    proxy = _SubWindowProxy(widget)
     self._stack.addWidget(widget)
+
     title = widget.windowTitle()
     label = TabLabel('  ' + title + '  ', self)
     nts = state.config.new_tab_state
     if nts == 'active':
-      initial_state = self.NORMAL  # will be set to ACTIVE by _activate below
+      initial_state = self.NORMAL
     elif nts == 'skipped':
       initial_state = self.SKIPPED
     else:
@@ -169,26 +179,32 @@ class TabbedWorkspace(QWidget):
       if t['proxy'] is proxy:
         was_active = (t is self._active)
         t['label'].deleteLater()
-        self._stack.removeWidget(t['widget'])
+        # Remove from whichever container it's in
+        if self._tiled and t['proxy']._mdi_sub:
+          self._mdi.removeSubWindow(t['widget'])
+          t['proxy']._mdi_sub = None
+        else:
+          self._stack.removeWidget(t['widget'])
         self._tabs.pop(i)
         if was_active:
           if self._tabs:
-            # Try to find a non-skipped tab nearby
             candidate = None
             idx = min(i, len(self._tabs) - 1)
             for offset in range(len(self._tabs)):
-              t = self._tabs[(idx + offset) % len(self._tabs)]
-              if t['state'] != self.SKIPPED:
-                candidate = t
+              t2 = self._tabs[(idx + offset) % len(self._tabs)]
+              if t2['state'] != self.SKIPPED:
+                candidate = t2
                 break
             if candidate:
               self._activate(candidate)
             else:
               self._active = None
-              self._stack.setCurrentWidget(self._blank)
+              if not self._tiled:
+                self._stack.setCurrentWidget(self._blank)
           else:
             self._active = None
-            self._stack.setCurrentWidget(self._blank)
+            if not self._tiled:
+              self._stack.setCurrentWidget(self._blank)
         self._relayout()
         return
 
@@ -203,27 +219,96 @@ class TabbedWorkspace(QWidget):
         return
 
   def activeSubWindow(self):
-    """Return the active SubWindowProxy, or None."""
+    """Return the active proxy, or None."""
     return self._active['proxy'] if self._active else None
 
   def subWindowList(self):
-    """Return list of SubWindowProxy objects in tab order."""
+    """Return list of proxies in tab order."""
     return [t['proxy'] for t in self._tabs]
 
+  def viewport(self):
+    """Return the MDI viewport (used by tile helpers)."""
+    return self._mdi.viewport()
+
   def findChild(self, typ):
-    """Compatibility: return None for QTabBar (we don't use Qt's tab bar)."""
     if typ is QTabBar:
       return None
     return super().findChild(typ)
 
-  # MDI-mode stubs (not used in tabbed mode, but called by toggle)
-  def setViewMode(self, mode): pass
-  def viewMode(self): return 0
-  def cascadeSubWindows(self): pass
-  def setTabPosition(self, *a): pass
-  def setDocumentMode(self, *a): pass
-  def setTabsClosable(self, *a): pass
-  def setTabsMovable(self, *a): pass
+  # --- MDI layout commands ---
+
+  def _enter_mdi(self):
+    """Switch all windows from QStackedWidget to QMdiArea."""
+    if self._tiled:
+      return
+    self._tiled = True
+    # Suppress MDI activation signals during bulk reparent
+    self._activating = True
+    try:
+      for t in self._tabs:
+        self._stack.removeWidget(t['widget'])
+        sub = self._mdi.addSubWindow(t['widget'])
+        t['proxy']._mdi_sub = sub
+        t['widget'].show()
+        sub.show()
+      self._stack.hide()
+      self._mdi.show()
+      # Activate the correct subwindow
+      if self._active and self._active['proxy']._mdi_sub:
+        self._mdi.setActiveSubWindow(self._active['proxy']._mdi_sub)
+    finally:
+      self._activating = False
+
+  def _exit_mdi(self):
+    """Switch all windows from QMdiArea back to QStackedWidget."""
+    if not self._tiled:
+      return
+    self._tiled = False
+    self._activating = True
+    try:
+      for t in self._tabs:
+        if t['proxy']._mdi_sub:
+          self._mdi.removeSubWindow(t['widget'])
+          t['proxy']._mdi_sub = None
+        t['widget'].setParent(None)  # detach fully before re-adding
+        self._stack.addWidget(t['widget'])
+      self._mdi.hide()
+      self._stack.show()
+      # Restore the active window in the stack
+      if self._active:
+        self._stack.setCurrentWidget(self._active['widget'])
+      else:
+        self._stack.setCurrentWidget(self._blank)
+    finally:
+      self._activating = False
+
+  def tileSubWindows(self):
+    """Tile all subwindows side by side."""
+    self._enter_mdi()
+    self._mdi.tileSubWindows()
+
+  def cascadeSubWindows(self):
+    """Cascade all subwindows."""
+    self._enter_mdi()
+    self._mdi.cascadeSubWindows()
+
+  def tileVertically(self):
+    """Tile all subwindows in stacked rows."""
+    self._enter_mdi()
+    subs = self._mdi.subWindowList()
+    if not subs:
+      return
+    vp = self._mdi.viewport()
+    w = vp.width()
+    h = vp.height()
+    n = len(subs)
+    row_h = h // n if n else h
+    for i, sub in enumerate(subs):
+      sub.setGeometry(0, i * row_h, w, row_h)
+
+  def maximizeActive(self):
+    """Return to tabbed look (exit MDI mode)."""
+    self._exit_mdi()
 
   # --- Tab bar: update title / activity ---
 
@@ -231,7 +316,7 @@ class TabbedWorkspace(QWidget):
     for t in self._tabs:
       if t['proxy'] is proxy:
         if t['title'] == title:
-          return  # no change
+          return
         t['title'] = title
         self._style_tab(t)
         self._relayout()
@@ -261,7 +346,6 @@ class TabbedWorkspace(QWidget):
   # --- Tab cycling ---
 
   def skip_current(self):
-    """Skip the active tab (as if clicked) and activate the next, or deactivate."""
     if not self._active:
       return
     entry = self._active
@@ -287,17 +371,31 @@ class TabbedWorkspace(QWidget):
 
   # --- Internal ---
 
+  def _on_mdi_activated(self, sub):
+    """Sync tab bar when MDI activates a subwindow."""
+    if self._activating or sub is None:
+      return
+    widget = sub.widget()
+    for t in self._tabs:
+      if t['widget'] is widget and t is not self._active:
+        t['state'] = self.NORMAL
+        self._activate(t)
+        return
+
   def _on_tab_right_clicked(self, entry, pos):
-    """Show a context menu for a tab."""
     import popups
     widget = entry['widget']
+    # Highlight the tab background while context menu is shown
+    entry['_ctx_highlight'] = True
+    self._style_tab(entry)
     popups.show_popup('tab', widget, pos)
+    entry.pop('_ctx_highlight', None)
+    self._style_tab(entry)
 
   def _on_tab_clicked(self, entry):
     if entry is self._active:
       entry['state'] = self.SKIPPED
       self._style_tab(entry)
-      # Try to activate another non-skipped tab; if none, deactivate all
       has_other = any(t['state'] != self.SKIPPED for t in self._tabs if t is not entry)
       if has_other:
         self._activate_next(entry)
@@ -311,28 +409,31 @@ class TabbedWorkspace(QWidget):
     self._activating = True
     try:
       if self._active and self._active is not entry:
-        # Only reset to NORMAL if it's still ACTIVE (don't overwrite SKIPPED)
         if self._active['state'] == self.ACTIVE:
           self._active['state'] = self.NORMAL
           self._style_tab(self._active)
         elif self._active['state'] == self.SKIPPED:
-          self._style_tab(self._active)  # just restyle, keep SKIPPED
+          self._style_tab(self._active)
       entry['state'] = self.ACTIVE
       self._active = entry
       self._style_tab(entry)
-      self._stack.setCurrentWidget(entry['widget'])
+      if self._tiled:
+        if entry['proxy']._mdi_sub:
+          self._mdi.setActiveSubWindow(entry['proxy']._mdi_sub)
+      else:
+        self._stack.setCurrentWidget(entry['widget'])
       self.subWindowActivated.emit(entry['proxy'])
     finally:
       self._activating = False
 
   def _deactivate(self):
-    """Deactivate all tabs, showing a blank screen."""
     if self._active:
       if self._active['state'] == self.ACTIVE:
         self._active['state'] = self.NORMAL
         self._style_tab(self._active)
       self._active = None
-    self._stack.setCurrentWidget(self._blank)
+    if not self._tiled:
+      self._stack.setCurrentWidget(self._blank)
     self.subWindowActivated.emit(None)
 
   def _activate_next(self, skip_entry):
@@ -377,7 +478,10 @@ class TabbedWorkspace(QWidget):
     else:
       fg = self._fg.name()
 
-    if entry['state'] == self.ACTIVE:
+    if entry.get('_ctx_highlight'):
+      bg = '#4488cc'
+      fg = 'white'
+    elif entry['state'] == self.ACTIVE:
       bg = self._active_bg.name()
     elif entry['state'] == self.SKIPPED:
       bg = self._skipped_bg.name()
@@ -392,25 +496,21 @@ class TabbedWorkspace(QWidget):
     font_css = ' '.join(font_parts)
     label.setStyleSheet(
       "QLabel { background-color: %s; padding: 3px 6px; %s }" % (bg, font_css))
-    # Build rich text label with optional red X for disconnected tabs
     title = entry.get('title', '')
     disconnected = entry.get('disconnected', False)
     html = '<span style="color:%s;">  %s  </span>' % (fg, title)
     if disconnected:
-      html += '<span style="color:red;"> ✕</span>'
+      html += '<span style="color:red;"> \u2715</span>'
     label.setTextFormat(Qt.TextFormat.RichText)
     label.setText(html)
 
   # --- Row layout ---
 
   def _relayout(self):
-    """Schedule a relayout after a short delay. Each call resets the timer,
-    so rapid changes (batch tab adds) result in one rebuild at the end."""
     self._relayout_timer.setInterval(self._relayout_delay_ms)
     self._relayout_timer.start()
 
   def _do_relayout(self):
-    # Clear existing rows (but keep tab labels alive)
     while self._tabbar_layout.count():
       item = self._tabbar_layout.takeAt(0)
       w = item.widget()
@@ -420,7 +520,6 @@ class TabbedWorkspace(QWidget):
     if not self._tabs:
       return
 
-    # Group tabs by client
     groups = []
     current_group = []
     prev_client = None
@@ -434,7 +533,6 @@ class TabbedWorkspace(QWidget):
     if current_group:
       groups.append(current_group)
 
-    # Build flat list with separator markers
     items = []
     for gi, group in enumerate(groups):
       if gi > 0:
@@ -455,7 +553,6 @@ class TabbedWorkspace(QWidget):
         w = item['label'].sizeHint().width()
         item_widths.append(max(w, 40))
 
-    # Distribute into rows
     rows = [[]]
     row_width = 0
     max_rows = self._max_rows if self._max_rows > 0 else 9999
@@ -468,7 +565,6 @@ class TabbedWorkspace(QWidget):
       rows[-1].append(item)
       row_width += w
 
-    # Build row widgets
     for row in rows:
       row_widget = QWidget(self._tabbar_widget)
       row_widget.setMinimumWidth(0)

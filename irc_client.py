@@ -1,5 +1,6 @@
 # irc_client.py - IRCClient subclass
 
+import asyncio
 import base64
 import re
 import time
@@ -24,6 +25,14 @@ _MIRC_STRIP_RE = re.compile(
 _URL_RE = re.compile(r'https?://[^\s<>\x00-\x1f]+', re.IGNORECASE)
 
 
+def _format_size(size):
+  if not size: return '0 B'
+  for unit in ('B', 'KB', 'MB', 'GB'):
+    if abs(size) < 1024: return '%.1f %s' % (size, unit) if unit != 'B' else '%d %s' % (size, unit)
+    size /= 1024.0
+  return '%.1f TB' % size
+
+
 def _extract_urls(text):
   """Extract URLs from message text (after stripping mIRC codes)."""
   clean = _MIRC_STRIP_RE.sub('', text)
@@ -45,7 +54,7 @@ def _save_urls(network, channel, nick, host, text):
   if not db:
     return
   for url in _extract_urls(text):
-    db.add_url(network, channel.lower(), nick, host, url)
+    db.add_url(network or '', channel.lower(), nick, host, url)
 
 
 def _query_history_key(nick, ident):
@@ -96,6 +105,7 @@ def _history_replay(window, network, channel, limit=None, chan_obj=None):
   rows = db.get_last(network, channel.lower(), limit)
   if not rows:
     return
+  window._suppress_activity = True
   show_prefix = state.config.show_mode_prefix_messages
   history = chan_obj.history if chan_obj else None
   for ts, etype, nick, text, prefix in rows:
@@ -142,6 +152,7 @@ def _history_replay(window, network, channel, limit=None, chan_obj=None):
         pass
       history.append(msg)
   window.add_separator(" End of saved history ")
+  window._suppress_activity = False
 
 
 class IRCClient(asyncirc.IRCClient):
@@ -154,18 +165,23 @@ class IRCClient(asyncirc.IRCClient):
     self.queries = client.queries
 
     nk = client.network_key
-    self.nickname = state.config.resolve(nk, 'nick')
-    self.username = state.config.resolve(nk, 'user')
-    self.realname = state.config.resolve(nk, 'realname')
-    # Password: server-level > network-level only (no global fallback)
-    self.password = None
-    if nk:
+    ov = getattr(client, '_connect_overrides', {})
+    self.nickname = ov.get('nick') or state.config.resolve(nk, 'nick')
+    self.username = ov.get('user') or state.config.resolve(nk, 'user')
+    self.realname = ov.get('realname') or state.config.resolve(nk, 'realname')
+    # Password: override > ad-hoc > server-level > network-level (no global fallback)
+    self.password = ov.get('password') or getattr(client, '_password', None)
+    if not self.password and nk:
       servers = state.config.get_servers(nk)
       if servers and 'password' in servers[0]:
         self.password = servers[0]['password']
       else:
         self.password = state.config._net(nk).get('password')
-    self._alt_nicks = list(state.config.resolve(nk, 'alt_nicks') or [])
+    self._alt_nicks = list(ov.get('altnicks') or state.config.resolve(nk, 'alt_nicks') or [])
+    self._skip_autojoin = ov.get('skip_autojoin', False)
+    self._skip_on_connect = ov.get('skip_on_connect', False)
+    self._login_method = ov.get('login_method')
+    self._login_password = ov.get('login_password')
     self._alt_nick_idx = 0
     self._whois_windows = {}  # lowercased nick -> Window to display results in
     self._ctcp_windows = {}   # lowercased nick -> Window that sent CTCP request
@@ -191,15 +207,18 @@ class IRCClient(asyncirc.IRCClient):
 
   def _get_desired_caps(self):
     caps = ['batch', 'server-time', 'message-tags']
-    # SASL if configured for this network
-    nk = self.client.network_key
-    if nk:
-      net = state.config._net(nk)
-      sasl = net.get('sasl')
-      if sasl and sasl.get('username') and sasl.get('password'):
-        caps.append('sasl')
-      elif sasl and (sasl.get('mechanism') or '').upper() == 'EXTERNAL':
-        caps.append('sasl')
+    # SASL: override login method or config
+    if self._login_method in ('sasl', 'external'):
+      caps.append('sasl')
+    else:
+      nk = self.client.network_key
+      if nk:
+        net = state.config._net(nk)
+        sasl = net.get('sasl')
+        if sasl and sasl.get('username') and sasl.get('password'):
+          caps.append('sasl')
+        elif sasl and (sasl.get('mechanism') or '').upper() == 'EXTERNAL':
+          caps.append('sasl')
     # ZNC playback
     caps.append('znc.in/playback')
     return caps
@@ -210,15 +229,24 @@ class IRCClient(asyncirc.IRCClient):
 
   def capsAcknowledged(self, caps):
     if 'sasl' in self._cap_enabled:
-      nk = self.client.network_key
-      net = state.config._net(nk) if nk else {}
-      sasl = net.get('sasl') or {}
-      mechanism = (sasl.get('mechanism') or 'PLAIN').upper()
-      self._sasl_mechanism = mechanism
-      self._sasl_username = sasl.get('username', '')
-      self._sasl_password = sasl.get('password', '')
+      # Override login method takes priority
+      if self._login_method == 'external':
+        self._sasl_mechanism = 'EXTERNAL'
+        self._sasl_username = ''
+        self._sasl_password = ''
+      elif self._login_method == 'sasl' and self._login_password:
+        self._sasl_mechanism = 'PLAIN'
+        self._sasl_username = self.nickname
+        self._sasl_password = self._login_password
+      else:
+        nk = self.client.network_key
+        net = state.config._net(nk) if nk else {}
+        sasl = net.get('sasl') or {}
+        self._sasl_mechanism = (sasl.get('mechanism') or 'PLAIN').upper()
+        self._sasl_username = sasl.get('username', '')
+        self._sasl_password = sasl.get('password', '')
       self._sasl_active = True
-      self._send_raw("AUTHENTICATE %s" % mechanism)
+      self._send_raw("AUTHENTICATE %s" % self._sasl_mechanism)
 
   def saslAuthenticate(self, data):
     if not getattr(self, '_sasl_active', False):
@@ -400,7 +428,7 @@ class IRCClient(asyncirc.IRCClient):
     self.window.redmessage('[Connected to %s]' % self.client.hostname)
     state.irclogger.log_server(self.client.network or self.client.hostname,
                          'Connected to %s' % self.client.hostname)
-    if state.notifications:
+    if state.notifications and not self._skip_on_connect:
       state.notifications.fire('connect', 'Connected',
                                'Connected to %s' % self.client.hostname)
 
@@ -531,6 +559,146 @@ class IRCClient(asyncirc.IRCClient):
     else:
       w.addline("[CTCP %s reply from %s: %s]" % (tag, nick, data or ''))
 
+  # --- DCC CTCP handling ---
+
+  def ctcp_PrivDCC(self, user, data):
+    """Handle incoming DCC CTCP requests (SEND, CHAT, RESUME, ACCEPT)."""
+    from dcc import parse_dcc_request, DCCTransfer, DCCChat, Direction, Status
+    nick = user.split('!', 1)[0]
+    req = parse_dcc_request(data)
+    if not req:
+      state.dbg(state.LOG_DEBUG, '[dcc] Unparseable DCC request from %s: %s' % (nick, data))
+      return
+
+    mgr = state.dcc_manager
+    if not mgr:
+      return
+
+    dtype = req['type']
+
+    if dtype == 'SEND':
+      # Incoming file offer
+      filesize = req.get('filesize', 0)
+      filename = req.get('filename', '')
+
+      # Check if this is a reverse DCC response (we sent with token, they reply with ip/port/token)
+      if req.get('token'):
+        for xfer in mgr.transfers.values():
+          if (xfer.direction == Direction.SEND and xfer.token == req['token'] and
+              xfer.nick.lower() == nick.lower()):
+            xfer.host = req['host']
+            xfer.port = req['port']
+            xfer._task = asyncio.ensure_future(self._dcc_reverse_send_connect(xfer))
+            return
+
+      # Check max filesize
+      if state.config.dcc_max_filesize and filesize > state.config.dcc_max_filesize * 1024 * 1024:
+        self.window.redmessage('[DCC SEND from %s rejected: %s exceeds max filesize (%d MB)]' % (
+          nick, filename, state.config.dcc_max_filesize))
+        return
+
+      # Check file type filter
+      if state.config.dcc_file_filter_mode != 'disabled' and state.config.dcc_file_filter:
+        import os
+        ext = os.path.splitext(filename)[1].lower()
+        filter_list = [e.lower() for e in state.config.dcc_file_filter]
+        if state.config.dcc_file_filter_mode == 'blacklist' and ext in filter_list:
+          self.window.redmessage('[DCC SEND from %s rejected: %s is a blocked file type]' % (
+            nick, filename))
+          return
+        elif state.config.dcc_file_filter_mode == 'whitelist' and ext not in filter_list:
+          self.window.redmessage('[DCC SEND from %s rejected: %s is not an allowed file type]' % (
+            nick, filename))
+          return
+
+      # Check trusted hosts
+      is_trusted = self._is_trusted_host(user)
+      if state.config.dcc_trust_only and not is_trusted:
+        self.window.redmessage('[DCC SEND from %s rejected: not a trusted user]' % nick)
+        return
+
+      xfer = DCCTransfer(
+        self.client, nick, filename, filesize, Direction.RECEIVE,
+        host=req['host'], port=req['port'], token=req.get('token'))
+      mgr.transfers[xfer.id] = xfer
+
+      self.window.addline('[DCC SEND from %s: %s (%s)]' % (
+        nick, xfer.filename, _format_size(filesize)))
+
+      # Decide whether to accept
+      if is_trusted or state.config.dcc_auto_accept == 'always':
+        asyncio.ensure_future(mgr.accept_receive(xfer))
+      elif state.config.dcc_auto_accept == 'known' and self._is_known_user(nick):
+        asyncio.ensure_future(mgr.accept_receive(xfer))
+      elif state.config.dcc_show_get_dialog:
+        from dcc_ui import show_accept_dialog
+        if show_accept_dialog(xfer):
+          asyncio.ensure_future(mgr.accept_receive(xfer))
+        else:
+          xfer.status = Status.CANCELLED
+          self.window.addline('[DCC SEND from %s rejected]' % nick)
+      else:
+        # No dialog, not auto-accepted — leave pending
+        self.window.addline('[DCC SEND from %s pending — use /dcc get %s to accept]' % (
+          nick, xfer.id))
+
+    elif dtype == 'CHAT':
+      chat = DCCChat(self.client, nick, host=req['host'], port=req['port'])
+      mgr.chats[chat.id] = chat
+      self.window.addline('[DCC CHAT request from %s]' % nick)
+      # Auto-accept chat
+      asyncio.ensure_future(mgr.accept_chat(chat))
+
+    elif dtype == 'RESUME':
+      mgr.handle_resume(nick, req['filename'], req['port'], req['position'])
+
+    elif dtype == 'ACCEPT':
+      mgr.handle_accept(nick, req['filename'], req['port'], req['position'])
+
+  async def _dcc_reverse_send_connect(self, xfer):
+    """Connect to the receiver for a reverse DCC send."""
+    from dcc import Status, _notify_transfer
+    try:
+      xfer.status = Status.CONNECTING
+      _notify_transfer(xfer, 'Connecting to %s for reverse DCC SEND' % xfer.nick)
+      reader, writer = await asyncio.wait_for(
+        asyncio.open_connection(xfer.host, xfer.port),
+        timeout=state.config.dcc_timeout)
+      await state.dcc_manager._do_send(xfer, reader, writer)
+    except asyncio.TimeoutError:
+      xfer.status = Status.FAILED
+      xfer.error = 'Connection timed out'
+      _notify_transfer(xfer, 'DCC SEND to %s timed out (reverse)' % xfer.nick)
+    except asyncio.CancelledError:
+      xfer.status = Status.CANCELLED
+    except Exception as e:
+      xfer.status = Status.FAILED
+      xfer.error = str(e)
+      _notify_transfer(xfer, 'DCC SEND to %s failed: %s' % (xfer.nick, e))
+
+  def _is_known_user(self, nick):
+    """Check if nick is in one of our channels or has an open query."""
+    lnick = self.irclower(nick)
+    for chan in self.client.channels.values():
+      if lnick in {self.irclower(n) for n in chan.nicks}:
+        return True
+    for q in self.client.queries.values():
+      if q.nick and self.irclower(q.nick) == lnick:
+        return True
+    return False
+
+  def _is_trusted_host(self, hostmask):
+    """Check if a hostmask matches any trusted_hosts pattern."""
+    import fnmatch as _fnmatch
+    trusted = state.config.dcc_trusted_hosts
+    if not trusted:
+      return False
+    hostmask_lower = hostmask.lower()
+    for pattern in trusted:
+      if _fnmatch.fnmatch(hostmask_lower, pattern.lower()):
+        return True
+    return False
+
   def irc_ERR_NICKNAMEINUSE(self, prefix, params):
     # Try alt_nicks first, then fall back to appending _
     if self._alt_nick_idx < len(self._alt_nicks):
@@ -609,8 +777,10 @@ class IRCClient(asyncirc.IRCClient):
     w = self._whois_window(params)
     nick = params[1] if len(params) > 1 else '?'
     w.addline("[%s] End of WHOIS" % nick)
-    # Clean up tracking
-    self._whois_windows.pop(self.irclower(nick), None)
+    # Delay cleanup — some servers send non-standard numerics (671, 338)
+    # after the end-of-whois marker
+    lnick = self.irclower(nick)
+    QTimer.singleShot(2000, lambda: self._whois_windows.pop(lnick, None))
 
   # Also handle 330 (logged in as) and 671 (using secure connection) which
   # are common non-standard WHOIS numerics — they arrive as irc_unknown
@@ -776,12 +946,9 @@ class IRCClient(asyncirc.IRCClient):
     if tree:
       tree.update_client_label(self.client)
 
-    # If client has no network_key yet (e.g. manual /server), try to match
-    if not self.client.network_key:
-      found = state.config.find_network_key(network)
-      if found:
-        self.client.network_key = found
-        state.dbg(state.LOG_INFO, 'Matched network %r to config key %r' % (network, found))
+    # Note: we intentionally do NOT auto-match ad-hoc /server connections
+    # to config network keys. Use /connect <network> or /server <network>
+    # to get config settings (autojoin, SASL, etc.).
 
   def isupport(self, options):
     super().isupport(options)
@@ -794,13 +961,22 @@ class IRCClient(asyncirc.IRCClient):
       if tree:
         tree.update_client_label(self.client)
 
-    # Autojoin channels — mark them so the drain queue can skip them
-    # if the bouncer already joined us before they get sent
-    self._autojoin_pending = set()
-    autojoins = state.config.get_autojoins(self.client.network_key)
-    for channel, key in autojoins.items():
-      self._autojoin_pending.add(self.irclower(channel))
-      self.join(channel, key)
+    # Autojoin channels (skip if -o flag was used)
+    if not self._skip_autojoin:
+      self._autojoin_pending = set()
+      autojoins = state.config.get_autojoins(self.client.network_key)
+      for channel, key in autojoins.items():
+        self._autojoin_pending.add(self.irclower(channel))
+        self.join(channel, key)
+    else:
+      self._autojoin_pending = set()
+
+    # NickServ/MSG login method (post-registration, non-SASL)
+    if self._login_method in ('nickserv', 'msg') and self._login_password:
+      if self._login_method == 'msg':
+        self.msg('NickServ', 'IDENTIFY %s %s' % (self.nickname, self._login_password))
+      else:
+        self.msg('NickServ', 'IDENTIFY %s' % self._login_password)
 
     # If MONITOR just became available, send the notify list
     if self._monitor_supported and not getattr(self, '_monitor_synced', False) and state.notifications:
@@ -965,6 +1141,7 @@ class IRCClient(asyncirc.IRCClient):
       self.channels[chnlower] = chan
       # Defer history replay — background drip-feed, or immediate on activation
       chan.window._deferred_replay = (self.client.network, chname, chan)
+      chan.window._suppress_activity = True
       from qtpyrc import _queue_bg_replay
       _queue_bg_replay(chan.window, self.client.network, chname, chan)
     ts = self._get_server_time()

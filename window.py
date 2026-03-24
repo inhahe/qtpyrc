@@ -188,14 +188,19 @@ class ChatOutput(QTextEdit):
 
   def _refocus_input(self):
     """Return focus to the parent window's input widget."""
-    pw = self._parent_window
-    if pw and hasattr(pw, 'input'):
-      pw.input.setFocus()
+    try:
+      pw = self._parent_window
+      if pw and hasattr(pw, 'input') and pw.input and not pw.input.hasFocus():
+        pw.input.setFocus()
+    except RuntimeError:
+      pass  # C++ object deleted
 
   def focusInEvent(self, event):
     """Never keep focus — always redirect to the input widget."""
     super().focusInEvent(event)
-    self._refocus_input()
+    # Use a single-shot timer to avoid re-entrancy during Qt focus handling
+    from PySide6.QtCore import QTimer
+    QTimer.singleShot(0, self._refocus_input)
 
   def mouseMoveEvent(self, event):
     anchor = self.anchorAt(event.pos())
@@ -233,29 +238,57 @@ class ChatOutput(QTextEdit):
         return
     super().mouseDoubleClickEvent(event)
 
+  def _highlight_anchor_at(self, pos):
+    """Select the anchor text at pos to visually highlight it.
+    Returns the old cursor to restore later, or None."""
+    cursor = self.cursorForPosition(pos)
+    if not cursor:
+      return None
+    block = cursor.block()
+    # Find the fragment containing the anchor
+    it = block.begin()
+    while not it.atEnd():
+      frag = it.fragment()
+      if frag.isValid():
+        fmt = frag.charFormat()
+        if fmt.isAnchor() and frag.position() <= cursor.position() < frag.position() + frag.length():
+          # Select this fragment
+          old_cursor = self.textCursor()
+          sel = QTextCursor(self.document())
+          sel.setPosition(frag.position())
+          sel.setPosition(frag.position() + frag.length(), QTextCursor.MoveMode.KeepAnchor)
+          self.setTextCursor(sel)
+          return old_cursor
+      it += 1
+    return None
+
   def contextMenuEvent(self, event):
     import popups
     has_selection = self.textCursor().hasSelection()
     anchor = self.anchorAt(event.pos())
     if anchor and anchor.startswith("nick:"):
       nick = anchor[5:]
-      # Determine parent section for additive mode
       wtype = getattr(self._parent_window, 'type', '')
       parent_section = {'channel': 'channel', 'server': 'status',
                         'query': 'query'}.get(wtype)
+      old_cursor = self._highlight_anchor_at(event.pos())
       popups.show_popup('nicklist', self._parent_window, event.globalPos(),
                         extra_vars={'nick': nick, '1': nick},
                         copy_action=has_selection,
                         parent_section=parent_section)
+      if old_cursor is not None:
+        self.setTextCursor(old_cursor)
     elif anchor and anchor.startswith('http'):
-      # Determine parent section for additive mode
       wtype = getattr(self._parent_window, 'type', '')
       parent_section = {'channel': 'channel', 'server': 'status',
                         'query': 'query'}.get(wtype)
+      old_cursor = self._highlight_anchor_at(event.pos())
       popups.show_popup('link', self._parent_window, event.globalPos(),
                         extra_vars={'link': anchor},
                         copy_action=has_selection,
                         parent_section=parent_section)
+      if old_cursor is not None:
+        self.setTextCursor(old_cursor)
     else:
       # Try window-type-specific popup
       wtype = getattr(self._parent_window, 'type', '')
@@ -732,6 +765,7 @@ class Window(QWidget):
     # --- layout: output on top, input on bottom ---
     self._vlayout = QVBoxLayout(self)
     self._vlayout.setContentsMargins(0, 0, 0, 0)
+    self._vlayout.setSpacing(0)
 
     self.output = ChatOutput(self)
     self.output.setReadOnly(True)
@@ -815,6 +849,7 @@ class Window(QWidget):
     """Auto-scroll when the scrollbar range grows and we were at the bottom."""
     if self._auto_scroll:
       self._programmatic_scroll = True
+      self.output.moveCursor(QTextCursor.MoveOperation.End)
       self.vs.setValue(new_max)
       self._programmatic_scroll = False
 
@@ -827,6 +862,7 @@ class Window(QWidget):
     """Scroll the output to the very bottom."""
     self._auto_scroll = True
     self._programmatic_scroll = True
+    self.output.moveCursor(QTextCursor.MoveOperation.End)
     self.vs.setValue(self.vs.maximum())
     self._programmatic_scroll = False
 
@@ -1060,6 +1096,8 @@ class Window(QWidget):
     """Set activity level if higher than current, and update tab/tree colors."""
     if self._is_active_window():
       return  # don't mark the window the user is looking at
+    if getattr(self, '_suppress_activity', False):
+      return
     if level <= self._activity:
       return  # don't downgrade
     self._activity = level
@@ -1443,9 +1481,16 @@ class NicksList(QListWidget):
     if item:
       import popups
       nick = item._nick
+      # Highlight the nick while context menu is shown
+      old_bg = item.background()
+      item.setBackground(QBrush(QColor('#4488cc')))
+      old_fg = item.foreground()
+      item.setForeground(QBrush(QColor('white')))
       popups.show_popup('nicklist', self.channelwindow, event.globalPos(),
                         extra_vars={'nick': nick, '1': nick},
                         parent_section='channel')
+      item.setBackground(old_bg)
+      item.setForeground(old_fg)
 
   def mouseDoubleClickEvent(self, event):
     """Double-click a nick to open a message window."""

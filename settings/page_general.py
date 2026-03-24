@@ -235,10 +235,6 @@ class InterfacePage(QWidget):
         self.window_mode.addItems(["Maximized", "Normal"])
         layout.addRow("Window mode:", self.window_mode)
 
-        self.view_mode = _ck(QComboBox(), 'view_mode')
-        self.view_mode.addItems(["Tabbed", "MDI"])
-        layout.addRow("View mode:", self.view_mode)
-
         self.navigation = _ck(QComboBox(), 'navigation')
         self.navigation.addItems(["Tabs", "Tree", "Both"])
         layout.addRow("Navigation:", self.navigation)
@@ -267,7 +263,6 @@ class InterfacePage(QWidget):
 
     def load_from_data(self, data):
         self._load_combo(self.window_mode, data.get('window_mode', 'maximized'))
-        self._load_combo(self.view_mode, data.get('view_mode', 'tabbed'))
         nav = data.get('navigation')
         if not nav:
             nav = 'both' if data.get('treeview', False) else 'tabs'
@@ -279,7 +274,6 @@ class InterfacePage(QWidget):
 
     def save_to_data(self, data):
         data['window_mode'] = self.window_mode.currentText().lower()
-        data['view_mode'] = self.view_mode.currentText().lower()
         data['navigation'] = self.navigation.currentText().lower()
         if 'treeview' in data:
             del data['treeview']

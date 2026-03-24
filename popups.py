@@ -259,12 +259,14 @@ def _expand_mirc_vars(command, variables, window):
 # Menu building
 # ---------------------------------------------------------------------------
 
-def _build_menu(entries, variables, window, parent=None):
+def _build_menu(entries, variables, window, parent=None, target_menu=None):
   """Build a QMenu from parsed popup entries.
 
+  If *target_menu* is given, items are added to it directly instead of
+  creating a new QMenu.
   Returns the QMenu and an action->command mapping dict.
   """
-  menu = QMenu(parent or window)
+  menu = target_menu or QMenu(parent or window)
   action_map = {}
   i = 0
 
@@ -346,14 +348,13 @@ def show_popup(section, window, pos, extra_vars=None, copy_action=False,
 
   menu, action_map = _build_menu(entries, variables, window, window)
 
-  # Additive mode: append parent section entries below
+  # Additive mode: append parent section entries directly into our menu
   if parent_section and get_mode(section) == 'additive':
     parent_entries = _popups.get(parent_section)
     if parent_entries:
       _add_menu_separator(menu)
-      parent_menu, parent_map = _build_menu(parent_entries, variables, window, menu)
-      for act in parent_menu.actions():
-        menu.addAction(act)
+      _, parent_map = _build_menu(parent_entries, variables, window,
+                                  parent=menu, target_menu=menu)
       action_map.update(parent_map)
 
   # Add Copy action at the top when text is selected

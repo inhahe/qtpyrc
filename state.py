@@ -54,6 +54,9 @@ noticeformat = None
 notifications = None
 tray_icon = None
 
+# DCC manager (set at startup by qtpyrc.py)
+dcc_manager = None
+
 # Global list tracking open color-picker dialogs (so we can close them)
 _colorcodewindow = []
 
