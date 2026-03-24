@@ -43,11 +43,17 @@ class GeneralPage(QWidget):
         self.close_on_disconnect = _ck(QCheckBox(), 'close_on_disconnect')
         layout.addRow("Close on disconnect:", self.close_on_disconnect)
 
-        self.show_mode_prefix = _ck(QCheckBox(), 'show_mode_prefix')
-        layout.addRow("Mode prefixes:", self.show_mode_prefix)
+        self.show_mode_prefix_nicklist = _ck(QCheckBox(), 'show_mode_prefix_nicklist')
+        layout.addRow("Mode prefixes (nick list):", self.show_mode_prefix_nicklist)
+
+        self.show_mode_prefix_messages = _ck(QCheckBox(), 'show_mode_prefix_messages')
+        layout.addRow("Mode prefixes (messages):", self.show_mode_prefix_messages)
 
         self.auto_copy_selection = _ck(QCheckBox(), 'auto_copy_selection')
         layout.addRow("Auto-copy selection:", self.auto_copy_selection)
+
+        self.whois_on_query = _ck(QCheckBox(), 'whois_on_query')
+        layout.addRow("Whois on new query:", self.whois_on_query)
 
         self.tab_complete_age = _ck(QSpinBox(), 'tab_complete_age')
         self.tab_complete_age.setRange(0, 86400)
@@ -119,8 +125,16 @@ class GeneralPage(QWidget):
         self.timestamp_display.setText(str(ts.get('display', 'HH:mm')))
         self.close_on_kick.setChecked(bool(data.get('close_on_kick', False)))
         self.close_on_disconnect.setChecked(bool(data.get('close_on_disconnect', False)))
-        self.show_mode_prefix.setChecked(bool(data.get('show_mode_prefix', False)))
+        # Legacy migration: old single bool -> two new bools
+        if 'show_mode_prefix' in data and 'show_mode_prefix_nicklist' not in data:
+            val = bool(data.get('show_mode_prefix', False))
+            self.show_mode_prefix_nicklist.setChecked(val)
+            self.show_mode_prefix_messages.setChecked(val)
+        else:
+            self.show_mode_prefix_nicklist.setChecked(bool(data.get('show_mode_prefix_nicklist', True)))
+            self.show_mode_prefix_messages.setChecked(bool(data.get('show_mode_prefix_messages', True)))
         self.auto_copy_selection.setChecked(bool(data.get('auto_copy_selection', False)))
+        self.whois_on_query.setChecked(bool(data.get('whois_on_query', False)))
         self.tab_complete_age.setValue(int(data.get('tab_complete_age', 0) or 0))
         self.auto_connect.setChecked(bool(data.get('auto_connect', True)))
         self.persist_autojoins.setChecked(bool(data.get('persist_autojoins', False)))
@@ -162,8 +176,11 @@ class GeneralPage(QWidget):
         ts['display'] = self.timestamp_display.text()
         data['close_on_kick'] = self.close_on_kick.isChecked()
         data['close_on_disconnect'] = self.close_on_disconnect.isChecked()
-        data['show_mode_prefix'] = self.show_mode_prefix.isChecked()
+        data.pop('show_mode_prefix', None)  # remove legacy key
+        data['show_mode_prefix_nicklist'] = self.show_mode_prefix_nicklist.isChecked()
+        data['show_mode_prefix_messages'] = self.show_mode_prefix_messages.isChecked()
         data['auto_copy_selection'] = self.auto_copy_selection.isChecked()
+        data['whois_on_query'] = self.whois_on_query.isChecked()
         tca = self.tab_complete_age.value()
         if tca > 0:
             data['tab_complete_age'] = tca

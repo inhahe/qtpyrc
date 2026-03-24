@@ -866,6 +866,7 @@ class SettingsDialog(QDialog):
                     old_cfg.nicklist_font_family, old_cfg.nicklist_font_size)
         old_nav = (old_cfg.show_tabs, old_cfg.show_tree)
         old_toolbar = old_cfg.show_toolbar
+        old_prefix_nicklist = old_cfg.show_mode_prefix_nicklist
         old_stylesheet = _build_app_stylesheet()
 
         self.config._data = data
@@ -899,6 +900,17 @@ class SettingsDialog(QDialog):
             ws._load_colors()
             for entry in ws._tabs:
                 ws._style_tab(entry)
+
+        if self.config.show_mode_prefix_nicklist != old_prefix_nicklist:
+            for client in state.clients:
+                for chan in client.channels.values():
+                    if chan.window and hasattr(chan.window, 'nicklist'):
+                        nl = chan.window.nicklist
+                        for i in range(nl.count()):
+                            item = nl.item(i)
+                            if hasattr(item, '_update_display'):
+                                item._update_display()
+                        nl.sortItems()
 
         if self.config.show_toolbar != old_toolbar:
             from toolbar import reload_toolbar

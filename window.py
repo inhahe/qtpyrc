@@ -186,9 +186,20 @@ class ChatOutput(QTextEdit):
     self._parent_window = parent_window
     self.setMouseTracking(True)
 
+  def _refocus_input(self):
+    """Return focus to the parent window's input widget."""
+    pw = self._parent_window
+    if pw and hasattr(pw, 'input'):
+      pw.input.setFocus()
+
+  def focusInEvent(self, event):
+    """Never keep focus — always redirect to the input widget."""
+    super().focusInEvent(event)
+    self._refocus_input()
+
   def mouseMoveEvent(self, event):
     anchor = self.anchorAt(event.pos())
-    if anchor and anchor.startswith('http'):
+    if anchor and (anchor.startswith('http') or anchor.startswith('nick:')):
       self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
     else:
       self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
@@ -211,6 +222,16 @@ class ChatOutput(QTextEdit):
           from PySide6.QtGui import QDesktopServices
           from PySide6.QtCore import QUrl
           QDesktopServices.openUrl(QUrl(anchor))
+
+  def mouseDoubleClickEvent(self, event):
+    anchor = self.anchorAt(event.pos())
+    if anchor and anchor.startswith("nick:"):
+      nick = anchor[5:]
+      client = getattr(self._parent_window, 'client', None)
+      if client:
+        _open_query(client, nick)
+        return
+    super().mouseDoubleClickEvent(event)
 
   def contextMenuEvent(self, event):
     import popups
@@ -426,110 +447,6 @@ class SearchBar(QWidget):
     super().keyPressEvent(event)
 
 
-class _HistoryPopup(QListWidget):
-  """Popup list showing input history, appears above the input field."""
-
-  picked = Signal(str)
-
-  def __init__(self, parent=None):
-    super().__init__(parent)
-    self.setWindowFlags(Qt.WindowType.Popup)
-    self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-    self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    self.setMaximumHeight(200)
-    self._last_key = ''
-    self._last_key_row = -1
-    self.itemActivated.connect(self._on_activated)
-    self.itemClicked.connect(self._on_activated)
-
-  def populate(self, history):
-    self.clear()
-    # Show most recent at the bottom (reverse order so bottom = newest)
-    for text in history:
-      item = QListWidgetItem(text.replace('\n', ' '))
-      item.setData(Qt.ItemDataRole.UserRole, text)
-      self.addItem(item)
-    if self.count():
-      self.setCurrentRow(self.count() - 1)
-      self.scrollToBottom()
-
-  def select_prev(self):
-    row = self.currentRow()
-    if row > 0:
-      self.setCurrentRow(row - 1)
-      self._preview()
-
-  def select_next(self):
-    row = self.currentRow()
-    if row < self.count() - 1:
-      self.setCurrentRow(row + 1)
-      self._preview()
-
-  def _preview(self):
-    item = self.currentItem()
-    if item:
-      self.picked.emit(item.data(Qt.ItemDataRole.UserRole))
-
-  def _on_activated(self, item):
-    self.picked.emit(item.data(Qt.ItemDataRole.UserRole))
-    self.hide()
-
-  def keyPressEvent(self, event):
-    key = event.key()
-    if key == Qt.Key.Key_Return:
-      item = self.currentItem()
-      if item:
-        self._on_activated(item)
-      return
-    if key == Qt.Key.Key_Escape:
-      self.hide()
-      return
-    if key == Qt.Key.Key_Up:
-      self.select_prev()
-      return
-    if key == Qt.Key.Key_Down:
-      self.select_next()
-      return
-    if key == Qt.Key.Key_Home:
-      self.setCurrentRow(0)
-      self._preview()
-      return
-    if key == Qt.Key.Key_End:
-      self.setCurrentRow(self.count() - 1)
-      self._preview()
-      return
-    if key == Qt.Key.Key_PageUp:
-      row = max(0, self.currentRow() - 10)
-      self.setCurrentRow(row)
-      self._preview()
-      return
-    if key == Qt.Key.Key_PageDown:
-      row = min(self.count() - 1, self.currentRow() + 10)
-      self.setCurrentRow(row)
-      self._preview()
-      return
-    # Printable key — jump to next entry starting with that character
-    ch = event.text()
-    if ch and ch.isprintable():
-      ch_lower = ch.lower()
-      if ch_lower == self._last_key:
-        start = self._last_key_row + 1
-      else:
-        start = 0
-        self._last_key = ch_lower
-      # Search from start, wrapping around
-      for i in range(self.count()):
-        row = (start + i) % self.count()
-        item = self.item(row)
-        text = (item.data(Qt.ItemDataRole.UserRole) or '').lower()
-        if text.startswith(ch_lower):
-          self.setCurrentRow(row)
-          self._last_key_row = row
-          self._preview()
-          return
-    super().keyPressEvent(event)
-
-
 class Window(QWidget):
 
   def lineinput(self, text):
@@ -558,23 +475,37 @@ class Window(QWidget):
         from commands import docommand
         docommand(self, "say", line)
 
-  def _show_history_popup(self):
-    """Show the input history popup above the input field."""
+  def _history_up(self):
+    """Navigate to the previous (older) input history entry."""
     if not self.inputhistory:
       return
-    if not self._history_popup:
-      self._history_popup = _HistoryPopup()
-      self._history_popup.picked.connect(self._pick_history)
-    self._history_popup.populate(self.inputhistory)
-    # Position above the input field
-    pos = self.input.mapToGlobal(self.input.rect().topLeft())
-    w = self.input.width()
-    self._history_popup.setFixedWidth(w)
-    h = min(200, self._history_popup.sizeHintForRow(0) * min(self._history_popup.count(), 10) + 4)
-    self._history_popup.setFixedHeight(h)
-    self._history_popup.move(pos.x(), pos.y() - h)
-    self._history_popup.show()
-    self._history_popup.setFocus()
+    if self._history_index == -1:
+      # Save current input before browsing
+      self._history_saved = self.input.toPlainText()
+      self._history_index = len(self.inputhistory) - 1
+    elif self._history_index > 0:
+      self._history_index -= 1
+    else:
+      return
+    self.input.setPlainText(self.inputhistory[self._history_index])
+    c = self.input.textCursor()
+    c.movePosition(c.MoveOperation.End)
+    self.input.setTextCursor(c)
+
+  def _history_down(self):
+    """Navigate to the next (newer) input history entry."""
+    if self._history_index == -1:
+      return
+    if self._history_index < len(self.inputhistory) - 1:
+      self._history_index += 1
+      self.input.setPlainText(self.inputhistory[self._history_index])
+    else:
+      # Past the end — restore saved input
+      self._history_index = -1
+      self.input.setPlainText(self._history_saved)
+    c = self.input.textCursor()
+    c.movePosition(c.MoveOperation.End)
+    self.input.setTextCursor(c)
 
   def _pick_history(self, text):
     """Called when a history item is selected."""
@@ -663,13 +594,11 @@ class Window(QWidget):
     """Replace the prefix with the completed nick."""
     text = self.input.toPlainText()
     pos_end = self._comp_start + len(self._comp_prefix)
-    # Add ": " if at start of line, " " otherwise
-    suffix = ': ' if self._comp_start == 0 else ' '
-    new_text = text[:self._comp_start] + nick + suffix + text[pos_end:]
+    new_text = text[:self._comp_start] + nick + text[pos_end:]
     self.input.setPlainText(new_text)
     # Move cursor after the inserted text
     cursor = self.input.textCursor()
-    cursor.setPosition(self._comp_start + len(nick) + len(suffix))
+    cursor.setPosition(self._comp_start + len(nick))
     self.input.setTextCursor(cursor)
     self._close_comp_popup()
 
@@ -838,7 +767,6 @@ class Window(QWidget):
     self.inputhistory = list(state.ui_state.input_history) if state.ui_state else []
     self._history_index = -1
     self._history_saved = ''  # text in input before browsing history
-    self._history_popup = None
     # Nick tab-completion state
     self._comp_popup = None    # NickCompletionPopup instance
     self._comp_prefix = ''     # the text fragment being completed
@@ -962,9 +890,11 @@ class Window(QWidget):
     for part in parts:
       if isinstance(part, tuple):
         nick = part[0]
+        # Strip mode prefix from anchor href so popups get the clean nick
+        clean = nick.lstrip('~&@%+') if nick else nick
         anchor_fmt = QTextCharFormat(base)
         anchor_fmt.setAnchor(True)
-        anchor_fmt.setAnchorHref("nick:" + nick)
+        anchor_fmt.setAnchorHref("nick:" + clean)
         anchor_fmt.setFontUnderline(False)
         cur.insertText(nick, anchor_fmt)
       else:
@@ -1005,7 +935,9 @@ class Window(QWidget):
     # Insert nick as anchor
     anchor_fmt = QTextCharFormat(state.defaultformat)
     anchor_fmt.setAnchor(True)
-    anchor_fmt.setAnchorHref("nick:" + nick)
+    # Strip mode prefix from anchor href so popups get the clean nick
+    clean = nick.lstrip('~&@%+') if nick else nick
+    anchor_fmt.setAnchorHref("nick:" + clean)
     anchor_fmt.setFontUnderline(False)
     if nick_qcolor:
       anchor_fmt.setForeground(QBrush(nick_qcolor))
@@ -1178,12 +1110,17 @@ class Window(QWidget):
 
   def _show_color_picker(self):
     """Open the mIRC color picker dialog above the input field."""
-    cursor = self.input.textCursor()
-    cursor.insertText('\x03')
+    self._color_fg = None
+    self._color_bg = None
     colorwidget = QDialog(self)
-    colorwidget.setWindowTitle("Colors")
+    colorwidget.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
+    colorwidget.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
     colorgrid = QGridLayout()
     labelfont = QFont("Arial", 10)
+    hint = QLabel("Left-click: foreground (closes)  |  Right-click: background")
+    hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    hint.setStyleSheet("color: gray; font-size: 8pt;")
+    colorgrid.addWidget(hint, 0, 0, 1, 12)
     i = 0
     # First 16 colors: 2 rows x 8 cols
     for y in range(2):
@@ -1192,12 +1129,13 @@ class Window(QWidget):
         lbl.setFont(labelfont)
         lbl.setAutoFillBackground(True)
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         lbl.mousePressEvent = partial(self._color_clicked, str(i))
         bgcolor = irccolors[i]
         fgcolor = "black" if perceivedbrightness(*bgcolor) >= 50 else "white"
         lbl.setStyleSheet("QLabel { background-color: rgb%s; color: %s }" % (bgcolor, fgcolor))
         lbl.setText(str(i))
-        colorgrid.addWidget(lbl, y, x, 1, 1)
+        colorgrid.addWidget(lbl, y + 1, x, 1, 1)
         i += 1
     # Extended colors 16-98: 7 rows x 12 cols
     for y in range(7):
@@ -1207,12 +1145,13 @@ class Window(QWidget):
           lbl.setFont(labelfont)
           lbl.setAutoFillBackground(True)
           lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+          lbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
           lbl.mousePressEvent = partial(self._color_clicked, str(i))
           bgcolor = irccolors[i]
           fgcolor = "black" if perceivedbrightness(*bgcolor) >= 50 else "white"
           lbl.setStyleSheet("QLabel { background-color: rgb%s; color: %s }" % (bgcolor, fgcolor))
           lbl.setText(str(i))
-          colorgrid.addWidget(lbl, y + 2, x, 1, 1)
+          colorgrid.addWidget(lbl, y + 3, x, 1, 1)
         i += 1
     colorwidget.setLayout(colorgrid)
     colorwidget.raise_()
@@ -1226,15 +1165,39 @@ class Window(QWidget):
     self.input.activateWindow()
 
   def _color_clicked(self, numstr, event):
-    cursor = self.input.textCursor()
-    cursor.insertText(numstr)
+    if event.button() == Qt.MouseButton.RightButton:
+      # Background color: just remember it, keep picker open
+      self._color_bg = numstr
+    else:
+      # Foreground color: set it and close (commits the color code)
+      self._color_fg = numstr
+      self._close_color_picker()
     self.input.activateWindow()
     self.input.setFocus()
 
+  def _commit_color_code(self):
+    """Insert the accumulated color code into the input field."""
+    fg = self._color_fg
+    bg = self._color_bg
+    cursor = self.input.textCursor()
+    if fg is not None and bg is not None:
+      cursor.insertText('\x03%s,%s' % (fg, bg))
+    elif fg is not None:
+      cursor.insertText('\x03%s' % fg)
+    elif bg is not None:
+      # Background without foreground: use default fg (1 = black)
+      cursor.insertText('\x03%s,%s' % ('1', bg))
+    else:
+      # Nothing selected — insert bare Ctrl+K
+      cursor.insertText('\x03')
+
   def _close_color_picker(self):
     if state._colorcodewindow:
+      self._commit_color_code()
       state._colorcodewindow[0].close()
       state._colorcodewindow.pop()
+      self._color_fg = None
+      self._color_bg = None
 
   def _insert_format_char(self, ch):
     cursor = self.input.textCursor()
@@ -1263,6 +1226,14 @@ class Window(QWidget):
         self._search_open()
         return True
 
+      # Ctrl+Home / Ctrl+End — scroll chat output to top/bottom
+      if key == Qt.Key.Key_Home and (mods & Qt.KeyboardModifier.ControlModifier):
+        self.vs.setValue(self.vs.minimum())
+        return True
+      if key == Qt.Key.Key_End and (mods & Qt.KeyboardModifier.ControlModifier):
+        self.vs.setValue(self.vs.maximum())
+        return True
+
       # Escape — skip this tab and activate next
       if key == Qt.Key.Key_Escape:
         ws = state.app.mainwin.workspace
@@ -1272,31 +1243,24 @@ class Window(QWidget):
 
       # --- Input widget keys below ---
 
-      # Close color picker on non-digit/non-comma keys
-      if state._colorcodewindow and not (Qt.Key.Key_0 <= key <= Qt.Key.Key_9 or key == Qt.Key.Key_Comma):
+      # Close color picker on any keypress
+      if state._colorcodewindow:
         self._close_color_picker()
 
-      # Tab — nick completion
+      # Tab — nick completion (always consume to prevent tab insertion)
       if key == Qt.Key.Key_Tab and not mods:
-        if self._start_tab_completion():
-          return True
+        self._start_tab_completion()
+        return True
 
-      # Ctrl+Up — open/navigate input history popup
+      # Ctrl+Up/Down — navigate input history
       if key == Qt.Key.Key_Up and (mods & Qt.KeyboardModifier.ControlModifier):
-        if self.inputhistory:
-          if not self._history_popup or not self._history_popup.isVisible():
-            self._show_history_popup()
-          else:
-            self._history_popup.select_prev()
+        self._history_up()
         return True
       if key == Qt.Key.Key_Down and (mods & Qt.KeyboardModifier.ControlModifier):
-        if self._history_popup and self._history_popup.isVisible():
-          self._history_popup.select_next()
+        self._history_down()
         return True
 
       if key == Qt.Key.Key_Return:
-        if state._colorcodewindow:
-          self._close_color_picker()
         if state.config.multiline and (mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)):
           # Ctrl+Enter or Shift+Enter inserts a newline in multiline mode
           obj.textCursor().insertText('\n')
@@ -1505,7 +1469,7 @@ class NickItem(QListWidgetItem):
 
   def _mode_prefix(self):
     """Return the mode prefix symbol for this nick in its channel, or ''."""
-    if not state.config.show_mode_prefix or not self.user or not self._chnlower:
+    if not state.config.show_mode_prefix_nicklist or not self.user or not self._chnlower:
       return ''
     return self.user.prefix.get(self._chnlower, '')
 
@@ -1544,7 +1508,7 @@ class NickItem(QListWidgetItem):
     return (rank, self._nick.lower())
 
   def __lt__(self, other):
-    if state.config.show_mode_prefix:
+    if state.config.show_mode_prefix_nicklist:
       return self._prefix_sort_key() < other._prefix_sort_key()
     return self._nick.lower() < other._nick.lower()
 

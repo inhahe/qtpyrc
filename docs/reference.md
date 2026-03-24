@@ -73,6 +73,8 @@ Parameters that accept arbitrary text (messages, reasons, titles) must be quoted
 | `/query` | `/query <nick> ["message"]` | Open a query (PM) window, optionally sending a message |
 | `/say` | `/say <message>` | Send a message to the current channel or query |
 | `/amsg` | `/amsg <message>` | Send a message to all open channels on the current network |
+| `/me` | `/me <action>` | Send a CTCP ACTION (/me) to the current channel or query |
+| `/notice` | `/notice <target> <message>` | Send a NOTICE to a user or channel |
 | `/ctcp` | `/ctcp <nick> <type> [data]` | Send a CTCP query (PING, VERSION, TIME, etc.) |
 | `/invite` | `/invite <nick> [#channel]` | Invite a user to a channel (defaults to current) |
 | `/raw` | `/raw <line>` | Send a raw IRC command to the server |

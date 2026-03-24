@@ -117,13 +117,19 @@ close_on_kick: false
 # If false, windows stay open and are marked inactive.
 close_on_disconnect: false
 
-# Show mode prefixes (@, +, %, etc.) before nicks in messages, events,
-# and the nick list.
-show_mode_prefix: false
+# Show mode prefixes (@, +, %, etc.) before nicks in the nick list.
+show_mode_prefix_nicklist: true
+
+# Show mode prefixes (@, +, %, etc.) before nicks in messages and events.
+show_mode_prefix_messages: true
 
 # Auto-copy text to clipboard when mouse selection is released (mIRC-style).
 # Selection is cleared after copying.  Default: false.
 auto_copy_selection: false
+
+# Automatically /whois a user when they open a new query (private message)
+# with you. The whois results are shown in the query window.
+whois_on_query: false
 
 # Assign random colors to nicks in channel messages.
 # Each nick always gets the same color (based on hash).
