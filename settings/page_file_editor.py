@@ -6,9 +6,9 @@ import subprocess
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPlainTextEdit, QLabel,
-    QPushButton, QComboBox, QFileDialog, QMessageBox, QInputDialog,
+    QPushButton, QComboBox, QFileDialog, QMessageBox,
 )
-from PySide6.QtGui import QFont, QKeySequence, QShortcut
+from PySide6.QtGui import QFont
 from PySide6.QtCore import QFileSystemWatcher
 
 import state
@@ -240,7 +240,6 @@ class FileEditorPage(QWidget):
         self._quick_files = {}
         self._config_dir = ''
         self._loading = False
-        self._dirty = False
         self._watcher = QFileSystemWatcher(self)
         self._watcher.fileChanged.connect(self._on_file_changed)
 
@@ -279,11 +278,6 @@ class FileEditorPage(QWidget):
         self._btn_browse.setToolTip("Open any file")
         self._btn_browse.clicked.connect(self._browse)
         top_bar.addWidget(self._btn_browse)
-
-        self._btn_init = QPushButton("Init Directory...")
-        self._btn_init.setToolTip("Create all default config files in a directory")
-        self._btn_init.clicked.connect(self._init_directory)
-        top_bar.addWidget(self._btn_init)
 
         self._quick_buttons = {
             'config': self._btn_config,
@@ -332,35 +326,14 @@ class FileEditorPage(QWidget):
         self.editor.textChanged.connect(self._on_text_changed)
         layout.addWidget(self.editor, 1)
 
-        # --- search bar ---
-        from window import SearchBar
-        self._search_bar = SearchBar(self.editor, on_close_focus=self.editor,
-                                     set_cursor=True, parent=self)
-        self._search_bar.setVisible(False)
-        layout.addWidget(self._search_bar, 0)
-
-        QShortcut(QKeySequence("Ctrl+F"), self, self._search_bar.open_bar)
-
-        # --- bottom bar: restore defaults + save + reload ---
+        # --- bottom bar: save + reload ---
         bottom_bar = QHBoxLayout()
-
-        self._btn_restore = QPushButton("Restore Defaults")
-        self._btn_restore.setToolTip("Replace file contents with the default template")
-        self._btn_restore.clicked.connect(self._restore_defaults)
-        self._btn_restore.setEnabled(False)
-        bottom_bar.addWidget(self._btn_restore)
-
         bottom_bar.addStretch(1)
 
         self._btn_save = QPushButton("Save")
         self._btn_save.setToolTip("Save the file")
         self._btn_save.clicked.connect(self._save)
         bottom_bar.addWidget(self._btn_save)
-
-        self._btn_apply = QPushButton("Apply")
-        self._btn_apply.setToolTip("Apply changes without saving to disk")
-        self._btn_apply.clicked.connect(self._apply_only)
-        bottom_bar.addWidget(self._btn_apply)
 
         self._btn_reload = QPushButton("Save && Apply")
         self._btn_reload.setToolTip("Save the file and apply changes to the running application")
@@ -411,8 +384,8 @@ class FileEditorPage(QWidget):
         """Browse for a custom editor executable."""
         path, _ = QFileDialog.getOpenFileName(
             self, "Select Editor Executable", "",
-            "All Files (*.*)" if sys.platform != 'win32'
-            else "Executables (*.exe);;All Files (*.*)")
+            "All Files (*.* *)" if sys.platform != 'win32'
+            else "Executables (*.exe);;All Files (*.* *)")
         if not path:
             # Revert to previous selection if cancelled
             current = getattr(state.config, 'external_editor', '') if state.config else ''
@@ -442,6 +415,19 @@ class FileEditorPage(QWidget):
         'toolbar':   ('toolbar.ini',   None,           'toolbar_file'),
         'variables': ('variables.ini', None,           'variables_file'),
     }
+    # Initial content for newly created files
+    _QUICK_TEMPLATES = {
+        'startup':   '; qtpyrc startup commands\n'
+                     '; Each line is a /command or text. Lines starting with ; are comments.\n',
+        'popups':    '; Popup menus (mIRC-compatible format)\n'
+                     '; See docs/reference.md for syntax.\n\n'
+                     '[nicklist]\n\n[channel]\n\n[status]\n\n[query]\n',
+        'toolbar':   '; Toolbar buttons\n'
+                     '; Format: icon_name | Tooltip | /command\n'
+                     '; Use - for separator, --- for line break.\n',
+        'variables': '; Persistent user variables (/set)\n'
+                     '; Format: name = value\n',
+    }
 
     def setup(self, config_dir, config_path, startup_path='',
               popups_path='', toolbar_path='', variables_path=''):
@@ -455,49 +441,16 @@ class FileEditorPage(QWidget):
             'variables': variables_path,
         }
 
-    def _current_quick_key(self):
-        """Return the quick-access key for the currently loaded file, or None."""
-        if not self._path:
-            return None
-        norm = os.path.normcase(os.path.abspath(self._path))
-        for key, qpath in self._quick_files.items():
-            if qpath and os.path.normcase(os.path.abspath(qpath)) == norm:
-                return key
-        return None
-
     def _update_quick_highlight(self):
         """Highlight the quick-access button for the currently loaded file."""
-        current_key = self._current_quick_key()
         for key, btn in self._quick_buttons.items():
-            if key == current_key:
+            qpath = self._quick_files.get(key, '')
+            if (qpath and self._path
+                    and os.path.normcase(os.path.abspath(qpath))
+                    == os.path.normcase(os.path.abspath(self._path))):
                 btn.setStyleSheet("font-weight: bold;")
             else:
                 btn.setStyleSheet("")
-        # Enable restore button for files that have a default template (not config)
-        if current_key and current_key != 'config':
-            from qtpyrc import _DEFAULT_TEMPLATES
-            self._btn_restore.setEnabled(current_key in _DEFAULT_TEMPLATES)
-        else:
-            self._btn_restore.setEnabled(False)
-
-    def _check_unsaved(self):
-        """If there are unsaved changes, ask the user what to do.
-        Returns True if it's OK to proceed, False to cancel."""
-        if not self._dirty:
-            return True
-        reply = QMessageBox.question(
-            self, "Unsaved Changes",
-            "The current file has unsaved changes.\n\n"
-            "Do you want to save before continuing?",
-            QMessageBox.StandardButton.Save
-            | QMessageBox.StandardButton.Discard
-            | QMessageBox.StandardButton.Cancel)
-        if reply == QMessageBox.StandardButton.Save:
-            return self._save_to_disk()
-        if reply == QMessageBox.StandardButton.Discard:
-            self._dirty = False
-            return True
-        return False  # Cancel
 
     def _load(self, path):
         """Load a file into the editor."""
@@ -523,7 +476,6 @@ class FileEditorPage(QWidget):
         else:
             self.editor.setPlainText('')
         self._loading = False
-        self._dirty = False
 
     def _on_file_changed(self, path):
         """Called when the currently loaded file is modified externally."""
@@ -532,15 +484,6 @@ class FileEditorPage(QWidget):
         # Some editors delete+recreate; re-add to watcher if the file still exists
         if os.path.isfile(path) and path not in self._watcher.files():
             self._watcher.addPath(path)
-        # Use a queued call so the file watcher signal finishes before
-        # we show a modal dialog (avoids losing window activation)
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(0, lambda p=path: self._prompt_file_changed(p))
-
-    def _prompt_file_changed(self, path):
-        """Show dialog for externally modified file."""
-        if path != self._path:
-            return
         msg = QMessageBox(self)
         msg.setWindowTitle("File Changed")
         msg.setText("The file has been modified outside the editor:\n%s"
@@ -560,7 +503,7 @@ class FileEditorPage(QWidget):
                 n += 1
             backup, _ = QFileDialog.getSaveFileName(
                 self, "Save current content as", default_backup,
-                "All Files (*.*)")
+                "All Files (*.* *)")
             if backup:
                 try:
                     with open(backup, 'w', encoding='utf-8') as f:
@@ -571,18 +514,12 @@ class FileEditorPage(QWidget):
                     return
             else:
                 return  # cancelled save-as, don't reload
-        if clicked == btn_keep:
-            # Content differs from disk now
-            self._dirty = True
-            self._path_label.setText(os.path.abspath(path) + "  (unsaved)")
-            return
         if clicked == btn_reload or clicked == btn_save_as:
             self._loading = True
             try:
                 with open(path, 'r', encoding='utf-8') as f:
                     self.editor.setPlainText(f.read())
                 self._path_label.setText(os.path.abspath(path))
-                self._dirty = False
             except Exception as e:
                 QMessageBox.warning(self, "Error",
                                     "Could not reload file:\n%s" % e)
@@ -610,8 +547,6 @@ class FileEditorPage(QWidget):
             path = self._prompt_create(key)
             if not path:
                 return
-        if not self._check_unsaved():
-            return
         if self._try_external(path):
             return
         self._load(path)
@@ -673,8 +608,7 @@ class FileEditorPage(QWidget):
             d = os.path.dirname(path)
             if d and not os.path.isdir(d):
                 os.makedirs(d, exist_ok=True)
-            from qtpyrc import _DEFAULT_TEMPLATES, _resolve_template
-            template = _resolve_template(key) if key in _DEFAULT_TEMPLATES else ''
+            template = self._QUICK_TEMPLATES.get(key, '')
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(template)
 
@@ -710,98 +644,11 @@ class FileEditorPage(QWidget):
         start_dir = self._config_dir or '.'
         path, _ = QFileDialog.getOpenFileName(
             self, "Open File", start_dir,
-            "All Files (*.*);;Config Files (*.yaml *.yml *.ini *.rc *.txt);;YAML (*.yaml *.yml);;INI (*.ini);;Scripts (*.rc *.txt);;Python (*.py)")
+            "All Files (*.* *);;Config Files (*.yaml *.yml *.ini *.rc *.txt);;YAML (*.yaml *.yml);;INI (*.ini);;Scripts (*.rc *.txt);;Python (*.py)")
         if path:
-            if not self._check_unsaved():
-                return
             if self._try_external(path):
                 return
             self._load(path)
-
-    def _init_directory(self):
-        """Create all default config files in a user-chosen directory."""
-        from qtpyrc import _DEFAULT_ANCILLARY, _DEFAULT_TEMPLATES, init_default_files
-        start_dir = self._config_dir or '.'
-        directory = QFileDialog.getExistingDirectory(
-            self, "Select directory for default config files", start_dir)
-        if not directory:
-            return
-
-        # Check if config.yaml already exists — offer to rename
-        config_name = 'config.yaml'
-        config_path = os.path.join(directory, config_name)
-        if os.path.isfile(config_path):
-            config_name, ok = QInputDialog.getText(
-                self, "Config file exists",
-                "config.yaml already exists in this directory.\n"
-                "Enter an alternative filename, or cancel to skip it:",
-                text='config_new.yaml')
-            if not ok or not config_name.strip():
-                config_name = None  # skip config creation
-            else:
-                config_name = config_name.strip()
-                if not config_name.endswith(('.yaml', '.yml')):
-                    config_name += '.yaml'
-                if os.path.isfile(os.path.join(directory, config_name)):
-                    QMessageBox.warning(self, "Error",
-                                        "%s also already exists." % config_name)
-                    config_name = None
-
-        # Check each ancillary file for conflicts — prompt per file
-        overwrite = set()
-        cancelled = False
-        for name, is_dir in _DEFAULT_ANCILLARY:
-            if is_dir:
-                continue
-            stem = os.path.splitext(name)[0]
-            if stem not in _DEFAULT_TEMPLATES:
-                continue
-            path = os.path.join(directory, name)
-            if os.path.isfile(path):
-                reply = QMessageBox.question(
-                    self, "File exists",
-                    "%s already exists.\n\nOverwrite with defaults?" % name,
-                    QMessageBox.StandardButton.Yes
-                    | QMessageBox.StandardButton.No
-                    | QMessageBox.StandardButton.Cancel)
-                if reply == QMessageBox.StandardButton.Cancel:
-                    cancelled = True
-                    break
-                if reply == QMessageBox.StandardButton.Yes:
-                    overwrite.add(name)
-
-        if cancelled:
-            return
-
-        try:
-            # If config_name is None, pass 'config.yaml' — it already exists
-            # so init_default_files will skip it automatically
-            created, skipped, overwritten = init_default_files(
-                directory,
-                config_name=config_name or 'config.yaml',
-                overwrite=overwrite)
-        except OSError as e:
-            QMessageBox.warning(self, "Error",
-                                "Could not create files:\n%s" % e)
-            return
-
-        # Build report
-        lines = []
-        if created:
-            lines.append("Created:")
-            for name, kind in created:
-                lines.append("  %s" % name)
-        if overwritten:
-            lines.append("Overwritten:")
-            for name, kind in overwritten:
-                lines.append("  %s" % name)
-        if skipped:
-            lines.append("Skipped:")
-            for name, reason in skipped:
-                lines.append("  %s" % name)
-        if not lines:
-            lines.append("Nothing to do — all files already exist.")
-        QMessageBox.information(self, "Init Directory", '\n'.join(lines))
 
     def _try_external(self, path):
         """If an external editor is configured, open the file in it.
@@ -833,24 +680,6 @@ class FileEditorPage(QWidget):
             return False
         return True
 
-    def _restore_defaults(self):
-        """Replace the editor contents with the default template."""
-        key = self._current_quick_key()
-        if not key:
-            return
-        from qtpyrc import _resolve_template
-        template = _resolve_template(key)
-        if not template:
-            return
-        reply = QMessageBox.question(
-            self, "Restore Defaults",
-            "Replace the current contents with the default %s template?\n\n"
-            "This will not save automatically — you can review the changes first."
-            % key,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.Yes:
-            self.editor.setPlainText(template)
-
     def _save_to_disk(self):
         """Write editor contents to disk."""
         if not self._path:
@@ -876,52 +705,12 @@ class FileEditorPage(QWidget):
     def _on_text_changed(self):
         """Update the path label when the user edits the file."""
         if self._path and not self._loading:
-            self._dirty = True
             self._path_label.setText(os.path.abspath(self._path) + "  (unsaved)")
 
     def _save(self):
         """Save button handler."""
         if self._save_to_disk():
-            self._dirty = False
             self._path_label.setText(self._path + "  (saved)")
-
-    def _apply_from_text(self):
-        """Apply the editor's current text to the running application.
-        Returns True if something was applied."""
-        key = self._current_quick_key()
-        text = self.editor.toPlainText()
-
-        if key == 'config':
-            self._apply_config_text(text)
-            return True
-        elif key == 'popups':
-            import popups
-            popups._popups = popups._load_sections_text(text)
-            return True
-        elif key == 'toolbar':
-            from toolbar import _parse_toolbar, reload_toolbar_from_entries
-            entries = _parse_toolbar(text)
-            reload_toolbar_from_entries(entries)
-            return True
-        elif key == 'variables':
-            state.load_variables_text(text)
-            return True
-        elif key == 'startup':
-            self._rerun_startup()
-            return True
-
-        # Unknown file type — try by extension
-        path_lower = self._path.replace('\\', '/').lower() if self._path else ''
-        if path_lower.endswith('.yaml') or path_lower.endswith('.yml'):
-            self._apply_config_text(text)
-            return True
-        return False
-
-    def _apply_only(self):
-        """Apply changes without saving to disk."""
-        if self._apply_from_text():
-            self._path_label.setText(
-                os.path.abspath(self._path) + "  (applied, not saved)")
 
     def _save_and_reload(self):
         """Save the file and reload/re-run it in the application."""
@@ -958,7 +747,6 @@ class FileEditorPage(QWidget):
             if path_lower.endswith('.yaml') or path_lower.endswith('.yml'):
                 self._reload_config()
 
-        self._dirty = False
         self._path_label.setText(self._path + "  (saved & applied)")
 
     def _reload_config(self):
@@ -970,16 +758,6 @@ class FileEditorPage(QWidget):
         except Exception as e:
             QMessageBox.warning(self, "Reload Error",
                                 "Could not reload config:\n%s" % e)
-
-    def _apply_config_text(self, text):
-        """Apply config from editor text without saving to disk."""
-        from config import loadconfig_text
-        try:
-            cfg = loadconfig_text(text, state.config.path)
-            state.config = cfg
-        except Exception as e:
-            QMessageBox.warning(self, "Apply Error",
-                                "Could not apply config:\n%s" % e)
 
     def _rerun_startup(self):
         """Re-run the startup script."""

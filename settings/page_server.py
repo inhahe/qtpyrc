@@ -1,9 +1,7 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QSpinBox,
-    QCheckBox, QPushButton, QListWidget, QGroupBox, QMenu,
+    QCheckBox, QPushButton, QListWidget, QGroupBox,
 )
-from PySide6.QtCore import Qt
-from settings.page_general import _ck
 
 
 class ServerPage(QWidget):
@@ -17,14 +15,15 @@ class ServerPage(QWidget):
         list_layout = QHBoxLayout()
         self._server_list = QListWidget()
         self._server_list.currentRowChanged.connect(self._on_row_changed)
-        self._server_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._server_list.customContextMenuRequested.connect(self._server_context_menu)
         list_layout.addWidget(self._server_list, 1)
 
         btn_layout = QVBoxLayout()
         self._add_btn = QPushButton("Add")
         self._add_btn.clicked.connect(self._add_server)
         btn_layout.addWidget(self._add_btn)
+        self._remove_btn = QPushButton("Remove")
+        self._remove_btn.clicked.connect(self._remove_server)
+        btn_layout.addWidget(self._remove_btn)
         self._up_btn = QPushButton("Up")
         self._up_btn.clicked.connect(self._move_up)
         btn_layout.addWidget(self._up_btn)
@@ -38,26 +37,23 @@ class ServerPage(QWidget):
         # Edit form for selected server
         self._edit_group = QGroupBox("Server details")
         form = QFormLayout(self._edit_group)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-        self.host = _ck(QLineEdit(), 'server.host')
-        self.host.setMinimumWidth(200)
+        self.host = QLineEdit()
         form.addRow("Host:", self.host)
-        self.port = _ck(QSpinBox(), 'server.port')
+        self.port = QSpinBox()
         self.port.setRange(1, 65535)
         self.port.setValue(6667)
         form.addRow("Port:", self.port)
-        self.tls = _ck(QCheckBox(), 'server.tls')
+        self.tls = QCheckBox()
         form.addRow("Use TLS:", self.tls)
-        self.tls_verify = _ck(QCheckBox(), 'server.tls_verify')
+        self.tls_verify = QCheckBox()
         self.tls_verify.setChecked(True)
-        self.tls_verify.setEnabled(False)
         form.addRow("Verify TLS certificate:", self.tls_verify)
         layout.addWidget(self._edit_group)
 
         # Connect edits to update the backing data
         self.host.textChanged.connect(self._update_current)
         self.port.valueChanged.connect(self._update_current)
-        self.tls.toggled.connect(self._on_tls_toggled)
+        self.tls.toggled.connect(self._update_current)
         self.tls_verify.toggled.connect(self._update_current)
 
         self._servers = []  # list of dicts
@@ -76,10 +72,10 @@ class ServerPage(QWidget):
         self._server_list.clear()
         for srv in self._servers:
             self._server_list.addItem(self._label_for(srv))
-        if self._servers:
-            new_row = min(row, len(self._servers) - 1) if row >= 0 else 0
-            self._server_list.setCurrentRow(new_row)
-            self._server_list.scrollToItem(self._server_list.item(new_row))
+        if row >= 0 and row < len(self._servers):
+            self._server_list.setCurrentRow(row)
+        elif self._servers:
+            self._server_list.setCurrentRow(0)
         self._server_list.blockSignals(False)
 
     def _on_row_changed(self, row):
@@ -92,27 +88,9 @@ class ServerPage(QWidget):
         self._updating = True
         self.host.setText(str(srv.get('host', '')))
         self.port.setValue(int(srv.get('port', 6667)))
-        tls_on = bool(srv.get('tls', False))
-        self.tls.setChecked(tls_on)
-        self.tls_verify.setEnabled(tls_on)
-        self.tls_verify.setChecked(bool(srv.get('tls_verify', True)) if tls_on else False)
+        self.tls.setChecked(bool(srv.get('tls', False)))
+        self.tls_verify.setChecked(bool(srv.get('tls_verify', True)))
         self._updating = False
-
-    def _on_tls_toggled(self, checked):
-        self.tls_verify.setEnabled(checked)
-        self.tls_verify.blockSignals(True)
-        if checked:
-            # Restore the saved value from data
-            row = self._current_row
-            if 0 <= row < len(self._servers):
-                self.tls_verify.setChecked(
-                    bool(self._servers[row].get('tls_verify', True)))
-            else:
-                self.tls_verify.setChecked(True)
-        else:
-            self.tls_verify.setChecked(False)
-        self.tls_verify.blockSignals(False)
-        self._update_current()
 
     def _update_current(self):
         if self._updating:
@@ -124,11 +102,7 @@ class ServerPage(QWidget):
         srv['host'] = self.host.text()
         srv['port'] = self.port.value()
         srv['tls'] = self.tls.isChecked()
-        # Only update tls_verify when TLS is enabled — preserve the saved
-        # value when TLS is off (the checkbox is visually unchecked but the
-        # user's preference is kept for when they re-enable TLS)
-        if self.tls.isChecked():
-            srv['tls_verify'] = self.tls_verify.isChecked()
+        srv['tls_verify'] = self.tls_verify.isChecked()
         # Update list label
         item = self._server_list.item(row)
         if item:
@@ -140,26 +114,12 @@ class ServerPage(QWidget):
         self._refresh_list()
         self._server_list.setCurrentRow(len(self._servers) - 1)
 
-    def _remove_server(self, row=None):
-        if row is None:
-            row = self._server_list.currentRow()
+    def _remove_server(self):
+        row = self._server_list.currentRow()
         if row < 0 or row >= len(self._servers):
             return
         self._servers.pop(row)
         self._refresh_list()
-
-    def _server_context_menu(self, pos):
-        item = self._server_list.itemAt(pos)
-        if not item:
-            return
-        row = self._server_list.row(item)
-        menu = QMenu(self)
-        menu.addAction('Remove', lambda: self._remove_server(row))
-        if row > 0:
-            menu.addAction('Move Up', self._move_up)
-        if row < len(self._servers) - 1:
-            menu.addAction('Move Down', self._move_down)
-        menu.exec(self._server_list.viewport().mapToGlobal(pos))
 
     def _move_up(self):
         row = self._server_list.currentRow()
@@ -192,8 +152,6 @@ class ServerPage(QWidget):
         self._refresh_list()
         if self._servers:
             self._server_list.setCurrentRow(0)
-            # Force update — setCurrentRow(0) may not fire if already at 0
-            self._on_row_changed(0)
         else:
             self._edit_group.setEnabled(False)
 

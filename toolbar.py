@@ -4,8 +4,7 @@ import os
 
 from PySide6.QtWidgets import (QToolBar, QToolButton, QStyle, QInputDialog,
                                 QDialog, QVBoxLayout, QScrollArea, QWidget,
-                                QGridLayout, QLabel, QHBoxLayout, QSizePolicy,
-                                QApplication)
+                                QGridLayout, QLabel, QHBoxLayout, QSizePolicy)
 from PySide6.QtGui import QIcon, QAction, QFont
 from PySide6.QtCore import Qt, QSize, QRect, QPoint
 from PySide6.QtWidgets import QLayout
@@ -267,9 +266,7 @@ def _resolve_icon(icon_name):
   # Fall back to Qt standard pixmap
   sp = _QT_ICON_MAP.get(icon_name)
   if sp is not None:
-    app = QApplication.instance()
-    if app:
-      return app.style().standardIcon(sp)
+    return state.app.style().standardIcon(sp)
 
   return QIcon()
 
@@ -382,47 +379,15 @@ class _FlowToolbarWidget(QWidget):
       toolbar.setFixedHeight(h + 4)
 
 
-def _toolbar_slug(tooltip):
-  """Derive a registry key from a toolbar button tooltip."""
-  return ''.join(c for c in tooltip.lower() if c.isalnum())
-
-
-def register_toolbar_ui_paths():
-  """Register toolbar button paths in ui_registry from the toolbar file.
-
-  Called unconditionally at startup so /ui and --ui-list work even when
-  the toolbar is hidden.
-  """
-  # Clear previous entries
-  for key in [k for k in state.ui_registry if k.startswith('toolbar.')]:
-    del state.ui_registry[key]
-  for key in [k for k in state.ui_descriptions if k.startswith('toolbar.')]:
-    del state.ui_descriptions[key]
-  filepath = _resolve_toolbar_path()
-  entries = _load_toolbar_file(filepath) if filepath else []
-  slug_counts = {}
-  for entry in entries:
-    if entry[0] not in ('linebreak', 'separator'):
-      _, icon_name, tooltip, command = entry
-      slug = _toolbar_slug(tooltip)
-      if slug:
-        n = slug_counts.get(slug, 0) + 1
-        slug_counts[slug] = n
-        key = 'toolbar.' + (slug if n == 1 else '%s%d' % (slug, n))
-        state.ui_registry[key] = lambda cmd=command: _exec_toolbar_command(cmd)
-        state.ui_descriptions[key] = tooltip
-
-
-def build_toolbar(parent, entries=None):
-  """Build and return a QToolBar.  If *entries* is None, load from file."""
+def build_toolbar(parent):
+  """Build and return a QToolBar from the toolbar definition file."""
   toolbar = QToolBar("Main Toolbar", parent)
   icon_size = state.config.toolbar_icon_size if state.config else 20
   toolbar.setIconSize(QSize(icon_size, icon_size))
   toolbar.setMovable(False)
 
-  if entries is None:
-    filepath = _resolve_toolbar_path()
-    entries = _load_toolbar_file(filepath) if filepath else []
+  filepath = _resolve_toolbar_path()
+  entries = _load_toolbar_file(filepath) if filepath else []
 
   if not entries:
     toolbar.hide()
@@ -431,19 +396,6 @@ def build_toolbar(parent, entries=None):
   font = _toolbar_font()
   icon_sz = QSize(icon_size, icon_size)
   flow_widget = _FlowToolbarWidget(spacing=2)
-
-  # Compute hover/pressed colors from toolbar colors
-  cfg = state.config
-  fg = cfg.toolbar_fgcolor if cfg else QColor('#ffffff')
-  # Hover: semi-transparent foreground overlay
-  hover_bg = 'rgba(%d,%d,%d,40)' % (fg.red(), fg.green(), fg.blue())
-  pressed_bg = 'rgba(%d,%d,%d,80)' % (fg.red(), fg.green(), fg.blue())
-  btn_style = (
-      'QToolButton { border: none; padding: 2px; }'
-      'QToolButton:hover { background-color: %s; border-radius: 3px; }'
-      'QToolButton:pressed { background-color: %s; border-radius: 3px; }'
-      % (hover_bg, pressed_bg)
-  )
 
   for entry in entries:
     if entry[0] == 'linebreak':
@@ -461,17 +413,9 @@ def build_toolbar(parent, entries=None):
       btn.setAutoRaise(True)
       if has_icon:
         btn.setIcon(icon)
-        btn.setStyleSheet(btn_style)
       else:
         btn.setText(tooltip)
         btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        text_fg = cfg.toolbar_fgcolor.name() if cfg else '#ffffff'
-        btn.setStyleSheet(
-            'QToolButton { color: %s; border: none; padding: 2px; }'
-            'QToolButton:hover { background-color: %s; border-radius: 3px; }'
-            'QToolButton:pressed { background-color: %s; border-radius: 3px; }'
-            % (text_fg, hover_bg, pressed_bg)
-        )
       btn.clicked.connect(lambda checked, cmd=command: _exec_toolbar_command(cmd))
       flow_widget.add_button(btn)
 
@@ -490,30 +434,15 @@ def build_toolbar(parent, entries=None):
 
 def reload_toolbar():
   """Reload the toolbar from the definition file."""
-  register_toolbar_ui_paths()
-  _rebuild_toolbar()
-
-
-def reload_toolbar_from_entries(entries):
-  """Rebuild the toolbar from pre-parsed entries (for apply without save)."""
-  _rebuild_toolbar(entries)
-
-
-def _rebuild_toolbar(entries=None):
-  """Replace the toolbar widget.  If *entries* is None, load from file."""
   mainwin = state.app.mainwin
   if hasattr(mainwin, '_toolbar') and mainwin._toolbar:
     mainwin.removeToolBar(mainwin._toolbar)
     mainwin._toolbar.deleteLater()
   if state.config.show_toolbar:
-    mainwin._toolbar = build_toolbar(mainwin, entries=entries)
+    mainwin._toolbar = build_toolbar(mainwin)
     mainwin.addToolBar(mainwin._toolbar)
   else:
     mainwin._toolbar = None
-  # Refresh the Toolbar menu to match
-  if hasattr(mainwin, 'mnutoolbar'):
-    from qtpyrc import _populate_toolbar_menu
-    _populate_toolbar_menu()
 
 
 # ---------------------------------------------------------------------------

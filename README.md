@@ -1,85 +1,15 @@
-# qtpyrc
+I wrote this in 2009, and then lost the source for 6 years and then found it again. 
 
-A full-featured IRC client written in Python with PySide6. Written mostly with the help of Claude Code.
+It's an IRC client written in Python 2.x, using Twisted and PyQt (version 4 I think). I thought the existence of a free graphical (or even non-graphical) IRC client written in Python was sorely lacking out there. 
 
-It's a little sluggish, I guess because of PySide6, maybe partly Claude's fault, too.
+It's not really finished, it's very rudimentary. It doesn't even have configuration dialogs yet, for example. 
 
-I haven't tested all the features, so please submit an issue if something doesn't work right.
+Not too long before I rediscovered the source to this version, I started over from scratch, so I will be posting the second incarnation in another repository after this one, called qttmwirc. (I had originally called it qtpyrc also, but then changed its name to qttmwirc.)
 
-It should be cross-platform, but I haven't tested that yet either. 
+This version is, I think, less developed than the second version, though I think it does have plugin support, which the second version lacks. I know I wrote a trivia plugin for it (which will be included in this repository) and I think vaguely recall coding the support for such plugins in the client.   
 
-## Features
+There may be files included that aren't really necessary for the project.
 
-**IRC Protocol**
-- IRCv3 support: CAP negotiation, SASL (PLAIN/EXTERNAL), message tags, server-time, typing notifications, BATCH
-- Token-bucket flood protection with configurable burst and rate
-- Multiple server support per network with automatic cycling on failure
-- Bouncer-friendly: handles playback batches (ZNC, chathistory)
+I'm posting these two projects so that people can contribute to them and do the work of making them fully fledged that I'm too lazy to do. =) Maybe someone can even bring together the best parts of both projects into one of these two projects or into a new project. (It would be sad if I'm not the owner of said new project, though. :)) 
 
-**Interface**
-- Tabbed or MDI (free-floating window) view modes
-- Multi-row tab bar with network grouping and activity indicators
-- Network tree sidebar (tabs, tree, or both)
-- Configurable toolbar with SVG icons
-- Color picker with RGB, HSB, HSL, L\*a\*b\*, and L\*C\*h\* color spaces, eyedropper, and saved colors
-- Font picker with live preview
-- mIRC color code rendering (16 + extended 99-color palette)
-- Searchable chat output (Ctrl+F) with regex support
-- Inline link previews with Open Graph thumbnails (opt-in, proxy support)
-
-**Configuration**
-- YAML config with 3-level cascading: global > network > server/channel
-- Settings dialog with live preview for fonts and colors
-- Integrated file editor for config, toolbar, popups, startup scripts, and variables
-- Per-network identity, flood control, SASL, and auto-join overrides
-- Per-channel ignores, auto-ops, highlights, and notification control
-
-**Scripting & Automation**
-- Python plugin API with full access to IRC events and client state (see `plugins/triviabot/` for an example)
-- `/exec` for inline Python evaluation
-- `/on` event hooks with pattern matching, sounds, and desktop notifications
-- `/timer` for recurring commands
-- Startup command scripts
-- mIRC-compatible popup menus (right-click context menus for nicks, channels, tabs)
-
-**Notifications**
-- Desktop notifications and sound alerts per event type (highlights, queries, notices, connect/disconnect)
-- Nick notify list with ISON polling (online/offline alerts)
-- Highlight patterns with regex support and {me} substitution
-- Per-channel notification suppression
-
-**Other**
-- Headless mode (`--headless`) for running bots and scripts without a GUI
-- Channel history replay from SQLite database
-- IRC log files with optional per-network and per-channel subdirectories and monthly rotation
-- URL catcher
-- Built-in ident server
-- Persistent user variables (/set)
-- Tab-completion for nicks with recency sorting
-
-## Installation
-
-```bash
-git clone https://github.com/inhahe/qtpyrc.git
-cd qtpyrc
-pip install -r requirements.txt
-```
-
-### Requirements
-
-- Python 3.10+
-- PySide6
-- ruamel.yaml
-- qasync
-
-## Quick Start
-
-```bash
-# Create a new config directory
-python qtpyrc.py --init myconfig/
-
-# Edit myconfig/config.yaml to add your networks, then run:
-python qtpyrc.py -c myconfig/config.yaml
-```
-
-See the [Reference Manual](docs/reference.md) for commands, variables, CLI options, and the scripting API.
+It uses t.i.p.irc, but I think I made some custom modifications to irc.py that the program relies on, hence the inclusion of irc.py in the repository. No idea if that violates Twisted's usage license.

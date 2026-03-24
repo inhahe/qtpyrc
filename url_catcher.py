@@ -23,8 +23,6 @@ class URLCatcherDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("URL Catcher")
         self.resize(800, 500)
-        from dialogs import install_input_focus_handler
-        install_input_focus_handler(self)
 
         layout = QVBoxLayout(self)
 

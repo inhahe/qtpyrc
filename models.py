@@ -98,8 +98,8 @@ HISTORY_MAX = 2000
 class HistoryMessage:
   """A message in channel history."""
   __slots__ = ('time', 'user', 'nick', 'text', 'type', 'prefix')
-  def __init__(self, user, nick, text, msg_type='message', prefix='', time=None):
-    self.time = time or datetime.now()
+  def __init__(self, user, nick, text, msg_type='message', prefix=''):
+    self.time = datetime.now()
     self.user = user    # User object (may be None for server messages)
     self.nick = nick    # nick string (kept even if User is unavailable)
     self.text = text
@@ -147,12 +147,7 @@ class Channel:
     self.users = {}  # irclower(nick) -> User — per-channel references
     self.history = deque(maxlen=HISTORY_MAX)
     self.topic = None
-    self.topic_setter = None   # nick!user@host who set the topic
-    self.topic_time = None     # human-readable time when topic was set
-    self.key = None            # channel key (+k), from config/join/mode
-    self.modes = ''            # current mode string (e.g. '+nt')
-    self.mode_args = []        # mode parameters
-    self._pending_lists = {}   # mode_char -> [(mask, setter, ts)] for list numerics
+    self.key = None      # channel key (+k), from config/join/mode
     self.client = client
     self.name = name
     self.active = True   # False when kicked/disconnected but window kept open
@@ -358,6 +353,8 @@ class Client:
     self.users = {}  # irclower(nick) -> User — network-wide user tracking
     self.conn = None
     self.connected = False
+    from window import Serverwindow
+    self.window = Serverwindow(self)
     self.hostname = None
     self.port = 6667
     self.tls = False
@@ -366,10 +363,6 @@ class Client:
     self._intentional_disconnect = False
     self._server_list = []   # list of server dicts from config
     self._server_index = 0   # index into _server_list for cycling
-    # Create the server window AFTER all attributes are set, because
-    # addSubWindow can trigger title updates that access them.
-    from window import Serverwindow
-    self.window = Serverwindow(self)
 
     # If we have a network config, populate connection details
     if network_key:
@@ -383,15 +376,6 @@ class Client:
     tree = getattr(state.app.mainwin, 'network_tree', None) if hasattr(state.app, 'mainwin') else None
     if tree:
       tree.add_client(self)
-
-  def refresh_server_config(self):
-    """Reload server list from config and apply to current connection settings."""
-    if self.network_key:
-      self._server_list = state.config.get_servers(self.network_key)
-      if self._server_list:
-        idx = min(self._server_index, len(self._server_list) - 1)
-        self._server_index = idx
-        self._apply_server(self._server_list[idx])
 
   def _apply_server(self, srv):
     """Set connection details from a server dict."""

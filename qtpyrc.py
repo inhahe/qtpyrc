@@ -22,24 +22,11 @@
 #    module <- the script's entire module
 #    script <- the script module's running Script() instance
 
-import sys, os, asyncio, argparse, signal
-
-# Attach to parent console if one exists (e.g. launched from cmd.exe).
-# This allows print/debug output when run from a terminal, without
-# spawning a console window when launched from a shortcut or explorer.
-if sys.platform == 'win32':
-  try:
-    import ctypes
-    if ctypes.windll.kernel32.AttachConsole(-1):  # ATTACH_PARENT_PROCESS
-      # Reopen stdout/stderr to the console
-      sys.stdout = open('CONOUT$', 'w')
-      sys.stderr = open('CONOUT$', 'w')
-  except Exception:
-    pass
-
 from PySide6.QtWidgets import *
 from PySide6.QtGui import *
 from PySide6.QtCore import *
+
+import sys, os, asyncio, argparse, signal
 
 APP_NAME = 'qtpyrc'
 APP_VERSION = '0.1.0'
@@ -58,88 +45,57 @@ from toolbar import build_toolbar
 # ---------------------------------------------------------------------------
 
 def _build_app_stylesheet():
-  """Build a minimal global stylesheet.
-
-  Only includes rules that *require* stylesheets (pseudo-states, borders,
-  padding). Basic colors are set via QPalette in _apply_palette() which
-  Qt handles much faster than stylesheet evaluation — important when 85+
-  channel windows are open.
-  """
+  """Build a global stylesheet from config colors."""
   cfg = state.config
+  fg = cfg.fgcolor.name()
+  bg = cfg.bgcolor.name()
+  # Menu colors
   mfg = cfg.menu_fgcolor.name()
   mbg = cfg.menu_bgcolor.name()
   m_disabled = '#%02x%02x%02x' % (
     (cfg.menu_fgcolor.red() + cfg.menu_bgcolor.red()) // 2,
     (cfg.menu_fgcolor.green() + cfg.menu_bgcolor.green()) // 2,
     (cfg.menu_fgcolor.blue() + cfg.menu_bgcolor.blue()) // 2)
+  # Tree colors
+  tfg = cfg.tree_fgcolor.name()
+  tbg = cfg.tree_bgcolor.name()
+  # Nick list colors
+  nfg = cfg.nicklist_fgcolor.name()
+  nbg = cfg.nicklist_bgcolor.name()
+  parts = [
+    "QMainWindow { background-color: %s; color: %s; }" % (bg, fg),
+  ]
+  # Menu font
   menu_font = ''
   if cfg.menu_font_family:
     menu_font += "font-family: '%s'; " % cfg.menu_font_family
   if cfg.menu_font_size:
     menu_font += "font-size: %dpt; " % cfg.menu_font_size
-  # Tree selection
-  tfg = cfg.tree_fgcolor.name()
-  tbg = cfg.tree_bgcolor.name()
-  fg = cfg.fgcolor.name()
-  bg = cfg.bgcolor.name()
-  # Nick list colors
-  nfg = cfg.nicklist_fgcolor.name()
-  nbg = cfg.nicklist_bgcolor.name()
+  parts.append("QMenuBar { background-color: %s; color: %s; padding: 0px; %s}" % (mbg, mfg, menu_font))
+  parts.append("QMenuBar::item { padding: 4px 8px; }")
+  parts.append("QMenuBar::item:selected { background-color: %s; color: %s; }" % (mfg, mbg))
+  parts.append("QMenu { background-color: %s; color: %s; border: 1px solid %s; padding: 2px; %s}" % (mbg, mfg, mfg, menu_font))
+  parts.append("QMenu::item { padding: 4px 12px; }")
+  parts.append("QMenu::item:disabled { color: %s; }" % m_disabled)
+  parts.append("QMenu::item:selected { background-color: %s; color: %s; }" % (mfg, mbg))
+  parts.append("QTextEdit { background-color: %s; color: %s; }" % (bg, fg))
+  # Tree font
+  tree_font = ''
+  if cfg.tree_font_family:
+    tree_font += "font-family: '%s'; " % cfg.tree_font_family
+  if cfg.tree_font_size:
+    tree_font += "font-size: %dpt; " % cfg.tree_font_size
+  parts.append("QTreeWidget { background-color: %s; color: %s; %s}" % (tbg, tfg, tree_font))
+  parts.append("QTreeWidget::item:selected { background-color: %s; color: %s; }" % (tfg, tbg))
+  # Nick list font
   nicks_font = ''
   if cfg.nicklist_font_family:
     nicks_font += "font-family: '%s'; " % cfg.nicklist_font_family
   if cfg.nicklist_font_size:
     nicks_font += "font-size: %dpt; " % cfg.nicklist_font_size
-  parts = [
-    # Main window background
-    "QMainWindow { background-color: %s; color: %s; }" % (bg, fg),
-    # Menu rules
-    "QMenuBar { background-color: %s; color: %s; padding: 0px; %s}" % (mbg, mfg, menu_font),
-    "QMenuBar::item { padding: 4px 8px; }",
-    "QMenuBar::item:selected { background-color: %s; color: %s; }" % (mfg, mbg),
-    "QMenu { background-color: %s; color: %s; border: 1px solid %s; padding: 2px; %s}" % (mbg, mfg, mfg, menu_font),
-    "QMenu::item { padding: 4px 12px; }",
-    "QMenu::item:disabled { color: %s; }" % m_disabled,
-    "QMenu::item:selected { background-color: %s; color: %s; }" % (mfg, mbg),
-    # Chat text areas
-    "QTextEdit { background-color: %s; color: %s; }" % (bg, fg),
-    # Tree
-    "QTreeWidget { background-color: %s; color: %s; }" % (tbg, tfg),
-    "QTreeWidget::item:selected { background-color: %s; color: %s; }" % (tfg, tbg),
-    # Nick list
-    "QListWidget#nicklist { background-color: %s; color: %s; %s}" % (nbg, nfg, nicks_font),
-    # MDI area
-    "QMdiArea { background-color: %s; }" % bg,
-    # Splitter handle
-    "QSplitter::handle { background-color: %s; }" % (
-        '#cccccc' if cfg.bgcolor.lightness() > 128 else '#555555'),
-  ]
+  parts.append("QListWidget#nicklist { background-color: %s; color: %s; %s}" % (nbg, nfg, nicks_font))
+  parts.append("QMdiArea { background-color: %s; }" % bg)
   return ' '.join(parts)
-
-
-def _apply_palette():
-  """Apply per-widget settings that can't go in the global stylesheet.
-
-  Currently just the tree font (which is optional and per-widget).
-  All colors are in the global stylesheet.
-  """
-  cfg = state.config
-  mw = state.app.mainwin if state.app else None
-  if not mw:
-    return
-
-  # Tree font (colors handled by global stylesheet)
-  tree = getattr(mw, 'network_tree', None)
-  if tree:
-    tree_font = ''
-    if cfg.tree_font_family:
-      tree_font += "font-family: '%s'; " % cfg.tree_font_family
-    if cfg.tree_font_size:
-      tree_font += "font-size: %dpt; " % cfg.tree_font_size
-    if tree_font:
-      tree.setStyleSheet("QTreeWidget { %s }" % tree_font)
-    else:
-      tree.setStyleSheet('')
 
 
 def _refresh_all_window_fonts():
@@ -300,14 +256,9 @@ def _tile_vertically():
     sub.setGeometry(0, i * h, w, h)
 
 def _on_treeview_splitter_moved(pos, index):
-  if not state.app or not state.app.mainwin:
-    return
-  mw = state.app.mainwin
-  mw._tree_user_set = True
-  sizes = mw._tree_splitter.sizes()
-  if len(sizes) >= 2:
-    mw._tree_target_tw = sizes[0]
-    if state.ui_state:
+  if state.ui_state:
+    sizes = state.app.mainwin._tree_splitter.sizes()
+    if len(sizes) >= 2:
       state.ui_state.treeview_width = sizes[0]
 
 _DEFAULT_TITLEBAR_FORMAT = (
@@ -317,13 +268,6 @@ _DEFAULT_TITLEBAR_FORMAT = (
   "for c in state.clients if c.connected)) "
   "if any(c.connected for c in state.clients) else ''"
   '")}'
-  '{eval("'
-  " ' - ' + (_v.get('network_label','') + '/' if _v.get('network_label') else '')"
-  " + _v['channel']"
-  " + (': ' + _v['topic'] if _v.get('topic') else '')"
-  " if _v.get('channel') else ''"
-  '")}'
-  '{replay}'
 )
 
 def update_main_title():
@@ -341,252 +285,40 @@ def update_main_title():
     variables = _window_context_vars(widget)
   else:
     variables = _window_context_vars(type('_Dummy', (), {'client': None})())
-  # Strip mIRC formatting codes from topic for titlebar display
-  import re
-  raw_topic = variables.get('topic', '')
-  variables['topic'] = re.sub(
-      r'[\x02\x03\x0F\x16\x1D\x1F]|\x03\d{0,2}(?:,\d{0,2})?', '', raw_topic) if raw_topic else ''
-  variables['replay'] = getattr(state.app.mainwin, '_replay_status', '')
   variables.update(state._variables)
-  # Pass variables dict into eval namespace so eval can access topic safely
   title = _expand_vars(fmt, variables, allow_eval=True,
-                       eval_ns={'state': state, '_v': variables})
+                       eval_ns={'state': state})
   state.app.mainwin.setWindowTitle(title)
 
-_title_refresh_windows = []  # flat list of all windows to refresh
-_title_refresh_index = 0     # current position in the stagger
-_title_stagger_timer = None
-
-
-def _rebuild_title_window_list():
-  """Rebuild the flat list of windows for staggered title refresh."""
-  global _title_refresh_windows, _title_refresh_index
-  wins = []
+def _refresh_window_titles():
+  """Re-expand title formats on all windows (custom and config-based)."""
   if not state.clients:
-    _title_refresh_windows = wins
-    _title_refresh_index = 0
     return
+  from commands import expand_window_title
   for client in state.clients:
     if client.window:
-      wins.append(client.window)
+      if getattr(client.window, '_custom_title', None) is not None:
+        client.window.refresh_custom_title()
+      else:
+        fmt = state.config.title_server if client.connected else state.config.title_server_disconnected
+        client.window.setWindowTitle(expand_window_title(fmt, client.window))
     for chan in client.channels.values():
       if chan.window:
-        wins.append(chan.window)
+        if getattr(chan.window, '_custom_title', None) is not None:
+          chan.window.refresh_custom_title()
+        else:
+          chan.update_title()
     for query in client.queries.values():
       if query.window:
-        wins.append(query.window)
-  _title_refresh_windows = wins
-  _title_refresh_index = 0
-
-
-def _refresh_window_titles():
-  """Start a staggered refresh of all window titles.
-
-  Instead of updating 85+ titles in one burst, spaces them out across
-  the full timer interval (one window per stagger tick) so the event
-  loop stays responsive.
-  """
-  global _title_stagger_timer, _title_refresh_index
-  _rebuild_title_window_list()
-  if not _title_refresh_windows:
-    return
-  if _title_stagger_timer:
-    _title_stagger_timer.stop()
-  # Spread updates across ~80% of the main timer interval
-  interval_ms = state.config.titlebar_interval * 1000 if state.config else 1000
-  n = len(_title_refresh_windows)
-  tick_ms = max(1, int(interval_ms * 0.8 / n))
-  _title_stagger_timer = QTimer()
-  _title_stagger_timer.timeout.connect(_title_stagger_tick)
-  _title_stagger_timer.start(tick_ms)
-
-
-def _title_stagger_tick():
-  """Update one window title per tick."""
-  global _title_refresh_index
-  if _title_refresh_index >= len(_title_refresh_windows):
-    if _title_stagger_timer:
-      _title_stagger_timer.stop()
-    return
-  win = _title_refresh_windows[_title_refresh_index]
-  _title_refresh_index += 1
-  from commands import expand_window_title
-  try:
-    if getattr(win, '_custom_title', None) is not None:
-      win.refresh_custom_title()
-    elif hasattr(win, 'channel') and win.channel:
-      win.channel.update_title()
-    elif hasattr(win, 'query') and win.query:
-      win.query.update_title()
-    elif hasattr(win, 'client') and win.client:
-      client = win.client
-      fmt = state.config.title_server if client.connected else state.config.title_server_disconnected
-      win.setWindowTitle(expand_window_title(fmt, win))
-  except RuntimeError:
-    pass  # widget deleted
+        if getattr(query.window, '_custom_title', None) is not None:
+          query.window.refresh_custom_title()
+        else:
+          query.update_title()
 
 def _update_all_titles():
   """Refresh main titlebar and all window titles."""
   update_main_title()
   _refresh_window_titles()
-
-# ---------------------------------------------------------------------------
-# Background history replay — drip-feeds history into windows during idle
-# ---------------------------------------------------------------------------
-
-_bg_replay_queue = []  # list of (window, network, chname, chan_obj)
-_bg_replay_timer = None
-_bg_replay_total = 0   # total channels queued for replay
-_bg_replay_done = 0    # channels completed
-
-
-def _start_bg_replay():
-  """Start the background replay timer if there's work to do."""
-  global _bg_replay_timer
-  if _bg_replay_queue and not _bg_replay_timer:
-    interval = state.config.history_bg_interval if state.config else 100
-    _bg_replay_timer = QTimer()
-    _bg_replay_timer.timeout.connect(_bg_replay_tick)
-    _bg_replay_timer.start(interval)
-    _update_replay_status()
-
-
-def _bg_replay_tick():
-  """Process one chunk of history replay for the next window in the queue."""
-  global _bg_replay_timer, _bg_replay_done
-  while _bg_replay_queue:
-    entry = _bg_replay_queue[0]
-    window, network, chname, chan_obj = entry
-
-    # Skip if window was already fully replayed (user clicked on it)
-    if not hasattr(window, '_deferred_replay') and not hasattr(window, '_bg_replay'):
-      _bg_replay_queue.pop(0)
-      continue
-
-    # First time for this window — fetch all rows and store as pending
-    if not hasattr(window, '_bg_replay'):
-      db = state.historydb
-      limit = state.config.history_replay_channels
-      if not db or limit <= 0:
-        if hasattr(window, '_deferred_replay'):
-          del window._deferred_replay
-        _bg_replay_queue.pop(0)
-        continue
-      rows = db.get_last(network, chname.lower(), limit)
-      if not rows:
-        if hasattr(window, '_deferred_replay'):
-          del window._deferred_replay
-        _bg_replay_queue.pop(0)
-        continue
-      window._bg_replay = {
-        'rows': rows,
-        'index': 0,
-        'chan_obj': chan_obj,
-      }
-
-    bg = window._bg_replay
-    rows = bg['rows']
-    idx = bg['index']
-    chunk = state.config.history_bg_chunk if state.config else 50
-    end = min(idx + chunk, len(rows))
-    show_prefix = state.config.show_mode_prefix
-    history = bg['chan_obj'].history if bg['chan_obj'] else None
-
-    # Batch all insertions to suppress per-line document relayout
-    window.cur.beginEditBlock()
-    try:
-      for i in range(idx, end):
-        ts, etype, nick, text, prefix = rows[i]
-        ts_short = ts[11:16]
-        pn = (prefix + nick) if (show_prefix and prefix and nick) else nick
-        if etype == 'message':
-          window.addline_msg(pn, text, timestamp_override=ts_short)
-        elif etype == 'action':
-          window.addline_nick(["* ", (pn,), " %s" % text], state.actionformat,
-                              timestamp_override=ts_short)
-        elif etype == 'notice':
-          window.addline_nick(["-", (pn,), "- %s" % text], state.noticeformat,
-                              timestamp_override=ts_short)
-        elif etype == 'join':
-          window.addline_nick(["* ", (pn,), " has joined %s" % (text or chname)],
-                              state.infoformat, timestamp_override=ts_short)
-        elif etype == 'part':
-          window.addline_nick(["* ", (pn,), " has left %s" % (text or chname)],
-                              state.infoformat, timestamp_override=ts_short)
-        elif etype == 'quit':
-          window.addline_nick(["* ", (pn,), " has quit (%s)" % (text or "")],
-                              state.infoformat, timestamp_override=ts_short)
-        elif etype == 'kick':
-          window.addline(text or '', state.infoformat, timestamp_override=ts_short)
-        elif etype == 'nick':
-          window.addline_nick(["* ", (pn,), " is now known as ", (text or '?',)],
-                              state.infoformat, timestamp_override=ts_short)
-        elif etype == 'topic':
-          window.addline_nick(["* ", (pn,), " changed the topic to: %s" % (text or '')],
-                              state.infoformat, timestamp_override=ts_short)
-        elif etype == 'mode':
-          window.addline_nick(["* ", (pn,), " %s" % text], state.infoformat,
-                              timestamp_override=ts_short)
-        if history is not None:
-          from models import HistoryMessage
-          from datetime import datetime
-          try:
-            t = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
-          except Exception:
-            t = datetime.now()
-          history.append(HistoryMessage(None, nick, text, etype, prefix=prefix, time=t))
-    finally:
-      window.cur.endEditBlock()
-
-    bg['index'] = end
-
-    if end >= len(rows):
-      # Done with this window
-      window.add_separator(' End of saved history ')
-      del window._bg_replay
-      if hasattr(window, '_deferred_replay'):
-        del window._deferred_replay
-      _bg_replay_queue.pop(0)
-      _bg_replay_done += 1
-      _update_replay_status()
-    return  # one chunk per tick
-
-  # Queue empty — stop timer
-  if _bg_replay_timer:
-    _bg_replay_timer.stop()
-    _bg_replay_timer = None
-    _bg_replay_done = 0
-    _bg_replay_total = 0
-    _update_replay_status()
-
-
-def _update_replay_status():
-  """Update the {replay} variable and refresh the title bar."""
-  if not state.app or not state.app.mainwin:
-    return
-  if _bg_replay_timer and _bg_replay_total > 0:
-    state.app.mainwin._replay_status = (
-        ' [history: %d/%d]' % (_bg_replay_done, _bg_replay_total))
-  else:
-    state.app.mainwin._replay_status = ''
-  update_main_title()
-
-
-def _queue_bg_replay(window, network, chname, chan_obj):
-  """Add a window to the background replay queue.
-
-  If background replay is disabled, just marks the window for deferred
-  replay (loads all at once when the user first switches to it).
-  """
-  global _bg_replay_total
-  if not state.config.history_bg_enabled:
-    # Deferred: load on first activation
-    window._deferred_replay = (network, chname, chan_obj)
-    return
-  _bg_replay_queue.append((window, network, chname, chan_obj))
-  _bg_replay_total += 1
-  _start_bg_replay()
-
 
 def _on_subwindow_activated(subwindow):
   """Sync the treeview selection and clear activity when switching windows."""
@@ -595,18 +327,6 @@ def _on_subwindow_activated(subwindow):
   widget = subwindow.widget()
   if not widget:
     return
-  # Run deferred history replay on first activation (complete it immediately)
-  replay_info = getattr(widget, '_deferred_replay', None)
-  if replay_info:
-    del widget._deferred_replay
-    from irc_client import _history_replay
-    network, chname, chan = replay_info
-    # Cancel any in-progress background replay
-    bg = getattr(widget, '_bg_replay', None)
-    if bg:
-      del widget._bg_replay
-    _history_replay(widget, network, chname, chan_obj=chan)
-    widget.add_separator(' End of saved history ')
   # Clear activity highlight on the now-active window
   if hasattr(widget, 'clear_activity'):
     widget.clear_activity()
@@ -618,78 +338,6 @@ def _on_subwindow_activated(subwindow):
   if tree:
     tree.sync_to_window(widget)
   _update_all_titles()
-
-def _populate_toolbar_menu(menu=None):
-  """Fill the Toolbar menu with entries matching the toolbar buttons."""
-  from toolbar import _resolve_toolbar_path, _load_toolbar_file, _resolve_icon, _exec_toolbar_command
-  if menu is None:
-    menu = state.app.mainwin.mnutoolbar
-  menu.clear()
-  # Clear old ui_registry entries
-  for key in [k for k in state.ui_registry if k.startswith('menu.toolbar.')]:
-    del state.ui_registry[key]
-  for key in [k for k in state.ui_descriptions if k.startswith('menu.toolbar.')]:
-    del state.ui_descriptions[key]
-
-  filepath = _resolve_toolbar_path()
-  entries = _load_toolbar_file(filepath) if filepath else []
-  if not entries:
-    _a = menu.addAction('(no toolbar entries)')
-    _a.setEnabled(False)
-    return
-
-  from toolbar import _toolbar_slug
-  slug_counts = {}
-  for entry in entries:
-    if entry[0] == 'linebreak':
-      menu.addSeparator()
-    elif entry[0] == 'separator':
-      menu.addSeparator()
-    else:
-      _, icon_name, tooltip, command = entry
-      icon = _resolve_icon(icon_name)
-      if not icon.isNull():
-        _a = menu.addAction(icon, tooltip)
-      else:
-        _a = menu.addAction(tooltip)
-      _a.triggered.connect(lambda checked, cmd=command: _exec_toolbar_command(cmd))
-      slug = _toolbar_slug(tooltip)
-      if slug:
-        n = slug_counts.get(slug, 0) + 1
-        slug_counts[slug] = n
-        key = 'menu.toolbar.' + (slug if n == 1 else '%s%d' % (slug, n))
-        state.ui_registry[key] = _a
-        state.ui_descriptions[key] = tooltip
-
-
-def _run_wizard():
-  """Show the connection wizard to add a new network."""
-  from setup_wizard import SetupWizard, apply_wizard_result
-  wizard = SetupWizard(state.app.mainwin)
-  if wizard.exec() == QDialog.DialogCode.Accepted and wizard.result_data:
-    apply_wizard_result(state.config, wizard.result_data)
-    # Connect to the new network
-    netkey = wizard.result_data['net_key']
-    _connect_network(netkey)
-
-
-def _connect_network(netkey):
-  """Connect to a configured network (from menu)."""
-  import asyncio
-  # Check if already connected
-  for client in state.clients:
-    if client.network_key == netkey:
-      # Already have a client for this network — reconnect if disconnected
-      if not client.connected:
-        asyncio.ensure_future(client.connect_to_server())
-      else:
-        # Activate the server window
-        state.app.mainwin.workspace.setActiveSubWindow(client.window.subwindow)
-      return
-  client = Client(network_key=netkey)
-  state.clients.add(client)
-  asyncio.ensure_future(client.connect_to_server())
-
 
 def _close_active_window():
   """Close the active in-app window (Ctrl+F4)."""
@@ -736,7 +384,7 @@ def _close_window(widget, force=False):
   elif widget.type == 'server':
     has_children = bool(client.channels or client.queries)
     if not force and (conn or has_children):
-      label = client.network_key or client.network or getattr(client, 'hostname', '') or 'server'
+      label = client.network_key or client.network or client.hostname or 'server'
       if conn and has_children:
         msg = 'Disconnect from %s and close all its windows?' % label
       elif conn:
@@ -778,27 +426,19 @@ class _AppKeyFilter(QObject):
       ctrl = mods & Qt.KeyboardModifier.ControlModifier
       alt = mods & Qt.KeyboardModifier.AltModifier
 
-      # Alt+F4: let Windows handle it natively.
-      # On the main window: closes it → lastWindowClosed → quit.
-      # On a dialog: closes it → closeEvent → reject (unsaved check).
+      # Alt+F4: close the entire application
+      if key == Qt.Key.Key_F4 and alt:
+        if event.type() == QEvent.Type.ShortcutOverride:
+          event.accept()
+          return True
+        QApplication.instance().quit()
+        return True
 
       # Ctrl+F4: close the active in-app window (part channel, close query)
-      # If a dialog (modal or non-modal) has focus, close it instead
+      # Skip when a modal dialog is active — let the dialog handle it
       if key == Qt.Key.Key_F4 and ctrl:
         if QApplication.activeModalWidget():
           return False
-        # Check if focus is inside a non-modal dialog (e.g. color picker)
-        fw = QApplication.focusWidget()
-        if fw:
-          w = fw
-          while w:
-            if isinstance(w, QDialog) and w is not state.app.mainwin:
-              if event.type() == QEvent.Type.ShortcutOverride:
-                event.accept()
-                return True
-              w.close()
-              return True
-            w = w.parentWidget()
         if event.type() == QEvent.Type.ShortcutOverride:
           event.accept()
           return True
@@ -837,26 +477,6 @@ class _AppKeyFilter(QObject):
 
     return False
 
-
-def _register_settings_paths():
-  """Populate ui_registry with all settings.* entries."""
-  from dialogs import open_settings
-  from settings.settings_dialog import get_settings_ui_paths
-  reg = state.ui_registry
-  desc = state.ui_descriptions
-  # Clear previous settings entries
-  for key in [k for k in reg if k.startswith('settings.')]:
-    del reg[key]
-  for key in [k for k in desc if k.startswith('settings.')]:
-    del desc[key]
-  # Register bare 'settings' to open the dialog
-  reg['settings'] = lambda: open_settings()
-  desc['settings'] = 'Open Settings dialog'
-  for ui_path, page_id, label in get_settings_ui_paths(state.config._data):
-    reg[ui_path] = lambda pid=page_id: open_settings(page=pid)
-    desc[ui_path] = label
-
-
 def makeapp(args):
   app = QApplication(args)
   app.setStyleSheet(_build_app_stylesheet())
@@ -877,26 +497,11 @@ def makeapp(args):
   content = app.mainwin.workspace
 
   app.mainwin.network_tree = NetworkTree()
-
-  class _TreeSplitter(QSplitter):
-    """QSplitter that re-applies saved tree width on resize until user drags."""
-    def resizeEvent(self, event):
-      super().resizeEvent(event)
-      mw = state.app.mainwin if state.app else None
-      if mw and not mw._tree_user_set:
-        total = self.width()
-        tw = mw._tree_target_tw
-        if total > tw:
-          self.blockSignals(True)
-          self.setSizes([tw, total - tw])
-          self.blockSignals(False)
-
-  app.mainwin._tree_splitter = _TreeSplitter()
+  app.mainwin._tree_splitter = QSplitter()
   app.mainwin._tree_splitter.addWidget(app.mainwin.network_tree)
   app.mainwin._tree_splitter.addWidget(content)
-  app.mainwin._tree_target_tw = state.ui_state.treeview_width if state.ui_state else 180
-  app.mainwin._tree_user_set = False
-  app.mainwin._tree_splitter.setSizes([app.mainwin._tree_target_tw, 600])
+  tw = state.ui_state.treeview_width if state.ui_state else 180
+  app.mainwin._tree_splitter.setSizes([tw, 600])
   app.mainwin._tree_splitter.splitterMoved.connect(_on_treeview_splitter_moved)
   app.mainwin.setCentralWidget(app.mainwin._tree_splitter)
   _refresh_navigation(app.mainwin)
@@ -910,162 +515,45 @@ def makeapp(args):
 
   # --- Menu bar ---
   app.mainwin.menubar = app.mainwin.menuBar()
-  # Disable Qt's default toolbar toggle context menu on the main window
-  app.mainwin.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
 
   # File menu
-  _ui = state.ui_registry
-  _desc = state.ui_descriptions
-  def _d(*parts):
-    """Build a description from menu label parts, stripping & accelerators."""
-    return ' > '.join(p.replace('&', '') for p in parts)
-
   app.mainwin.mnufile = app.mainwin.menubar.addMenu('&File')
   app.mainwin.mnusettings = app.mainwin.mnufile.addAction('&Settings')
   app.mainwin.mnusettings.triggered.connect(open_settings)
-  _ui['menu.file.settings'] = app.mainwin.mnusettings
-  _desc['menu.file.settings'] = _d('File', 'Settings')
-  _a = app.mainwin.mnufile.addAction('Connection &Wizard...')
-  _a.triggered.connect(_run_wizard)
-  _ui['menu.file.wizard'] = _a
-  _desc['menu.file.wizard'] = _d('File', 'Connection Wizard')
   mnuedit = app.mainwin.mnufile.addMenu('&Edit files')
-  for label, page_key, ui_key in [
-      ('&Startup commands', 'startup', 'menu.file.edit.startup'),
-      ('&Popups', 'popups', 'menu.file.edit.popups'),
-      ('&Toolbar', 'toolbar', 'menu.file.edit.toolbar'),
-      ('&Variables', 'variables', 'menu.file.edit.variables'),
-      ('&Config', 'config', 'menu.file.edit.config')]:
-    _a = mnuedit.addAction(label)
-    _a.triggered.connect(lambda checked=False, k=page_key: _open_editor_file(k))
-    _ui[ui_key] = _a
-    _desc[ui_key] = _d('File', 'Edit files', label)
+  for label, page_key in [('&Startup commands', 'startup'), ('&Popups', 'popups'),
+                           ('&Toolbar', 'toolbar'), ('&Variables', 'variables'),
+                           ('&Config', 'config')]:
+    mnuedit.addAction(label).triggered.connect(
+      lambda checked=False, k=page_key: _open_editor_file(k))
   mnuedit.addSeparator()
-  _a = mnuedit.addAction('&Open file...')
-  _a.triggered.connect(lambda: _open_editor_file(None))
-  _ui['menu.file.edit.open'] = _a
-  _desc['menu.file.edit.open'] = _d('File', 'Edit files', 'Open file...')
-  _a = mnuedit.addAction('&File editor')
-  _a.triggered.connect(lambda: _open_editor_file(''))
-  _ui['menu.file.edit.editor'] = _a
-  _desc['menu.file.edit.editor'] = _d('File', 'Edit files', 'File editor')
+  mnuedit.addAction('&Open file...').triggered.connect(
+    lambda: _open_editor_file(None))
+  mnuedit.addAction('&File editor').triggered.connect(
+    lambda: _open_editor_file(''))
   app.mainwin.mnufile.addSeparator()
-  _a = app.mainwin.mnufile.addAction('&Reload configuration')
-  _a.triggered.connect(lambda: _reload_config())
-  _ui['menu.file.reload'] = _a
-  _desc['menu.file.reload'] = _d('File', 'Reload configuration')
-  _a = app.mainwin.mnufile.addAction('Save configuration &as...')
-  _a.triggered.connect(lambda: _save_config_as())
-  _ui['menu.file.saveas'] = _a
-  _desc['menu.file.saveas'] = _d('File', 'Save configuration as...')
+  app.mainwin.mnufile.addAction('&Reload configuration').triggered.connect(lambda: _reload_config())
+  app.mainwin.mnufile.addAction('Save configuration &as...').triggered.connect(lambda: _save_config_as())
   app.mainwin.mnufile.addSeparator()
   app.mainwin.mnuclose = app.mainwin.mnufile.addAction('&Close')
-  _ui['menu.file.close'] = app.mainwin.mnuclose
-  _desc['menu.file.close'] = _d('File', 'Close')
   app.mainwin.mnunew = app.mainwin.mnufile.addMenu("&New")
   app.mainwin.mnunewclient = app.mainwin.mnunew.addAction("&Server window")
   app.mainwin.mnunewclient.triggered.connect(newclient)
-  _ui['menu.file.new.server'] = app.mainwin.mnunewclient
-  _desc['menu.file.new.server'] = _d('File', 'New', 'Server window')
-  # Add configured networks under New menu
-  _networks = state.config.networks or {}
-  app.mainwin._net_actions = {}
-  if _networks:
-    app.mainwin.mnunew.addSeparator()
-    _used_keys = set()
-    for _netkey in _networks:
-      # Auto-assign & accelerator to first unique letter
-      _label = _netkey
-      for _ci, _ch in enumerate(_netkey):
-        if _ch.lower() not in _used_keys:
-          _used_keys.add(_ch.lower())
-          _label = _netkey[:_ci] + '&' + _netkey[_ci:]
-          break
-      _a = app.mainwin.mnunew.addAction(_label)
-      _a.triggered.connect(lambda checked, nk=_netkey: _connect_network(nk))
-      app.mainwin._net_actions[_netkey] = (_a, _label)
-      _ui_key = 'menu.file.new.' + _netkey.lower()
-      _ui[_ui_key] = _a
-      _desc[_ui_key] = _d('File', 'New', _netkey)
-  def _update_net_menu():
-    for nk, (act, label) in app.mainwin._net_actions.items():
-      connected = any(c.network_key == nk and c.connected for c in state.clients)
-      act.setText('%s (connected)' % label if connected else label)
-  app.mainwin.mnunew.aboutToShow.connect(_update_net_menu)
 
   # Event filter for tooltips on disabled menu items
   _menu_tt_filter = _MenuTooltipFilter(app.mainwin)
 
-  # View menu
-  mnuview = app.mainwin.menubar.addMenu('&View')
-
-  # Toggle toolbar
-  _a_toolbar = mnuview.addAction('&Toolbar')
-  _a_toolbar.setCheckable(True)
-  _a_toolbar.setChecked(state.config.show_toolbar)
-  def _toggle_toolbar(checked):
-    state.config.show_toolbar = checked
-    state.config._data['show_toolbar'] = checked
-    if checked:
-      if not app.mainwin._toolbar:
-        app.mainwin._toolbar = build_toolbar(app.mainwin)
-        app.mainwin.addToolBar(app.mainwin._toolbar)
-      else:
-        app.mainwin._toolbar.show()
-    else:
-      if app.mainwin._toolbar:
-        app.mainwin._toolbar.hide()
-    state.config.save()
-  _a_toolbar.triggered.connect(_toggle_toolbar)
-  _ui['menu.view.toolbar'] = _a_toolbar
-  _desc['menu.view.toolbar'] = _d('View', 'Toolbar')
-
-  mnuview.addSeparator()
-
-  # Navigation submenu: Tabs Bar / Treeview / Both
-  _nav_menu = mnuview.addMenu('&Navigation')
-  _nav_group = QActionGroup(_nav_menu)
-  _nav_group.setExclusive(True)
-  _nav_items = [
-      ('tabs', 'Tabs &Bar', 'menu.view.nav.tabs'),
-      ('tree', '&Treeview', 'menu.view.nav.tree'),
-      ('both', '&Both', 'menu.view.nav.both'),
-  ]
-  for _nav_val, _nav_label, _nav_key in _nav_items:
-    _a = _nav_menu.addAction(_nav_label)
-    _a.setCheckable(True)
-    _a.setChecked(state.config.navigation == _nav_val)
-    def _set_nav(checked, nav=_nav_val):
-      if checked:
-        state.config.navigation = nav
-        state.config.show_tabs = nav in ('tabs', 'both')
-        state.config.show_tree = nav in ('tree', 'both')
-        state.config.treeview = state.config.show_tree
-        state.config._data['navigation'] = nav
-        _refresh_navigation()
-        state.config.save()
-    _a.triggered.connect(_set_nav)
-    _nav_group.addAction(_a)
-    _ui[_nav_key] = _a
-    _desc[_nav_key] = _d('View', 'Navigation', _nav_label)
-
   # Window menu
   mnuwindow = app.mainwin.menubar.addMenu('&Window')
   _is_mdi = state.config.view_mode == 'mdi'
-  _a = mnuwindow.addAction('Tile &Horizontally', lambda:
+  _act = mnuwindow.addAction('Tile &Horizontally', lambda:
     app.mainwin.workspace.tileSubWindows())
-  _a.setEnabled(_is_mdi)
-  _ui['menu.window.tileh'] = _a
-  _desc['menu.window.tileh'] = _d('Window', 'Tile Horizontally')
-  _a = mnuwindow.addAction('Tile &Vertically', _tile_vertically)
-  _a.setEnabled(_is_mdi)
-  _ui['menu.window.tilev'] = _a
-  _desc['menu.window.tilev'] = _d('Window', 'Tile Vertically')
-  _a = mnuwindow.addAction('&Cascade', lambda:
+  _act.setEnabled(_is_mdi)
+  _act = mnuwindow.addAction('Tile &Vertically', _tile_vertically)
+  _act.setEnabled(_is_mdi)
+  _act = mnuwindow.addAction('&Cascade', lambda:
     app.mainwin.workspace.cascadeSubWindows())
-  _a.setEnabled(_is_mdi)
-  _ui['menu.window.cascade'] = _a
-  _desc['menu.window.cascade'] = _d('Window', 'Cascade')
+  _act.setEnabled(_is_mdi)
   if not _is_mdi:
     _info = QWidgetAction(mnuwindow)
     _lbl = QLabel('\u2139 Requires MDI mode \u2014 click to change')
@@ -1077,64 +565,37 @@ def makeapp(args):
 
   # Tools menu
   mnutools = app.mainwin.menubar.addMenu('&Tools')
-  _a = mnutools.addAction('&URL Catcher')
-  _a.triggered.connect(lambda: __import__('url_catcher').show_url_catcher())
-  _ui['menu.tools.urlcatcher'] = _a
-  _desc['menu.tools.urlcatcher'] = _d('Tools', 'URL Catcher')
-  _a = mnutools.addAction('&Sound Browser')
-  _a.triggered.connect(lambda: __import__('notify').show_sound_browser())
-  _ui['menu.tools.soundbrowser'] = _a
-  _desc['menu.tools.soundbrowser'] = _d('Tools', 'Sound Browser')
-  _a = mnutools.addAction('&Icon Browser')
-  _a.triggered.connect(lambda: __import__('toolbar').show_icon_browser())
-  _ui['menu.tools.iconbrowser'] = _a
-  _desc['menu.tools.iconbrowser'] = _d('Tools', 'Icon Browser')
-  _a = mnutools.addAction('&Color Picker')
-  _a.triggered.connect(lambda: __import__('dialogs').show_color_picker())
-  _ui['menu.tools.colorpicker'] = _a
-  _desc['menu.tools.colorpicker'] = _d('Tools', 'Color Picker')
-
-  # Toolbar menu — mirrors toolbar buttons as menu items
-  app.mainwin.mnutoolbar = app.mainwin.menubar.addMenu('T&oolbar')
-  _populate_toolbar_menu(app.mainwin.mnutoolbar)
+  mnutools.addAction('&URL Catcher').triggered.connect(
+    lambda: __import__('url_catcher').show_url_catcher())
+  mnutools.addAction('&Sound Browser').triggered.connect(
+    lambda: __import__('notify').show_sound_browser())
+  mnutools.addAction('&Icon Browser').triggered.connect(
+    lambda: __import__('toolbar').show_icon_browser())
 
   # Help menu
   mnuhelp = app.mainwin.menubar.addMenu('&Help')
   mnuhelp.installEventFilter(_menu_tt_filter)
   _basedir = os.path.dirname(os.path.abspath(__file__))
   _ref_path = os.path.join(_basedir, 'docs', 'reference.md')
-  _a = mnuhelp.addAction('&Reference Manual', lambda p=_ref_path: _show_doc_viewer(p))
+  _act = mnuhelp.addAction('&Reference Manual', lambda p=_ref_path: _show_doc_viewer(p))
   if not os.path.isfile(_ref_path):
-    _a.setEnabled(False)
-    _a.setToolTip('File not found: %s' % _ref_path)
-  _ui['menu.help.reference'] = _a
-  _desc['menu.help.reference'] = _d('Help', 'Reference Manual')
-  _example_path = os.path.join(_basedir, 'defaults', 'config.defaults.yaml')
-  _a = mnuhelp.addAction('&Config Reference', lambda p=_example_path: _show_doc_viewer(p))
+    _act.setEnabled(False)
+    _act.setToolTip('File not found: %s' % _ref_path)
+  _example_path = os.path.join(_basedir, 'config.example.yaml')
+  _act = mnuhelp.addAction('&Config Reference', lambda p=_example_path: _show_doc_viewer(p))
   if not os.path.isfile(_example_path):
-    _a.setEnabled(False)
-    _a.setToolTip('File not found: %s' % _example_path)
-  _ui['menu.help.configref'] = _a
-  _desc['menu.help.configref'] = _d('Help', 'Config Reference')
+    _act.setEnabled(False)
+    _act.setToolTip('File not found: %s' % _example_path)
   mnuhelp.addSeparator()
-  _a = mnuhelp.addAction('&About', _show_about)
-  _ui['menu.help.about'] = _a
-  _desc['menu.help.about'] = _d('Help', 'About')
-
-  # --- Settings pages ---
-  # Register all settings page paths (global + network) from shared structure
-  _register_settings_paths()
+  mnuhelp.addAction('&About', _show_about)
 
   # --- Toolbar ---
-  from toolbar import register_toolbar_ui_paths
-  register_toolbar_ui_paths()
   if state.config.show_toolbar:
     app.mainwin._toolbar = build_toolbar(app.mainwin)
     app.mainwin.addToolBar(app.mainwin._toolbar)
   else:
     app.mainwin._toolbar = None
 
-  _apply_palette()
   _update_all_titles()
   # Poll on a timer since eval expressions in titlebar_format can reference
   # anything and we can't know which events should trigger updates.
@@ -1150,7 +611,6 @@ def makeapp(args):
   app.mainwin.raise_()
   app.mainwin.activateWindow()
   app.lastWindowClosed.connect(quit)
-  app.aboutToQuit.connect(quit)
   return app
 
 def _startup_path():
@@ -1255,394 +715,24 @@ def _show_about():
        PySide6.__version__,
        sys.platform))
 
-_quitting = False
 def quit():
-  global _quitting
-  if _quitting:
-    return
-  _quitting = True
   if state.ui_state:
     state.ui_state.save()
-  # Cancel all async tasks first so IRC handlers stop processing
-  loop = asyncio.get_event_loop()
-  for task in asyncio.all_tasks(loop):
-    task.cancel()
   # Close all IRC connections
   for client in list(state.clients or []):
     if client.conn:
       client.conn.disconnect()
-  # Close history database (safe now — no handlers are running)
+  # Close history database
   if state.historydb:
     try:
       state.historydb.close()
     except Exception:
       pass
+  loop = asyncio.get_event_loop()
+  # Cancel pending async tasks
+  for task in asyncio.all_tasks(loop):
+    task.cancel()
   loop.stop()
-
-
-# ---------------------------------------------------------------------------
-# --init / --set helpers
-# ---------------------------------------------------------------------------
-
-# Default files and directories that live alongside config.yaml.
-_DEFAULT_ANCILLARY = [
-    ('history.db', False),
-    ('ui.yaml', False),
-    ('popups.ini', False),
-    ('variables.ini', False),
-    ('toolbar.ini', False),
-    ('logs', True),
-    ('plugins', True),
-    ('scripts', True),
-    ('icons', True),
-]
-
-_STUB_CONFIG = ('# qtpyrc configuration\n'
-                '# See config.defaults.yaml for all available options.\n')
-
-def _read_default_file(name):
-  """Read a default file from the defaults/ directory."""
-  path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'defaults', name)
-  try:
-    with open(path, 'r', encoding='utf-8') as f:
-      return f.read()
-  except FileNotFoundError:
-    return None
-
-
-def _get_default_config():
-  """Build the default config.yaml from config.defaults.yaml.
-
-  Comments out the networks section (has bogus example values) and
-  replaces placeholder identity values.
-  """
-  example_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              'defaults', 'config.defaults.yaml')
-  try:
-    with open(example_path, 'r', encoding='utf-8') as f:
-      lines = f.readlines()
-  except FileNotFoundError:
-    # Fallback if config.defaults.yaml isn't available
-    return ('# qtpyrc configuration\n'
-            '# config.defaults.yaml not found — see docs for options.\n'
-            'popups_file: popups.ini\n'
-            'variables_file: variables.ini\n'
-            'toolbar_file: toolbar.ini\n'
-            'nick: qtpyrc_user\n'
-            'user: qtpyrc\n'
-            'realname: qtpyrc user\n')
-
-  result = []
-  in_networks = False
-  for line in lines:
-    stripped = line.rstrip('\n')
-    # Detect the networks section and comment it all out
-    if stripped == 'networks:':
-      in_networks = True
-      result.append('# Uncomment and edit to add your networks:\n')
-      result.append('#networks:\n')
-      continue
-    if in_networks:
-      # Still in networks section — everything indented or blank
-      if stripped and not stripped.startswith((' ', '#', '\t')):
-        in_networks = False  # hit a new top-level key
-      else:
-        # Comment out this line (preserve indentation)
-        if stripped.lstrip().startswith('#') or not stripped.strip():
-          result.append(line)
-        else:
-          result.append('#' + line)
-        continue
-
-    # Replace example identity values with generic defaults
-    if stripped.startswith('nick: ') and 'myuser' in stripped:
-      result.append('nick: qtpyrc_user\n')
-    elif stripped.startswith('  - myuser_'):
-      result.append('  - qtpyrc_user_\n')
-    elif stripped.startswith('  - myuser`'):
-      result.append('  - qtpyrc_user`\n')
-    elif stripped.startswith('user: ') and 'myuser' in stripped:
-      result.append('user: qtpyrc\n')
-    elif stripped.startswith('ident_username: ') and 'myuser' in stripped:
-      result.append('ident_username: qtpyrc\n')
-    elif stripped.startswith('nickname: ') and 'myuser' in stripped:
-      result.append('nickname: qtpyrc_user\n')
-    elif stripped.startswith('  family: Fixedsys'):
-      result.append('  family: Consolas\n')
-    elif stripped == '# Copy it to config.yaml and edit to taste.':
-      result.append('# Edit to taste.  See config.defaults.yaml for detailed documentation.\n')
-    elif stripped == '# Run with: python qtpyrc.py -c config.yaml':
-      continue  # skip this line
-    else:
-      result.append(line)
-
-  return ''.join(result)
-
-
-# Full default content for --init and "Restore Defaults".
-# All templates are loaded from files at runtime:
-#   config  — built from config.defaults.yaml by _get_default_config()
-#   popups  — defaults/popups.ini
-#   toolbar — defaults/toolbar.ini
-#   startup — defaults/startup.rc
-#   variables — defaults/variables.ini
-_DEFAULT_TEMPLATES = {
-    'config':    None,
-    'startup':   None,
-    'popups':    None,
-    'toolbar':   None,
-    'variables': None,
-}
-
-def _resolve_template(key):
-  """Lazily load a default template, caching in _DEFAULT_TEMPLATES."""
-  if _DEFAULT_TEMPLATES[key] is not None:
-    return _DEFAULT_TEMPLATES[key]
-  if key == 'config':
-    _DEFAULT_TEMPLATES[key] = _get_default_config()
-  else:
-    _file_map = {
-        'startup':   'startup.rc',
-        'popups':    'popups.ini',
-        'toolbar':   'toolbar.ini',
-        'variables': 'variables.ini',
-    }
-    content = _read_default_file(_file_map[key])
-    if content is None:
-      # Fallback to stub if default file is missing
-      content = ''
-    _DEFAULT_TEMPLATES[key] = content
-  return _DEFAULT_TEMPLATES[key]
-
-
-def init_default_files(directory, config_name='config.yaml', overwrite=None):
-  """Create all default files and directories in *directory*.
-
-  *config_name* is the filename for the config file (allows alternatives
-  when config.yaml already exists).
-
-  *overwrite* is an optional set of filenames to overwrite if they exist.
-  Files not in the set are skipped when they already exist.
-
-  Returns ``(created, skipped, overwritten)`` — three lists of
-  ``(name, kind)`` tuples.
-  Raises OSError on directory creation failure.
-  """
-  overwrite = overwrite or set()
-  created = []
-  skipped = []
-  overwritten = []
-  os.makedirs(directory, exist_ok=True)
-
-  def _write_file(path, name, content, kind):
-    exists = os.path.isfile(path)
-    if exists and name not in overwrite:
-      skipped.append((name, 'already exists'))
-      return
-    with open(path, 'w', encoding='utf-8') as f:
-      f.write(content)
-    if exists:
-      overwritten.append((name, kind))
-    else:
-      created.append((name, kind))
-
-  # Config file
-  config_path = os.path.join(directory, config_name)
-  _write_file(config_path, config_name, _resolve_template('config'), 'config')
-
-  # Ancillary files and directories
-  for name, is_dir in _DEFAULT_ANCILLARY:
-    path = os.path.join(directory, name)
-    if is_dir:
-      if os.path.isdir(path):
-        skipped.append((name + '/', 'already exists'))
-      else:
-        os.makedirs(path, exist_ok=True)
-        created.append((name + '/', 'directory'))
-    else:
-      stem = os.path.splitext(name)[0]
-      content = _resolve_template(stem) if stem in _DEFAULT_TEMPLATES else ''
-      if content:
-        _write_file(path, name, content, 'file')
-
-  # Copy bundled icons into the icons/ directory
-  import shutil
-  bundled_icons = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icons')
-  target_icons = os.path.join(directory, 'icons')
-  if os.path.isdir(bundled_icons):
-    os.makedirs(target_icons, exist_ok=True)
-    for fname in os.listdir(bundled_icons):
-      src = os.path.join(bundled_icons, fname)
-      dst = os.path.join(target_icons, fname)
-      if os.path.isfile(src):
-        if not os.path.isfile(dst):
-          shutil.copy2(src, dst)
-          created.append(('icons/' + fname, 'icon'))
-        elif ('icons/' + fname) not in overwrite:
-          skipped.append(('icons/' + fname, 'already exists'))
-
-  # Copy bundled plugins into the plugins/ directory
-  bundled_plugins = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'plugins')
-  target_plugins = os.path.join(directory, 'plugins')
-  if os.path.isdir(bundled_plugins):
-    for item in os.listdir(bundled_plugins):
-      src = os.path.join(bundled_plugins, item)
-      dst = os.path.join(target_plugins, item)
-      if os.path.isfile(src):
-        if not os.path.isfile(dst):
-          shutil.copy2(src, dst)
-          created.append(('plugins/' + item, 'plugin'))
-        elif ('plugins/' + item) not in overwrite:
-          skipped.append(('plugins/' + item, 'already exists'))
-      elif os.path.isdir(src):
-        if not os.path.isdir(dst):
-          shutil.copytree(src, dst)
-          created.append(('plugins/' + item + '/', 'plugin data'))
-        else:
-          skipped.append(('plugins/' + item + '/', 'already exists'))
-
-  return created, skipped, overwritten
-
-
-def _load_scripts_and_plugins(cli_args, config_dir):
-  """Load variables, popups, plugins, and startup scripts."""
-  # Variables
-  state.load_variables()
-
-  # Popups
-  import popups
-  popups.load()
-
-  # Plugins (Python scripts)
-  scripts = loadscripts(suppress=cli_args.no_plugins or None,
-                        extra=cli_args.plugin or None)
-  state.activescripts = dict(scripts)
-
-  # Startup commands & command scripts
-  from commands import run_script
-  win = next(iter(state.clients)).window if state.clients else None
-  if not cli_args.no_startup:
-    if cli_args.startup:
-      run_script(cli_args.startup, win)
-    else:
-      startup = _startup_path()
-      if startup and os.path.isfile(startup):
-        run_script(startup, win)
-  from commands import _resolve_cmdscripts_dir
-  from plugins import _expand_auto_load
-  import fnmatch as _fnmatch
-  cmdscripts_dir = _resolve_cmdscripts_dir()
-  for name in _expand_auto_load(state.config.scripts_auto_run, cmdscripts_dir, None):
-    if cli_args.no_scripts and any(_fnmatch.fnmatch(name, p) for p in cli_args.no_scripts):
-      continue
-    run_script(name, win)
-  for name in _expand_auto_load(cli_args.run, cmdscripts_dir, None):
-    run_script(name, win)
-
-
-def _init_config(app_dir, path_arg, set_opts):
-  """Generate a new config file and exit."""
-  path_arg = path_arg.strip()
-  target = os.path.abspath(path_arg)
-
-  # If target looks like a directory (ends with separator or exists as dir),
-  # use default filename inside it
-  if (path_arg.endswith(os.sep) or path_arg.endswith('/')
-      or (os.path.isdir(target) and not target.endswith('.yaml')
-          and not target.endswith('.yml'))):
-    target = os.path.join(target, 'config.yaml')
-  elif (not os.path.exists(target)
-        and not target.endswith('.yaml') and not target.endswith('.yml')):
-    # Ambiguous: could be a directory or a filename
-    print('"%s" does not exist and has no file extension.' % path_arg)
-    print('  [d] Create as a directory (config.yaml inside it)')
-    print('  [f] Create as a config file with that name')
-    print('  [c] Cancel')
-    choice = input('Choice [d/f/c]: ').strip().lower()
-    if choice == 'd':
-      target = os.path.join(target, 'config.yaml')
-    elif choice == 'f':
-      pass  # use as-is
-    else:
-      sys.exit(0)
-
-  config_dir = os.path.dirname(target)
-  filename = os.path.basename(target)
-
-  # Abort if config file already exists
-  if os.path.isfile(target):
-    print('Error: %s already exists' % target, file=sys.stderr)
-    sys.exit(1)
-
-  try:
-    created, skipped, _ = init_default_files(config_dir, filename)
-  except OSError as e:
-    print('Error: %s' % e, file=sys.stderr)
-    sys.exit(1)
-
-  # Apply --set options to seed the config file
-  if set_opts:
-    from io import StringIO
-    from ruamel.yaml import YAML
-    from ruamel.yaml.comments import CommentedMap
-    yaml = YAML()
-    data = CommentedMap()
-    for opt in set_opts:
-      if '=' not in opt:
-        print('Error: --set requires KEY=VALUE format: %s' % opt,
-              file=sys.stderr)
-        sys.exit(1)
-      key_path, value_str = opt.split('=', 1)
-      try:
-        parsed = yaml.load(StringIO(value_str))
-      except Exception:
-        parsed = value_str
-      parts = key_path.strip().split('.')
-      node = data
-      for p in parts[:-1]:
-        if p not in node or not isinstance(node.get(p), dict):
-          node[p] = CommentedMap()
-        node = node[p]
-      node[parts[-1]] = parsed
-    buf = StringIO()
-    yaml.dump(data, buf)
-    with open(target, 'a', encoding='utf-8') as f:
-      f.write('\n' + buf.getvalue())
-
-  for name, kind in created:
-    print('Created %s' % name)
-  for name, reason in skipped:
-    print('Warning: %s (%s)' % (name, reason))
-
-  print('Run with: python qtpyrc.py -c %s' % (
-      filename if config_dir == os.getcwd() else target))
-
-
-def _apply_set_opts(config, set_opts):
-  """Apply --set KEY=VALUE options to a loaded config."""
-  from io import StringIO
-  from ruamel.yaml import YAML
-  from ruamel.yaml.comments import CommentedMap
-  from config import AppConfig
-  yaml = YAML()
-  for opt in set_opts:
-    if '=' not in opt:
-      print('Warning: ignoring --set without = : %s' % opt, file=sys.stderr)
-      continue
-    key_path, value_str = opt.split('=', 1)
-    try:
-      parsed = yaml.load(StringIO(value_str))
-    except Exception:
-      parsed = value_str
-    parts = key_path.strip().split('.')
-    node = config._data
-    for p in parts[:-1]:
-      if p not in node or not isinstance(node.get(p), dict):
-        node[p] = CommentedMap()
-      node = node[p]
-    node[parts[-1]] = parsed
-  # Re-initialize config with updated data (don't save — runtime only)
-  AppConfig.__init__(config, config.path, config._data, config._yaml)
 
 
 # ---------------------------------------------------------------------------
@@ -1661,10 +751,6 @@ if __name__ == '__main__':
                       help='Path to YAML configuration file')
   parser.add_argument('-d', '--debug', type=int, default=None,
                       help='Debug output level (0=silent, 1=error, 2=warn, 3=info, 4=debug, 5=trace)')
-  parser.add_argument('--debuglog', default=None, metavar='FILE',
-                      help='Log debug output to a file (appends)')
-  parser.add_argument('--debuglog-overwrite', action='store_true',
-                      help='Overwrite the debug log file instead of appending')
   # Script/plugin control
   parser.add_argument('--startup', default=None,
                       help='Startup script to run instead of the configured one')
@@ -1680,53 +766,15 @@ if __name__ == '__main__':
                       help='Suppress autoload plugins matching pattern (repeatable, wildcards)')
   parser.add_argument('-e', '--exec', action='append', default=[], dest='exec_cmds',
                       help='Execute a /command on startup (repeatable)')
-  parser.add_argument('-o', '--override', action='append', default=[],
-                      dest='set_opts', metavar='KEY=VALUE',
-                      help='Override a config option at runtime without saving '
-                           '(dot path, repeatable, e.g. -o font.size=15). '
-                           'With --init, seeds the value into the new file')
-  parser.add_argument('--headless', action='store_true',
-                      help='Run without GUI (for bots and scripts). IRC connections, '
-                           'plugins, and commands work; no windows are created.')
-  parser.add_argument('--ui', default=None, metavar='PATH',
-                      help='Trigger a UI path on startup (e.g. --ui menu.tools.colorpicker)')
-  parser.add_argument('--ui-list', action='store_true',
-                      help='List all registered /ui paths and exit')
-  parser.add_argument('--init', nargs='?', const='config.yaml', default=None,
-                      metavar='[PATH]',
-                      help='Generate a new config file and exit. '
-                           'PATH can be a filename, directory, or dir/filename '
-                           '(default: config.yaml in current directory)')
   cli_args, qt_args = parser.parse_known_args()
-  # Error on unrecognized arguments (parse_known_args silently ignores them)
-  unknown = [a for a in qt_args if a.startswith('-')]
-  if unknown:
-    print('Error: unrecognized arguments: %s' % ' '.join(unknown), file=sys.stderr)
-    parser.print_usage(sys.stderr)
-    sys.exit(2)
 
   mypath = os.path.dirname(os.path.abspath(__file__))
-
-  # --- --init: generate a new config file and exit ---
-  if cli_args.init is not None:
-    _init_config(mypath, cli_args.init, cli_args.set_opts)
-    sys.exit(0)
-
   configpath = cli_args.config or os.path.join(mypath, "config.yaml")
   if not os.path.isfile(configpath):
-    if cli_args.config:
-      print('Error: config file not found: %s' % configpath, file=sys.stderr)
-      print('Use --init to create a new config file.', file=sys.stderr)
-      sys.exit(1)
-    # No config file found — auto-init on first run
-    print('First run — creating default configuration in %s'
-          % os.path.dirname(os.path.abspath(configpath)))
-    _init_config(mypath, configpath, cli_args.set_opts)
+    with open(configpath, 'w') as f:
+      f.write('# qtpyrc configuration\n'
+              '# See config.example.yaml for all available options.\n')
   state.config = loadconfig(configpath)
-
-  # Apply --set overrides
-  if cli_args.set_opts:
-    _apply_set_opts(state.config, cli_args.set_opts)
   ui_name = state.config.ui_state_file
   if not os.path.isabs(ui_name):
     ui_name = os.path.join(os.path.dirname(os.path.abspath(state.config.path)), ui_name)
@@ -1737,110 +785,17 @@ if __name__ == '__main__':
     state.debug_level = cli_args.debug
   elif state.config.log_debug:
     state.debug_level = state.LOG_DEBUG
-  if cli_args.debuglog:
-    mode = 'w' if cli_args.debuglog_overwrite else 'a'
-    try:
-      state._dbg_file = open(cli_args.debuglog, mode, encoding='utf-8')
-    except Exception as e:
-      print('Error opening debug log %s: %s' % (cli_args.debuglog, e))
 
   # --- Logger ---
-  config_dir = os.path.dirname(os.path.abspath(state.config.path))
-  state.irclogger = IRCLogger(state.config, config_dir)
+  state.irclogger = IRCLogger(state.config, mypath)
 
   # --- History DB ---
   from history import HistoryDB
-  hf = state.config.history_file
-  if not os.path.isabs(hf):
-    hf = os.path.join(config_dir, hf)
-  state.historydb = HistoryDB(hf, keep_limit=state.config.backscroll_limit)
-
-  # --- Headless mode ---
-  if cli_args.headless:
-    from headless import install_headless, StubMainWindow
-    install_headless()
-
-    # Minimal QCoreApplication for event loop (no GUI)
-    from PySide6.QtCore import QCoreApplication
-    _app = QCoreApplication([sys.argv[0]])
-    state.app = type('App', (), {'mainwin': StubMainWindow()})()
-    state.ui_registry = {}
-    state.ui_descriptions = {}
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    apply_hooks()
-
-    state.clients = set()
-    init_irc()
-    if state.config.networks:
-      for netkey in state.config.networks:
-        if state.config.resolve(netkey, 'auto_connect'):
-          client = Client(network_key=netkey)
-          state.clients.add(client)
-          asyncio.ensure_future(client.connect_to_server())
-    if not state.clients:
-      state.clients.add(Client())
-
-    # Load scripts/plugins
-    _load_scripts_and_plugins(cli_args, config_dir)
-
-    # CLI -e commands
-    win = next(iter(state.clients)).window if state.clients else None
-    if win and cli_args.exec_cmds:
-      for cmd in cli_args.exec_cmds:
-        from commands import docommand
-        docommand(win, *(cmd.split(' ', 1)))
-
-    # Graceful shutdown on SIGTERM/SIGINT
-    def _headless_shutdown():
-      print('\nShutting down...')
-      # Cancel async tasks first so handlers stop
-      for task in asyncio.all_tasks(loop):
-        task.cancel()
-      # Disconnect all clients
-      for client in (state.clients or []):
-        if client.conn:
-          client.conn.disconnect()
-      # Close history database
-      if state.historydb:
-        try:
-          state.historydb.close()
-        except Exception:
-          pass
-      loop.stop()
-
-    try:
-      loop.add_signal_handler(signal.SIGINT, _headless_shutdown)
-      loop.add_signal_handler(signal.SIGTERM, _headless_shutdown)
-    except NotImplementedError:
-      pass  # Windows — Ctrl+C handled via KeyboardInterrupt
-
-    print('Running in headless mode. Ctrl+C or SIGTERM to quit.')
-    try:
-      loop.run_forever()
-    except KeyboardInterrupt:
-      _headless_shutdown()
-    finally:
-      loop.close()
-    sys.exit(0)
+  state.historydb = HistoryDB(os.path.join(mypath, "history.db"),
+                              keep_limit=state.config.backscroll_limit)
 
   # --- Qt app ---
   state.app = makeapp([sys.argv[0]] + qt_args)
-
-  # --- --ui-list: print all registered paths and exit ---
-  if cli_args.ui_list:
-    paths = sorted(state.ui_registry.keys())
-    width = max(len(p) for p in paths) if paths else 0
-    for path in paths:
-      desc = state.ui_descriptions.get(path, '')
-      if desc:
-        print('%-*s  %s' % (width, path, desc))
-      else:
-        print(path)
-    sys.exit(0)
-
   loop = qasync.QEventLoop(state.app)
   asyncio.set_event_loop(loop)
 
@@ -1849,13 +804,6 @@ if __name__ == '__main__':
 
   # --- Apply plugin hooks to IRCClient ---
   apply_hooks()
-
-  # --- First-run wizard ---
-  from setup_wizard import should_show_wizard, SetupWizard, apply_wizard_result
-  if should_show_wizard(state.config):
-    wizard = SetupWizard(state.app.mainwin)
-    if wizard.exec() == QDialog.DialogCode.Accepted and wizard.result_data:
-      apply_wizard_result(state.config, wizard.result_data)
 
   # --- Initialise plugin.irc singleton and auto-connect ---
   state.clients = set()
@@ -1885,34 +833,45 @@ if __name__ == '__main__':
       state.tray_icon.show()
   state.notifications.start_polling()
 
-  # --- Variables, popups, plugins, scripts ---
-  _load_scripts_and_plugins(cli_args, config_dir)
-  # CLI -e commands
+  # --- Variables ---
+  state.load_variables()
+
+  # --- Popups ---
+  import popups
+  popups.load()
+
+  # --- Plugins (Python scripts) ---
+  scripts = loadscripts(suppress=cli_args.no_plugins or None,
+                        extra=cli_args.plugin or None)
+  state.activescripts = dict(scripts)
+
+  # --- Startup commands & command scripts ---
+  from commands import run_script
   win = next(iter(state.clients)).window if state.clients else None
+  # Startup commands file
+  if not cli_args.no_startup:
+    if cli_args.startup:
+      run_script(cli_args.startup, win)
+    else:
+      startup = _startup_path()
+      if startup and os.path.isfile(startup):
+        run_script(startup, win)
+  # Additional command scripts from config (with suppression)
+  from commands import _resolve_cmdscripts_dir
+  from plugins import _expand_auto_load
+  import fnmatch as _fnmatch
+  cmdscripts_dir = _resolve_cmdscripts_dir()
+  for name in _expand_auto_load(state.config.scripts_auto_run, cmdscripts_dir, None):
+    if cli_args.no_scripts and any(_fnmatch.fnmatch(name, p) for p in cli_args.no_scripts):
+      continue
+    run_script(name, win)
+  # Additional command scripts from CLI (supports wildcards and paths)
+  for name in _expand_auto_load(cli_args.run, cmdscripts_dir, None):
+    run_script(name, win)
+  # CLI -e commands
   if win and cli_args.exec_cmds:
     for cmd in cli_args.exec_cmds:
       win.lineinput(cmd)
-  # CLI --ui trigger (deferred until the main window is fully mapped on screen)
-  if cli_args.ui and win:
-    from commands import docommand
-    _ui_cmd = cli_args.ui
-    # Validate the path
-    _ui_lower = _ui_cmd.strip().lower()
-    if _ui_lower not in state.ui_registry:
-      _matches = [k for k in state.ui_registry if k.startswith(_ui_lower + '.') or k.startswith(_ui_lower)]
-      if not _matches:
-        print('Error: unknown --ui path: %s' % _ui_cmd, file=sys.stderr)
-        print('Use --ui-list to see available paths.', file=sys.stderr)
-        sys.exit(2)
-    _mw = state.app.mainwin
-    class _ExposeFilter(QObject):
-      def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.WindowActivate:
-          _mw.removeEventFilter(self)
-          QTimer.singleShot(0, lambda: docommand(win, 'ui', _ui_cmd))
-          return False
-        return False
-    _mw.installEventFilter(_ExposeFilter(_mw))
 
   # --- Identd ---
   asyncio.ensure_future(runidentd())
@@ -1922,56 +881,31 @@ if __name__ == '__main__':
     quit()
   signal.signal(signal.SIGINT, _sigint_handler)
 
-  # Enable faulthandler to get tracebacks on segfaults
-  import faulthandler
-  _crash_log = os.path.join(os.path.dirname(os.path.abspath(state.config.path)), 'crash.log')
-  _crash_fh = open(_crash_log, 'a')
-  faulthandler.enable(file=_crash_fh)
-
-  # Log all exceptions to crash.log as well as stderr
-  def _log_exception(header, exc_type=None, exc_value=None, exc_tb=None):
-    import traceback
-    from datetime import datetime
-    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    msg = '[%s] %s\n' % (ts, header)
-    print(header, file=sys.stderr)
-    _crash_fh.write(msg)
-    if exc_type and exc_value:
-      traceback.print_exception(exc_type, exc_value, exc_tb)
-      traceback.print_exception(exc_type, exc_value, exc_tb, file=_crash_fh)
-    _crash_fh.flush()
-
   # Catch unhandled exceptions that would otherwise silently kill the window
   def _excepthook(exc_type, exc_value, exc_tb):
-    _log_exception('*** Unhandled exception ***', exc_type, exc_value, exc_tb)
+    import traceback
+    print("*** Unhandled exception ***", file=sys.stderr)
+    traceback.print_exception(exc_type, exc_value, exc_tb)
   sys.excepthook = _excepthook
 
   def _unraisable_hook(unraisable):
-    _log_exception('*** Unraisable exception in %s ***' % (unraisable.object,),
-                   type(unraisable.exc_value) if unraisable.exc_value else None,
-                   unraisable.exc_value,
-                   unraisable.exc_value.__traceback__ if unraisable.exc_value else None)
+    import traceback
+    print("*** Unraisable exception in %s ***" % (unraisable.object,), file=sys.stderr)
+    if unraisable.exc_value:
+      traceback.print_exception(type(unraisable.exc_value), unraisable.exc_value,
+                                unraisable.exc_value.__traceback__)
   sys.unraisablehook = _unraisable_hook
 
   def _async_exception_handler(loop, context):
     exc = context.get('exception')
     msg = context.get('message', 'Unhandled async exception')
+    print("*** %s ***" % msg, file=sys.stderr)
     if exc:
-      _log_exception('*** %s ***' % msg, type(exc), exc, exc.__traceback__)
+      import traceback
+      traceback.print_exception(type(exc), exc, exc.__traceback__)
     else:
-      _log_exception('*** %s: %s ***' % (msg, context))
+      print(context, file=sys.stderr)
   loop.set_exception_handler(_async_exception_handler)
-
-  # atexit: log if we're exiting without quit() being called
-  import atexit
-  def _atexit():
-    if not _quitting:
-      from datetime import datetime
-      ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-      _crash_fh.write('[%s] *** Unexpected exit (no quit() called) ***\n' % ts)
-      _crash_fh.flush()
-    _crash_fh.close()
-  atexit.register(_atexit)
 
   with loop:
     loop.run_forever()

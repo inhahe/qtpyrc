@@ -364,14 +364,12 @@ def _expand_vars(s, variables, warn_unknown=False, pattern_label=None,
         try:
           result = eval(arg, {'__builtins__': __builtins__}, func_ns)
           return str(result) if result is not None else ''
-        except Exception as e:
-          state.dbg(state.LOG_WARN, '[config] eval(%r) failed: %s' % (arg, e))
+        except Exception:
           return ''
       elif name == 'stdin':
         try:
           return input(arg)
-        except Exception as e:
-          state.dbg(state.LOG_WARN, '[config] stdin(%r) failed: %s' % (arg, e))
+        except Exception:
           return ''
       elif name == 'input':
         try:
@@ -379,8 +377,7 @@ def _expand_vars(s, variables, warn_unknown=False, pattern_label=None,
           parent = QApplication.activeWindow()
           text, ok = QInputDialog.getText(parent, 'Input', arg or 'Enter value:')
           return text.strip() if ok else ''
-        except Exception as e:
-          state.dbg(state.LOG_WARN, '[config] input(%r) failed: %s' % (arg, e))
+        except Exception:
           return ''
     # 3. Unknown
     unknown.append(name)
@@ -438,8 +435,8 @@ def is_highlight(message, my_nick, network_key=None, channel=None):
       try:
         if _re.search(regex, message, flags):
           return True
-      except _re.error as e:
-        state.dbg(state.LOG_WARN, '[config] bad regex in pattern %r: %s' % (pat, e))
+      except _re.error:
+        pass
     else:
       # Plain string: case-insensitive substring match
       expanded = _expand_vars(pat, plain_vars,
@@ -499,23 +496,6 @@ def _modify_list_entry(list_key, mask, remove, network_key=None, channel=None):
 # ---------------------------------------------------------------------------
 # Configuration  (ruamel.yaml round-trip for comment preservation)
 # ---------------------------------------------------------------------------
-
-def _default_nick_palette():
-  """Load default nick color palette from config.defaults.yaml."""
-  try:
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        'defaults', 'config.defaults.yaml')
-    yaml = YAML()
-    yaml.preserve_quotes = True
-    with open(path, 'r', encoding='utf-8') as f:
-      data = yaml.load(f)
-    palette = (data.get('nick_colors') or {}).get('palette')
-    if palette:
-      return list(palette)
-  except Exception:
-    pass
-  return ['#cc0000', '#0066cc', '#009900', '#9933cc', '#cc6600']
-
 
 class AppConfig:
   """Application configuration backed by a ruamel.yaml round-trip document.
@@ -578,7 +558,9 @@ class AppConfig:
     if self.menu_font_size is not None:
       self.menu_font_size = int(self.menu_font_size)
     self.tree_font_family = font.get('tree_family', None)
-    self.tree_font_size = int(font.get('tree_size', 11)) or None
+    self.tree_font_size = font.get('tree_size', None)
+    if self.tree_font_size is not None:
+      self.tree_font_size = int(self.tree_font_size)
     self.nicklist_font_family = font.get('nicklist_family', None)
     self.nicklist_font_size = font.get('nicklist_size', None)
     if self.nicklist_font_size is not None:
@@ -586,17 +568,9 @@ class AppConfig:
     self.editor_font_family = font.get('editor_family') or 'Consolas'
     self.editor_font_size = int(font.get('editor_size', 10))
     self.settings_font_family = font.get('settings_family', None)
-    self.settings_font_size = int(font.get('settings_size', 11))
-    if self.settings_font_size == 0:
-      self.settings_font_size = 11
-    # Settings dialog element sizes (pt or px depending on element)
-    settings_sizes = font.get('settings_sizes') or {}
-    self.settings_title_size = int(settings_sizes.get('title', 13))
-    self.settings_label_size = int(settings_sizes.get('label', 0))
-    self.settings_list_size = int(settings_sizes.get('list', 0))
-    self.settings_note_size = int(settings_sizes.get('note', 0))
-    self.settings_hint_size = int(settings_sizes.get('hint', 0))
-    self.settings_delete_size = int(settings_sizes.get('delete', 0))
+    self.settings_font_size = font.get('settings_size', None)
+    if self.settings_font_size is not None:
+      self.settings_font_size = int(self.settings_font_size)
     self.tab_rows = data.get('tab_rows', 0)  # 0 = dynamic
 
     # Window title format strings
@@ -685,10 +659,6 @@ class AppConfig:
     notice_raw = colors.get('notice')
     self.color_notice = _parse_color(notice_raw) if notice_raw else QColor(Qt.darkCyan)
 
-    # Link color
-    link_raw = colors.get('link')
-    self.color_link = _parse_color(link_raw) if link_raw else QColor('#0066cc')
-
     # Search highlight color
     search_bg_raw = colors.get('search_bg')
     search_fg_raw = colors.get('search_fg')
@@ -720,7 +690,6 @@ class AppConfig:
     self.log_debug = log.get('debug', False)
     self.log_timestamp_format = log.get('timestamp', 'YYYY-MM-DD HH:mm:SS')
 
-    self.history_file = data.get('history_file', 'history.db')
     self.backscroll_limit = data.get('backscroll_limit', 10000)
     hr = data.get('history_replay') or {}
     if isinstance(hr, int):
@@ -730,9 +699,6 @@ class AppConfig:
     else:
       self.history_replay_channels = hr.get('channels', self.backscroll_limit)
       self.history_replay_queries = hr.get('queries', 0)
-    self.history_bg_enabled = bool(hr.get('bg_enabled', True) if isinstance(hr, dict) else True)
-    self.history_bg_chunk = int(hr.get('bg_chunk', 50) if isinstance(hr, dict) else 50)
-    self.history_bg_interval = int(hr.get('bg_interval', 100) if isinstance(hr, dict) else 100)
 
     self.networks = data.get('networks') or {}
     self.nickswidth = data.get('nickswidth', 100)
@@ -763,29 +729,10 @@ class AppConfig:
     self.close_on_disconnect = data.get('close_on_disconnect', False)
 
     self.show_mode_prefix = data.get('show_mode_prefix', False)
-    self.auto_copy_selection = data.get('auto_copy_selection', False)
-
-    # Nick colors
-    nc = data.get('nick_colors') or {}
-    if isinstance(nc, bool):
-      nc = {'enabled': nc}
-    self.nick_colors_enabled = bool(nc.get('enabled', False))
-    self.nick_color_palette = nc.get('palette') or _default_nick_palette()
 
     typing = data.get('typing') or {}
     self.typing_send = typing.get('send', True)
     self.typing_show = typing.get('show', True)
-
-    # Link previews
-    lp = data.get('link_preview') or {}
-    if isinstance(lp, bool):
-      lp = {'enabled': lp}
-    self.link_preview_enabled = bool(lp.get('enabled', False))
-    self.link_preview_max_size = int(lp.get('max_size', 262144))
-    self.link_preview_timeout = float(lp.get('timeout', 10.0))
-    self.link_preview_width = int(lp.get('width', 400))
-    self.link_preview_height = int(lp.get('height', 120))
-    self.link_preview_proxy = lp.get('proxy', '') or ''
 
     # Notifications
     notif = data.get('notifications') or {}
@@ -926,48 +873,12 @@ class AppConfig:
     self.save()
 
   def save(self):
-    _atomic_yaml_save(self._yaml, self._data, self.path)
-
-
-def _atomic_yaml_save(yaml, data, path):
-  """Write YAML data to a file atomically (write to temp, then rename).
-  Prevents corruption from interrupted writes."""
-  import tempfile
-  try:
-    directory = os.path.dirname(path)
-    with tempfile.NamedTemporaryFile('w', suffix='.tmp', prefix='.qtpyrc_',
-                                     dir=directory, delete=False,
-                                     encoding='utf-8') as tmp:
-      yaml.dump(data, tmp)
-      tmp_path = tmp.name
-    # Atomic rename (on Windows, need to remove target first)
-    if os.path.exists(path):
-      backup = path + '.bak'
-      try:
-        if os.path.exists(backup):
-          os.remove(backup)
-        os.rename(path, backup)
-      except OSError as e:
-        state.dbg(state.LOG_WARN, '[config] backup rename failed for %s: %s' % (path, e))
-    os.rename(tmp_path, path)
-    # Remove backup on success
     try:
-      backup = path + '.bak'
-      if os.path.exists(backup):
-        os.remove(backup)
-    except OSError as e:
-      state.dbg(state.LOG_DEBUG, '[config] backup cleanup failed for %s: %s' % (path, e))
-  except Exception:
-    traceback.print_exc()
-    state.dbg(state.LOG_ERROR, '[config] atomic save failed for', path)
-    # Try to restore from backup if rename failed
-    try:
-      backup = path + '.bak'
-      if not os.path.exists(path) and os.path.exists(backup):
-        os.rename(backup, path)
-        state.dbg(state.LOG_INFO, '[config] restored from backup:', backup)
-    except OSError as e:
-      state.dbg(state.LOG_ERROR, '[config] backup restore FAILED for %s: %s' % (path, e))
+      with open(self.path, 'w') as f:
+        self._yaml.dump(self._data, f)
+    except Exception:
+      state.dbg(state.LOG_ERROR, 'Failed to save config to', self.path)
+      traceback.print_exc()
 
 
 # ---------------------------------------------------------------------------
@@ -987,10 +898,10 @@ class UIState:
       if os.path.isfile(old):
         try:
           os.rename(old, path)
-        except OSError as e:
-          state.dbg(state.LOG_INFO, '[config] layout.yaml migration failed:', e)
+        except OSError:
+          pass
     try:
-      with open(path, 'r', encoding='utf-8') as f:
+      with open(path, 'r') as f:
         self._data = self._yaml.load(f) or {}
     except FileNotFoundError:
       self._data = {}
@@ -1116,25 +1027,12 @@ class UIState:
     self._data['scripts_order'] = list(order)
     self.save()
 
-  @property
-  def hex_uppercase(self):
-    return bool(self._data.get('hex_uppercase', False))
-
-  @hex_uppercase.setter
-  def hex_uppercase(self, val):
-    self._data['hex_uppercase'] = bool(val)
-    self.save()
-
-  @property
-  def input_history(self):
-    return list(self._data.get('input_history') or [])
-
-  @input_history.setter
-  def input_history(self, history):
-    self._data['input_history'] = list(history)
-
   def save(self):
-    _atomic_yaml_save(self._yaml, self._data, self.path)
+    try:
+      with open(self.path, 'w') as f:
+        self._yaml.dump(self._data, f)
+    except Exception:
+      traceback.print_exc()
 
 
 def _update_text_formats(cfg):
@@ -1162,18 +1060,8 @@ def _update_text_formats(cfg):
 def loadconfig(configpath):
   yaml = YAML()
   yaml.preserve_quotes = True
-  with open(configpath, 'r', encoding='utf-8') as f:
+  with open(configpath, 'r') as f:
     data = yaml.load(f)
-  cfg = AppConfig(configpath, data, yaml)
-  _update_text_formats(cfg)
-  return cfg
-
-def loadconfig_text(text, configpath):
-  """Load config from text content, using *configpath* for file resolution."""
-  from io import StringIO
-  yaml = YAML()
-  yaml.preserve_quotes = True
-  data = yaml.load(StringIO(text))
   cfg = AppConfig(configpath, data, yaml)
   _update_text_formats(cfg)
   return cfg

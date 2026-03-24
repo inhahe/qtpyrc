@@ -1,8 +1,6 @@
 from PySide6.QtWidgets import (
     QWidget, QFormLayout, QLineEdit, QComboBox, QCheckBox,
-    QHBoxLayout, QPushButton,
 )
-from settings.page_general import _ck
 
 
 class SASLPage(QWidget):
@@ -11,33 +9,20 @@ class SASLPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
-        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
-        self.enabled = _ck(QCheckBox(), 'sasl.enabled')
+        self.enabled = QCheckBox()
         layout.addRow("Enable SASL:", self.enabled)
 
-        self.mechanism = _ck(QComboBox(), 'sasl.mechanism')
+        self.mechanism = QComboBox()
         self.mechanism.addItems(["PLAIN", "EXTERNAL"])
         layout.addRow("Mechanism:", self.mechanism)
 
-        self.username = _ck(QLineEdit(), 'sasl.username')
-        self.username.setMinimumWidth(200)
+        self.username = QLineEdit()
         layout.addRow("Username:", self.username)
 
-        pw_row = QHBoxLayout()
-        self.password = _ck(QLineEdit(), 'sasl.password')
-        self.password.setMinimumWidth(200)
+        self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
-        pw_row.addWidget(self.password)
-        self._pw_show = QPushButton("Show")
-        self._pw_show.setFixedWidth(50)
-        self._pw_show.setCheckable(True)
-        self._pw_show.toggled.connect(lambda on: (
-            self.password.setEchoMode(
-                QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password),
-            self._pw_show.setText("Hide" if on else "Show")))
-        pw_row.addWidget(self._pw_show)
-        layout.addRow("Password:", pw_row)
+        layout.addRow("Password:", self.password)
 
     def load_from_data(self, net_data):
         sasl = net_data.get('sasl') or {}

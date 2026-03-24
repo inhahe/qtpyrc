@@ -17,8 +17,6 @@ import string
 import time
 import traceback
 
-import state
-
 # --- Constants ---
 
 NUL = '\0'
@@ -203,8 +201,8 @@ def ctcpStringify(messages):
             if not isinstance(data, str):
                 try:
                     data = " ".join(str(x) for x in data)
-                except TypeError as e:
-                    state.dbg(state.LOG_WARN, '[ctcp] stringify failed for tag=%r data=%r: %s' % (tag, data, e))
+                except TypeError:
+                    pass
             m = "%s %s" % (tag, data)
         else:
             m = str(tag)
@@ -234,7 +232,6 @@ symbolic_to_numeric = {
     "RPL_NAMREPLY": '353', "RPL_ENDOFNAMES": '366',
     "RPL_LINKS": '364', "RPL_ENDOFLINKS": '365',
     "RPL_BANLIST": '367', "RPL_ENDOFBANLIST": '368',
-    "RPL_QUIETLIST": '728', "RPL_ENDOFQUIETLIST": '729',
     "RPL_INFO": '371', "RPL_ENDOFINFO": '374',
     "RPL_MOTDSTART": '375', "RPL_MOTD": '372', "RPL_ENDOFMOTD": '376',
     "RPL_YOUREOPER": '381', "RPL_REHASHING": '382',
@@ -337,7 +334,6 @@ class IRCClient:
         self._monitor_limit = 0          # max targets (0 = unlimited)
         # Make a mutable copy so ISUPPORT can update per-connection
         self._modeAcceptsArg = dict(self.__class__._modeAcceptsArg)
-        self._chanmodes_raw = ''  # CHANMODES=A,B,C,D from ISUPPORT
         # IRCv3 state
         self._current_tags = {}           # message tags for the line being processed
         self._cap_negotiating = False
@@ -364,10 +360,8 @@ class IRCClient:
         self.connectionMade()
         try:
             await self._read_loop()
-        except asyncio.CancelledError:
-            state.dbg(state.LOG_INFO, '[irc] connection cancelled:', host)
-        except (ConnectionError, OSError) as e:
-            state.dbg(state.LOG_INFO, '[irc] connection lost:', host, str(e))
+        except (asyncio.CancelledError, ConnectionError, OSError):
+            pass
         finally:
             self.connectionLost("Connection closed")
             self._cleanup()
@@ -381,25 +375,25 @@ class IRCClient:
         self._reader = None
 
     async def _read_loop(self):
-        buffer = b''
+        buffer = ''
         while True:
             data = await self._reader.read(4096)
             if not data:
                 break
-            buffer += data
-            while b'\n' in buffer:
-                line, buffer = buffer.split(b'\n', 1)
-                line = line.rstrip(b'\r')
+            buffer += data.decode('utf-8', errors='replace')
+            while '\n' in buffer:
+                line, buffer = buffer.split('\n', 1)
+                line = line.rstrip('\r')
                 if line:
-                    self._lineReceived(line.decode('utf-8', errors='replace'))
+                    self._lineReceived(line)
 
     def disconnect(self):
         """Close the connection."""
         if self._writer and not self._writer.is_closing():
             try:
                 self._writer.close()
-            except Exception as e:
-                state.dbg(state.LOG_DEBUG, '[irc] writer close error:', e)
+            except Exception:
+                pass
 
     # --- Line protocol ---
 
@@ -480,7 +474,7 @@ class IRCClient:
             self._current_tags = tags
             self.handleCommand(command, prefix, params)
         except IRCBadMessage:
-            state.dbg(state.LOG_WARN, '[irc] malformed message:', repr(line[:200]))
+            pass
         except Exception:
             traceback.print_exc()
         finally:
@@ -1030,7 +1024,6 @@ class IRCClient:
                     if key == 'CASEMAPPING' and value in _irclower_tables:
                         self._casemapping = value
                     elif key == 'CHANMODES':
-                        self._chanmodes_raw = value
                         self._parseChanModes(value)
                     elif key == 'PREFIX':
                         self._parsePrefix(value)

@@ -57,62 +57,48 @@ def _parse_popups(text, variables=None):
   return entries
 
 
-def _load_sections_text(text):
-  """Parse popups text.  Returns {section_name: [entries]}.
+def _load_sections(filepath):
+  """Load a popups.ini file.  Returns {section_name: [entries]}.
 
   Lines of the form ``name = value`` (outside any section, or within a
   ``[variables]`` section) define variables that can be referenced as
   ``{name}`` in labels and commands throughout the file.
-
-  Section directives:
-    ``@additive`` — when this popup triggers on a sub-element (e.g. a nick
-    anchor in a channel), append the parent popup's entries below.
-    ``@replace`` (default) — only show this section's entries.
   """
+  from config import _expand_vars
   sections = {}
-  modes = {}  # section_name -> 'additive' or 'replace'
   variables = {}
   current = None
   current_lines = []
-  for line in text.splitlines():
-    stripped = line.strip()
-    if stripped.startswith('[') and stripped.endswith(']'):
-      if current is not None and current != 'variables':
-        sections[current] = _parse_popups('\n'.join(current_lines), variables)
-      current = stripped[1:-1].lower()
-      current_lines = []
-    elif current == 'variables' or current is None:
-      if stripped and not stripped.startswith(';') and '=' in stripped and ':' not in stripped.split('=')[0]:
-        name, _, value = stripped.partition('=')
-        name = name.strip()
-        value = value.strip()
-        if name:
-          variables[name] = value
-          continue
-      current_lines.append(line)
-    else:
-      # Check for @directive
-      if stripped.lower() in ('@additive', '@replace'):
-        modes[current] = stripped[1:].lower()
-      else:
-        current_lines.append(line)
-  if current is not None and current != 'variables':
-    sections[current] = _parse_popups('\n'.join(current_lines), variables)
-  # Store modes alongside sections
-  sections['_modes'] = modes
-  return sections
-
-
-def _load_sections(filepath):
-  """Load a popups.ini file.  Returns {section_name: [entries]}."""
   try:
     with open(filepath, 'r', encoding='utf-8') as f:
-      return _load_sections_text(f.read())
+      for line in f:
+        line = line.rstrip('\r\n')
+        stripped = line.strip()
+        if stripped.startswith('[') and stripped.endswith(']'):
+          # Save previous section
+          if current is not None and current != 'variables':
+            sections[current] = _parse_popups('\n'.join(current_lines), variables)
+          current = stripped[1:-1].lower()
+          current_lines = []
+        elif current == 'variables' or current is None:
+          # Variable definitions before any section or in [variables]
+          if stripped and not stripped.startswith(';') and '=' in stripped and ':' not in stripped.split('=')[0]:
+            name, _, value = stripped.partition('=')
+            name = name.strip()
+            value = value.strip()
+            if name:
+              variables[name] = value
+              continue
+          current_lines.append(line)
+        else:
+          current_lines.append(line)
+    if current is not None and current != 'variables':
+      sections[current] = _parse_popups('\n'.join(current_lines), variables)
   except FileNotFoundError:
-    return {}
+    pass
   except Exception as e:
     state.dbg(state.LOG_ERROR, 'Error loading popups file: %s' % e)
-    return {}
+  return sections
 
 
 # Global parsed popups: {section: [entries]}
@@ -278,7 +264,7 @@ def _build_menu(entries, variables, window, parent=None):
       if d > depth:
         continue  # skip (shouldn't happen if well-formed)
       if kind == 'separator':
-        _add_menu_separator(menu)
+        menu.addSeparator()
         i += 1
       elif command is None:
         # Submenu header — look ahead for children
@@ -292,7 +278,7 @@ def _build_menu(entries, variables, window, parent=None):
           # This item itself also has a command — add it as first entry
           act = submenu.addAction(label)
           action_map[act] = command
-          _add_menu_separator(submenu)
+          submenu.addSeparator()
           i += 1
           _add_items(submenu, i, depth + 1)
         else:
@@ -304,21 +290,11 @@ def _build_menu(entries, variables, window, parent=None):
   return menu, action_map
 
 
-def get_mode(section):
-  """Return 'additive' or 'replace' for a popup section."""
-  modes = _popups.get('_modes', {})
-  return modes.get(section, 'replace')
-
-
-def show_popup(section, window, pos, extra_vars=None, copy_action=False,
-               parent_section=None):
+def show_popup(section, window, pos, extra_vars=None):
   """Show a popup menu for the given section name.
 
   *extra_vars* is an optional dict of additional variables (e.g. nick for
-  nicklist popups).  *copy_action* adds a Copy item if True.
-  *parent_section* is the fallback section for additive mode (e.g. 'channel'
-  when showing 'nicklist' in a channel window).
-  Returns True if a popup was shown, False otherwise.
+  nicklist popups).  Returns True if a popup was shown, False otherwise.
   """
   entries = _popups.get(section)
   if not entries:
@@ -329,9 +305,10 @@ def show_popup(section, window, pos, extra_vars=None, copy_action=False,
   client = getattr(window, 'client', None)
   conn = client.conn if client else None
   if client:
-    variables['me'] = getattr(conn, 'nickname', '') or '' if conn else ''
-    variables['network'] = getattr(client, 'network', '') or ''
-    variables['server'] = getattr(client, 'hostname', '') or ''
+    variables['me'] = client.nickname or ''
+    variables['network'] = client.network or ''
+  if conn:
+    variables['server'] = conn.hostname or ''
   chan = getattr(window, 'channel', None)
   if chan:
     variables['chan'] = chan.name
@@ -345,36 +322,7 @@ def show_popup(section, window, pos, extra_vars=None, copy_action=False,
     variables.update(extra_vars)
 
   menu, action_map = _build_menu(entries, variables, window, window)
-
-  # Additive mode: append parent section entries below
-  if parent_section and get_mode(section) == 'additive':
-    parent_entries = _popups.get(parent_section)
-    if parent_entries:
-      _add_menu_separator(menu)
-      parent_menu, parent_map = _build_menu(parent_entries, variables, window, menu)
-      for act in parent_menu.actions():
-        menu.addAction(act)
-      action_map.update(parent_map)
-
-  # Add Copy action at the top when text is selected
-  copy_act = None
-  if copy_action:
-    copy_act = menu.addSeparator()
-    copy_act = menu.addAction("Copy")
-    first = menu.actions()[0] if menu.actions() else None
-    if first and first is not copy_act:
-      # Move copy + separator to the top
-      sep = menu.insertSeparator(first)
-      menu.removeAction(copy_act)
-      menu.insertAction(sep, copy_act)
-
   action = menu.exec(pos)
-  if action is copy_act:
-    from PySide6.QtWidgets import QApplication
-    output = getattr(window, 'output', None)
-    if output:
-      output.copy()
-    return True
   if not action or action not in action_map:
     return True  # menu was shown, just nothing selected
 
@@ -397,123 +345,6 @@ def show_popup(section, window, pos, extra_vars=None, copy_action=False,
     _exec_popup_command(window, part)
 
   return True
-
-
-def append_section_to_menu(menu, section, window, extra_vars=None):
-  """Append a popup section's entries to an existing QMenu.
-
-  Returns an action_map dict for dispatching selected actions.
-  """
-  if not section:
-    return {}
-  entries = _popups.get(section)
-  if not entries:
-    return {}
-
-  variables = {}
-  client = getattr(window, 'client', None)
-  conn = client.conn if client else None
-  if client:
-    variables['me'] = getattr(conn, 'nickname', '') or '' if conn else ''
-    variables['network'] = getattr(client, 'network', '') or ''
-    variables['server'] = getattr(client, 'hostname', '') or ''
-  chan = getattr(window, 'channel', None)
-  if chan:
-    variables['chan'] = chan.name
-  else:
-    variables['chan'] = ''
-  query = getattr(window, 'query', None)
-  if query:
-    variables.setdefault('nick', query.nick or '')
-  if extra_vars:
-    variables.update(extra_vars)
-
-  # Build entries directly into the target menu, with separator if appending
-  action_map = {}
-  # Prepend separator if appending to existing menu, but skip if
-  # the section already starts with a separator (avoid double line)
-  need_sep = bool(menu.actions())
-  if need_sep and entries and entries[0][0] == 'separator':
-    need_sep = False
-  _build_into_menu(menu, entries, variables, action_map, prepend_sep=need_sep)
-  return action_map
-
-
-def _add_menu_separator(menu):
-  """Add a visible separator to a QMenu using a widget action.
-
-  Works around Qt/Windows 11 rendering inconsistencies with addSeparator()
-  when QMenu has a custom stylesheet.
-  """
-  from PySide6.QtWidgets import QWidgetAction, QLabel
-  wa = QWidgetAction(menu)
-  lbl = QLabel(menu)
-  lbl.setFixedHeight(9)
-  lbl.setStyleSheet(
-      "background: transparent;"
-      "border-top: 1px solid #aaa;"
-      "margin: 4px 6px 0px 6px;")
-  wa.setDefaultWidget(lbl)
-  menu.addAction(wa)
-
-
-def _build_into_menu(menu, entries, variables, action_map, prepend_sep=False):
-  """Add parsed popup entries directly into an existing QMenu."""
-  if prepend_sep:
-    _add_menu_separator(menu)
-  i = 0
-  def _add_items(target, start, depth):
-    nonlocal i
-    i = start
-    while i < len(entries):
-      kind, d, label, command = entries[i]
-      if d < depth:
-        return
-      if d > depth:
-        continue
-      if kind == 'separator':
-        _add_menu_separator(target)
-        i += 1
-      elif command is None:
-        submenu = target.addMenu(label)
-        i += 1
-        _add_items(submenu, i, depth + 1)
-      else:
-        if i + 1 < len(entries) and entries[i + 1][1] > depth:
-          submenu = target.addMenu(label)
-          act = submenu.addAction(label)
-          action_map[act] = command
-          submenu.addSeparator()
-          i += 1
-          _add_items(submenu, i, depth + 1)
-        else:
-          act = target.addAction(label)
-          action_map[act] = command
-          i += 1
-  _add_items(menu, 0, 0)
-
-
-def exec_action(command, window):
-  """Execute a popup command string with variable expansion."""
-  variables = {}
-  client = getattr(window, 'client', None)
-  conn = client.conn if client else None
-  if client:
-    variables['me'] = getattr(conn, 'nickname', '') or '' if conn else ''
-    variables['network'] = getattr(client, 'network', '') or ''
-    variables['server'] = getattr(client, 'hostname', '') or ''
-  chan = getattr(window, 'channel', None)
-  if chan:
-    variables['chan'] = chan.name
-  expanded = _expand_mirc_vars(command, variables, window)
-  if expanded is None:
-    return
-  from config import _expand_vars
-  expanded = _expand_vars(expanded, variables)
-  for part in expanded.split(' | '):
-    part = part.strip()
-    if part:
-      _exec_popup_command(window, part)
 
 
 def _exec_popup_command(window, text):

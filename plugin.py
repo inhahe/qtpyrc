@@ -117,8 +117,8 @@ class _Irc:
 
     @staticmethod
     def msg(conn, target, message):
-        """Send a PRIVMSG via *conn*. Also echoes to the local window."""
-        _Irc.say(conn, target, message)
+        """Send a PRIVMSG via *conn*."""
+        conn.say(target, message)
 
     @staticmethod
     def notice(conn, target, message):
@@ -157,51 +157,6 @@ class _Irc:
         """Return the config network key for *conn* (may be *None*)."""
         return conn.client.network_key
 
-    # --- UI paths ---
-
-    def ui(self, path):
-        """Trigger a UI action by path (e.g. ``'menu.tools.colorpicker'``).
-
-        Raises KeyError if the path is not found.
-        """
-        import state
-        from PySide6.QtGui import QAction
-        reg = state.ui_registry
-        key = path.strip().lower()
-        if key not in reg:
-            raise KeyError("Unknown UI path: %s" % path)
-        action = reg[key]
-        if isinstance(action, QAction):
-            action.trigger()
-        elif callable(action):
-            action()
-
-    def ui_list(self):
-        """Return a list of ``(path, description)`` tuples for all registered UI paths."""
-        import state
-        return sorted((k, state.ui_descriptions.get(k, ''))
-                      for k in state.ui_registry)
-
-    def ui_tree(self):
-        """Return a nested dict representing the UI path hierarchy.
-
-        Each key is a path segment.  Leaf nodes have a ``'_desc'`` key with
-        the description string.  Example::
-
-            {'menu': {'file': {'settings': {'_desc': 'File > Settings'},
-                               'close':    {'_desc': 'File > Close'}},
-                      'tools': { ... }}}
-        """
-        import state
-        tree = {}
-        for path, desc in sorted(state.ui_descriptions.items()):
-            parts = path.split('.')
-            node = tree
-            for part in parts:
-                node = node.setdefault(part, {})
-            node['_desc'] = desc
-        return tree
-
     # --- commands ---
 
     def docommand(self, window, cmd, text=''):
@@ -209,132 +164,11 @@ class _Irc:
         from commands import docommand
         docommand(window, cmd, text)
 
-    # --- convenience methods ---
-
-    @staticmethod
-    def say(conn, target, message):
-        """Send a message to *target* (channel or nick) via *conn*.
-        Also echoes to the local window and saves to history."""
-        import state
-        conn.say(target, message)
-        # Echo to local window
-        chnlower = conn.irclower(target)
-        chan = conn.client.channels.get(chnlower)
-        if chan and chan.window:
-            chan.window.addline_msg(conn.nickname, message)
-            # Save to history
-            if state.historydb:
-                state.historydb.add(conn.client.network, chnlower,
-                                    'message', conn.nickname, message)
-            state.irclogger.log_channel(conn.client.network, target,
-                                        '<%s> %s' % (conn.nickname, message))
-        else:
-            # Check queries
-            for qkey, q in conn.client.queries.items():
-                if conn.irclower(q.nick) == chnlower and q.window:
-                    q.window.addline_msg(conn.nickname, message)
-                    break
-
-    @staticmethod
-    def channel(window):
-        """Return the channel name or query nick for *window*, or ''."""
-        if hasattr(window, 'channel') and window.channel:
-            return window.channel.name
-        if hasattr(window, 'query') and window.query:
-            return window.query.nick
-        return ''
-
-    @staticmethod
-    def nicks(conn, channel):
-        """Return the set of nicks in *channel*, or an empty set."""
-        ch = conn.client.channels.get(conn.irclower(channel))
-        return set(ch.nicks) if ch else set()
-
-    @staticmethod
-    def me(conn):
-        """Return *conn*'s current nickname (alias for nick())."""
-        return conn.nickname
-
-    @staticmethod
-    def echo(window, text):
-        """Display *text* in *window* (no formatting)."""
-        window.addline(text)
-
-    @staticmethod
-    def error(window, text):
-        """Display *text* as a red system message in *window*."""
-        window.redmessage(text)
-
-    @staticmethod
-    def dbg(level, *args):
-        """Write to the console debug log at the given level.
-
-        Levels are available as constants on the irc object:
-        ``irc.LOG_ERROR``, ``irc.LOG_WARN``, ``irc.LOG_INFO``,
-        ``irc.LOG_DEBUG``, ``irc.LOG_TRACE``.
-
-        Example::
-
-            irc.dbg(irc.LOG_DEBUG, 'myplugin:', 'processed', count, 'items')
-        """
-        import state
-        state.dbg(level, *args)
-
-    LOG_SILENT = 0
-    LOG_ERROR  = 1
-    LOG_WARN   = 2
-    LOG_INFO   = 3
-    LOG_DEBUG  = 4
-    LOG_TRACE  = 5
-
-    @staticmethod
-    def inputbox(prompt='', title='Input'):
-        """Show an input dialog and return the text (or '' if cancelled)."""
-        from PySide6.QtWidgets import QInputDialog, QApplication
-        parent = QApplication.activeWindow()
-        text, ok = QInputDialog.getText(parent, title, prompt or 'Enter value:')
-        return text.strip() if ok else ''
-
-    @staticmethod
-    def stdin(prompt=''):
-        """Read a line from stdin (blocks until input is provided)."""
-        return input(prompt)
-
-    # --- plugin config ---
-
-    def get_config(self, plugin_name, key, default=None):
-        """Get a plugin config value.
-
-        Reads from ``plugins.<plugin_name>.<key>`` in the config YAML.
-        """
-        import state
-        plugins_data = state.config._data.get('plugins') or {}
-        plugin_data = plugins_data.get(plugin_name) or {}
-        return plugin_data.get(key, default)
-
-    def set_config(self, plugin_name, key, value):
-        """Set a plugin config value and save to disk.
-
-        Writes to ``plugins.<plugin_name>.<key>`` in the config YAML.
-        """
-        import state
-        from ruamel.yaml.comments import CommentedMap
-        plugins_data = state.config._data.get('plugins')
-        if plugins_data is None:
-            plugins_data = CommentedMap()
-            state.config._data['plugins'] = plugins_data
-        plugin_data = plugins_data.get(plugin_name)
-        if plugin_data is None:
-            plugin_data = CommentedMap()
-            plugins_data[plugin_name] = plugin_data
-        plugin_data[key] = value
-        state.config.save()
-
     # --- /on hooks ---
 
     def on(self, event, name, pattern, command='', *, channel=None, network=None,
            nick_mask=None, sound=None, desktop=False, highlight_tab=False,
-           suppress=False, window=None):
+           window=None):
         """Register an /on hook.
 
         Args:
@@ -343,15 +177,9 @@ class _Irc:
             name:     Unique name for this hook (used for removal).
             pattern:  Wildcard pattern matched against the event's primary text
                       (message, nick, etc.).  Use ``'*'`` to match everything.
-            command:  Command string, callable, or list of both.
-                      Strings are executed as slash commands with
-                      ``{nick}``, ``{channel}``, etc. expanded.  Multiple
-                      commands can be separated with `` | `` (space-pipe-space).
-                      Callables receive ``(variables_dict, conn)`` where
-                      variables_dict has keys like ``'nick'``, ``'channel'``,
-                      ``'message'``, etc.  Return truthy from a callable to
-                      suppress the event.
-                      A list can mix callables and strings, executed in order.
+            command:  Command string to execute when the hook fires.
+                      Variables like ``{nick}``, ``{channel}``, ``{message}``,
+                      ``{network}``, ``{me}`` are expanded before execution.
                       Optional if action flags are used.
             channel:  Optional channel filter (only fire in this channel).
             network:  Optional network filter (only fire on this network).
@@ -360,8 +188,6 @@ class _Irc:
                       or a ``.wav`` path.
             desktop:  If True, show a desktop notification.
             highlight_tab: If True, highlight the channel tab.
-            suppress: If True, suppress the default handler for the event
-                      (the message won't appear in the window).
             window:   Optional window to run the command in.  If omitted,
                       the active window at fire-time is used.
 
@@ -371,8 +197,6 @@ class _Irc:
             irc.on('chanmsg', 'vip', '*', sound='beep', desktop=True,
                    nick_mask='boss')
             irc.on('kick', 'kick_alert', '*', sound='beep', desktop=True)
-            # Suppress join messages from bots:
-            irc.on('join', 'hide_bots', '*', suppress=True, nick_mask='*bot*')
         """
         import state
         from exec_system import _ON_EVENT_MAP
@@ -390,7 +214,6 @@ class _Irc:
             'sound': sound,
             'desktop': desktop,
             'highlight_tab': highlight_tab,
-            'suppress': suppress,
             'window': window,    # None → resolved at fire-time
         }
         self._owned_hooks.append((event, name))
@@ -457,23 +280,7 @@ class Callbacks:
 
     Return a truthy value from a callback to suppress the client's default
     handler for that event.
-
-    To declare configuration options, set a class-level ``config_fields`` list::
-
-        config_fields = [
-            ('enabled', bool, True, 'Enable this plugin'),
-            ('interval', int, 60, 'Check interval in seconds'),
-            ('api_key', str, '', 'API key'),
-        ]
-
-    Supported types: ``str``, ``int``, ``float``, ``bool``.
-    Values are stored under ``plugins.<name>:`` in the config YAML
-    and editable in Settings > Plugins > <name>.
-
-    Access values with ``irc.get_config('name', 'key', default)``.
     """
-
-    config_fields = []  # override in subclass
 
     def __init__(self, irc):
         """Called once when the plugin is loaded.

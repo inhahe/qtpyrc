@@ -1,129 +1,127 @@
 from PySide6.QtWidgets import (
     QWidget, QFormLayout, QCheckBox, QLineEdit, QComboBox,
-    QSpinBox, QDoubleSpinBox, QLabel, QFrame,
+    QSpinBox, QDoubleSpinBox,
 )
 from PySide6.QtCore import Qt
 
 
-def _separator(layout, text):
-    """Add a labeled separator line to a form layout."""
-    lbl = QLabel('<b>%s</b>' % text)
-    lbl.setStyleSheet('margin-top: 8px;')
-    layout.addRow(lbl)
-
-
-def _ck(widget, key):
-    """Tag a widget with its config.defaults.yaml key for auto-tooltip/defaults."""
-    widget.setProperty('config_key', key)
-    return widget
-
-
 class GeneralPage(QWidget):
-    """General behavior settings."""
+    """General application settings."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
-        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
-        self.input_lines = _ck(QSpinBox(), 'input_lines')
+        self.input_lines = QSpinBox()
         self.input_lines.setRange(1, 10)
+        self.input_lines.setMaximumWidth(60)
         layout.addRow("Input lines:", self.input_lines)
 
-        self.command_prefix = _ck(QLineEdit(), 'command_prefix')
+        self.command_prefix = QLineEdit()
+        self.command_prefix.setMaximumWidth(60)
         layout.addRow("Command prefix:", self.command_prefix)
 
-        self.timestamp_display = _ck(QLineEdit(), 'timestamps.display')
+        self.window_mode = QComboBox()
+        self.window_mode.addItems(["Maximized", "Normal"])
+        layout.addRow("Window mode:", self.window_mode)
+
+        self.view_mode = QComboBox()
+        self.view_mode.addItems(["Tabbed", "MDI"])
+        self.view_mode.setToolTip("Tabbed: one window at a time with tabs. MDI: free-floating tiled/cascaded windows.")
+        layout.addRow("View mode:", self.view_mode)
+
+        self.nickname = QLineEdit()
+        layout.addRow("Nickname (display):", self.nickname)
+
+        self.timestamp_display = QLineEdit()
+        self.timestamp_display.setPlaceholderText("HH:mm")
+        self.timestamp_display.setToolTip(
+            "Tokens: YYYY YY MM MON DD DOW HH hh mm MI SS AP ap\n"
+            "MM=month, mm=minutes, MON=month name, DOW=weekday name\n"
+            "Examples: HH:mm  |  HH:mm:SS  |  hh:mm ap  |  DOW HH:mm"
+        )
         layout.addRow("Display timestamp:", self.timestamp_display)
 
-        _separator(layout, 'Behavior')
-        self.close_on_kick = _ck(QCheckBox(), 'close_on_kick')
+        self.navigation = QComboBox()
+        self.navigation.addItems(["Tabs", "Tree", "Both"])
+        self.navigation.setToolTip("Show tabs bar, tree view, or both")
+        layout.addRow("Navigation:", self.navigation)
+
+        self.close_on_kick = QCheckBox()
+        self.close_on_kick.setToolTip("Close channel windows when kicked from a channel")
         layout.addRow("Close on kick:", self.close_on_kick)
 
-        self.close_on_disconnect = _ck(QCheckBox(), 'close_on_disconnect')
+        self.close_on_disconnect = QCheckBox()
+        self.close_on_disconnect.setToolTip("Close channel windows when disconnected from the server")
         layout.addRow("Close on disconnect:", self.close_on_disconnect)
 
-        self.show_mode_prefix = _ck(QCheckBox(), 'show_mode_prefix')
+        self.show_mode_prefix = QCheckBox()
+        self.show_mode_prefix.setToolTip("Show mode prefixes (@, +, %, etc.) before nicks in messages, events, and the nick list")
         layout.addRow("Mode prefixes:", self.show_mode_prefix)
 
-        self.auto_copy_selection = _ck(QCheckBox(), 'auto_copy_selection')
-        layout.addRow("Auto-copy selection:", self.auto_copy_selection)
-
-        self.tab_complete_age = _ck(QSpinBox(), 'tab_complete_age')
-        self.tab_complete_age.setRange(0, 86400)
-        self.tab_complete_age.setSpecialValueText("(no limit)")
-        self.tab_complete_age.setSuffix(" s")
-        layout.addRow("Tab complete age:", self.tab_complete_age)
-
-        self.auto_connect = _ck(QCheckBox(), 'auto_connect')
-        layout.addRow("Auto-connect:", self.auto_connect)
-
-        self.persist_autojoins = _ck(QCheckBox(), 'persist_autojoins')
-        layout.addRow("Persist auto-joins:", self.persist_autojoins)
-
-        _separator(layout, 'History')
-        self.backscroll_limit = _ck(QSpinBox(), 'backscroll_limit')
+        self.backscroll_limit = QSpinBox()
         self.backscroll_limit.setRange(0, 1000000)
         self.backscroll_limit.setSpecialValueText("unlimited")
+        self.backscroll_limit.setToolTip("Maximum lines kept in each window's backscroll. 0 = unlimited.")
         layout.addRow("Backscroll limit:", self.backscroll_limit)
 
-        self.history_replay_channels = _ck(QSpinBox(), 'history_replay.channels')
+        self.history_replay_channels = QSpinBox()
         self.history_replay_channels.setRange(0, 1000000)
         self.history_replay_channels.setSpecialValueText("disabled")
+        self.history_replay_channels.setToolTip("Lines of channel history to reload from database on join. 0 = disabled.")
         layout.addRow("Channel history:", self.history_replay_channels)
 
-        self.history_replay_queries = _ck(QSpinBox(), 'history_replay.queries')
+        self.history_replay_queries = QSpinBox()
         self.history_replay_queries.setRange(0, 1000000)
         self.history_replay_queries.setSpecialValueText("disabled")
+        self.history_replay_queries.setToolTip("Lines of query history to reload when a query opens. 0 = disabled.\nNote: nicks can be reused by different people.")
         layout.addRow("Query history:", self.history_replay_queries)
 
-        self.bg_replay_enabled = _ck(QCheckBox(), 'history_replay.bg_enabled')
-        layout.addRow("Background replay:", self.bg_replay_enabled)
-
-        self.bg_chunk = _ck(QSpinBox(), 'history_replay.bg_chunk')
-        self.bg_chunk.setRange(10, 1000)
-        layout.addRow("  Chunk size:", self.bg_chunk)
-
-        self.bg_interval = _ck(QSpinBox(), 'history_replay.bg_interval')
-        self.bg_interval.setRange(10, 2000)
-        self.bg_interval.setSuffix(" ms")
-        layout.addRow("  Chunk interval:", self.bg_interval)
-
-        self.bg_replay_enabled.toggled.connect(self.bg_chunk.setEnabled)
-        self.bg_replay_enabled.toggled.connect(self.bg_interval.setEnabled)
-
-        _separator(layout, 'Flood Control')
-        self.flood_burst = _ck(QSpinBox(), 'flood.burst')
+        self.flood_burst = QSpinBox()
         self.flood_burst.setRange(0, 50)
         self.flood_burst.setSpecialValueText("(default: 5)")
+        self.flood_burst.setToolTip("Messages allowed in an initial burst before throttling")
         layout.addRow("Flood burst:", self.flood_burst)
 
-        self.flood_rate = _ck(QDoubleSpinBox(), 'flood.rate')
+        self.flood_rate = QDoubleSpinBox()
         self.flood_rate.setRange(0.0, 30.0)
         self.flood_rate.setDecimals(1)
         self.flood_rate.setSuffix(" s")
         self.flood_rate.setSpecialValueText("(default: 2.0)")
+        self.flood_rate.setToolTip("Seconds between messages after burst is exhausted")
         layout.addRow("Flood rate:", self.flood_rate)
 
-        _separator(layout, 'Typing Notifications')
-        self.typing_send = _ck(QCheckBox(), 'typing.send')
+        self.typing_send = QCheckBox()
+        self.typing_send.setToolTip("Send typing notifications to channels (IRCv3 +typing)")
         layout.addRow("Send typing:", self.typing_send)
 
-        self.typing_show = _ck(QCheckBox(), 'typing.show')
+        self.typing_show = QCheckBox()
+        self.typing_show.setToolTip("Show typing indicators from other users")
         layout.addRow("Show typing:", self.typing_show)
 
     def load_from_data(self, data):
         self.input_lines.setValue(max(1, min(10, int(data.get('input_lines', 1)))))
         self.command_prefix.setText(str(data.get('command_prefix', '/')))
+        wm = data.get('window_mode', 'maximized')
+        idx = self.window_mode.findText(wm, Qt.MatchFlag.MatchFixedString)
+        if idx >= 0:
+            self.window_mode.setCurrentIndex(idx)
+        vm = data.get('view_mode', 'tabbed')
+        idx = self.view_mode.findText(vm, Qt.MatchFlag.MatchFixedString)
+        if idx >= 0:
+            self.view_mode.setCurrentIndex(idx)
+        self.nickname.setText(str(data.get('nickname', '')))
         ts = data.get('timestamps') or {}
         self.timestamp_display.setText(str(ts.get('display', 'HH:mm')))
+        nav = data.get('navigation')
+        if not nav:
+            nav = 'both' if data.get('treeview', False) else 'tabs'
+        idx = self.navigation.findText(nav, Qt.MatchFlag.MatchFixedString)
+        if idx >= 0:
+            self.navigation.setCurrentIndex(idx)
         self.close_on_kick.setChecked(bool(data.get('close_on_kick', False)))
         self.close_on_disconnect.setChecked(bool(data.get('close_on_disconnect', False)))
         self.show_mode_prefix.setChecked(bool(data.get('show_mode_prefix', False)))
-        self.auto_copy_selection.setChecked(bool(data.get('auto_copy_selection', False)))
-        self.tab_complete_age.setValue(int(data.get('tab_complete_age', 0) or 0))
-        self.auto_connect.setChecked(bool(data.get('auto_connect', True)))
-        self.persist_autojoins.setChecked(bool(data.get('persist_autojoins', False)))
         self.backscroll_limit.setValue(int(data.get('backscroll_limit', 10000)))
         hr = data.get('history_replay') or {}
         if isinstance(hr, int):
@@ -132,16 +130,6 @@ class GeneralPage(QWidget):
         else:
             self.history_replay_channels.setValue(int(hr.get('channels', data.get('backscroll_limit', 10000))))
             self.history_replay_queries.setValue(int(hr.get('queries', 0)))
-        if isinstance(hr, dict):
-            self.bg_replay_enabled.setChecked(bool(hr.get('bg_enabled', True)))
-            self.bg_chunk.setValue(int(hr.get('bg_chunk', 50)))
-            self.bg_interval.setValue(int(hr.get('bg_interval', 100)))
-        else:
-            self.bg_replay_enabled.setChecked(True)
-            self.bg_chunk.setValue(50)
-            self.bg_interval.setValue(100)
-        self.bg_chunk.setEnabled(self.bg_replay_enabled.isChecked())
-        self.bg_interval.setEnabled(self.bg_replay_enabled.isChecked())
         flood = data.get('flood') or {}
         self.flood_burst.setValue(int(flood.get('burst', 0) or 0))
         self.flood_rate.setValue(float(flood.get('rate', 0.0) or 0.0))
@@ -150,37 +138,35 @@ class GeneralPage(QWidget):
         self.typing_show.setChecked(bool(typing.get('show', True)))
 
     def save_to_data(self, data):
-        from ruamel.yaml.comments import CommentedMap
         data['input_lines'] = self.input_lines.value()
+        # Remove legacy key
         if 'multiline_input' in data:
             del data['multiline_input']
         data['command_prefix'] = self.command_prefix.text()
+        data['window_mode'] = self.window_mode.currentText().lower()
+        data['view_mode'] = self.view_mode.currentText().lower()
+        data['nickname'] = self.nickname.text()
+        from ruamel.yaml.comments import CommentedMap
         ts = data.get('timestamps')
         if ts is None:
             ts = CommentedMap()
             data['timestamps'] = ts
         ts['display'] = self.timestamp_display.text()
+        data['navigation'] = self.navigation.currentText().lower()
+        # Remove legacy key
+        if 'treeview' in data:
+            del data['treeview']
         data['close_on_kick'] = self.close_on_kick.isChecked()
         data['close_on_disconnect'] = self.close_on_disconnect.isChecked()
         data['show_mode_prefix'] = self.show_mode_prefix.isChecked()
-        data['auto_copy_selection'] = self.auto_copy_selection.isChecked()
-        tca = self.tab_complete_age.value()
-        if tca > 0:
-            data['tab_complete_age'] = tca
-        elif 'tab_complete_age' in data:
-            del data['tab_complete_age']
-        data['auto_connect'] = self.auto_connect.isChecked()
-        data['persist_autojoins'] = self.persist_autojoins.isChecked()
         data['backscroll_limit'] = self.backscroll_limit.value()
+        from ruamel.yaml.comments import CommentedMap
         hr = data.get('history_replay')
         if not isinstance(hr, dict):
             hr = CommentedMap()
             data['history_replay'] = hr
         hr['channels'] = self.history_replay_channels.value()
         hr['queries'] = self.history_replay_queries.value()
-        hr['bg_enabled'] = self.bg_replay_enabled.isChecked()
-        hr['bg_chunk'] = self.bg_chunk.value()
-        hr['bg_interval'] = self.bg_interval.value()
         fb = self.flood_burst.value()
         fr = self.flood_rate.value()
         if fb > 0 or fr > 0:
@@ -198,183 +184,10 @@ class GeneralPage(QWidget):
                 del flood['rate']
         elif 'flood' in data:
             del data['flood']
+        from ruamel.yaml.comments import CommentedMap
         typing = data.get('typing')
         if typing is None:
             typing = CommentedMap()
             data['typing'] = typing
         typing['send'] = self.typing_send.isChecked()
         typing['show'] = self.typing_show.isChecked()
-
-
-class InterfacePage(QWidget):
-    """Interface / layout settings."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QFormLayout(self)
-        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
-
-        self.window_mode = _ck(QComboBox(), 'window_mode')
-        self.window_mode.addItems(["Maximized", "Normal"])
-        layout.addRow("Window mode:", self.window_mode)
-
-        self.view_mode = _ck(QComboBox(), 'view_mode')
-        self.view_mode.addItems(["Tabbed", "MDI"])
-        layout.addRow("View mode:", self.view_mode)
-
-        self.navigation = _ck(QComboBox(), 'navigation')
-        self.navigation.addItems(["Tabs", "Tree", "Both"])
-        layout.addRow("Navigation:", self.navigation)
-
-        self.tab_rows = _ck(QSpinBox(), 'tab_rows')
-        self.tab_rows.setRange(0, 20)
-        self.tab_rows.setSpecialValueText("(auto)")
-        layout.addRow("Tab rows:", self.tab_rows)
-
-        self.new_tab_state = _ck(QComboBox(), 'new_tab_state')
-        self.new_tab_state.addItems(["active", "normal", "skipped"])
-        layout.addRow("New tab state:", self.new_tab_state)
-
-        self.show_toolbar = _ck(QCheckBox(), 'show_toolbar')
-        layout.addRow("Show toolbar:", self.show_toolbar)
-
-        self.toolbar_icon_size = _ck(QSpinBox(), 'toolbar_icon_size')
-        self.toolbar_icon_size.setRange(0, 64)
-        self.toolbar_icon_size.setSpecialValueText("(default)")
-        layout.addRow("Toolbar icon size:", self.toolbar_icon_size)
-
-    def _load_combo(self, combo, value):
-        idx = combo.findText(str(value), Qt.MatchFlag.MatchFixedString)
-        if idx >= 0:
-            combo.setCurrentIndex(idx)
-
-    def load_from_data(self, data):
-        self._load_combo(self.window_mode, data.get('window_mode', 'maximized'))
-        self._load_combo(self.view_mode, data.get('view_mode', 'tabbed'))
-        nav = data.get('navigation')
-        if not nav:
-            nav = 'both' if data.get('treeview', False) else 'tabs'
-        self._load_combo(self.navigation, nav)
-        self.tab_rows.setValue(int(data.get('tab_rows', 0) or 0))
-        self._load_combo(self.new_tab_state, data.get('new_tab_state', 'active'))
-        self.show_toolbar.setChecked(bool(data.get('show_toolbar', True)))
-        self.toolbar_icon_size.setValue(int(data.get('toolbar_icon_size', 0) or 0))
-
-    def save_to_data(self, data):
-        data['window_mode'] = self.window_mode.currentText().lower()
-        data['view_mode'] = self.view_mode.currentText().lower()
-        data['navigation'] = self.navigation.currentText().lower()
-        if 'treeview' in data:
-            del data['treeview']
-        tr = self.tab_rows.value()
-        if tr > 0:
-            data['tab_rows'] = tr
-        elif 'tab_rows' in data:
-            del data['tab_rows']
-        data['new_tab_state'] = self.new_tab_state.currentText()
-        data['show_toolbar'] = self.show_toolbar.isChecked()
-        tis = self.toolbar_icon_size.value()
-        if tis > 0:
-            data['toolbar_icon_size'] = tis
-        elif 'toolbar_icon_size' in data:
-            del data['toolbar_icon_size']
-
-
-class TitlesPage(QWidget):
-    """Window title format settings."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QFormLayout(self)
-
-        self.titlebar_format = _ck(QLineEdit(), 'titlebar_format')
-        layout.addRow("Titlebar format:", self.titlebar_format)
-
-        self.titlebar_interval = _ck(QDoubleSpinBox(), 'titlebar_interval')
-        self.titlebar_interval.setRange(0.1, 60.0)
-        self.titlebar_interval.setDecimals(1)
-        self.titlebar_interval.setSuffix(" s")
-        layout.addRow("Titlebar interval:", self.titlebar_interval)
-
-        _separator(layout, 'Window Titles')
-        layout.addRow(QLabel("Leave blank for default. Variables: {me} {channel} {topic} {network_label} {query_nick}"))
-
-        self.title_server = _ck(QLineEdit(), 'titles.server')
-        layout.addRow("Server:", self.title_server)
-
-        self.title_server_dc = _ck(QLineEdit(), 'titles.server_disconnected')
-        layout.addRow("Server (disconn.):", self.title_server_dc)
-
-        self.title_channel = _ck(QLineEdit(), 'titles.channel')
-        layout.addRow("Channel:", self.title_channel)
-
-        self.title_query = _ck(QLineEdit(), 'titles.query')
-        layout.addRow("Query:", self.title_query)
-
-    def _save_optional(self, data, key, widget):
-        val = widget.text().strip()
-        if val:
-            data[key] = val
-        elif key in data:
-            del data[key]
-
-    def load_from_data(self, data):
-        self.titlebar_format.setText(str(data.get('titlebar_format', '') or ''))
-        self.titlebar_interval.setValue(float(data.get('titlebar_interval', 1.0) or 1.0))
-        titles = data.get('titles') or {}
-        self.title_server.setText(str(titles.get('server', '') or ''))
-        self.title_server_dc.setText(str(titles.get('server_disconnected', '') or ''))
-        self.title_channel.setText(str(titles.get('channel', '') or ''))
-        self.title_query.setText(str(titles.get('query', '') or ''))
-
-    def save_to_data(self, data):
-        from ruamel.yaml.comments import CommentedMap
-        self._save_optional(data, 'titlebar_format', self.titlebar_format)
-        data['titlebar_interval'] = self.titlebar_interval.value()
-        titles = data.get('titles')
-        if titles is None:
-            titles = CommentedMap()
-            data['titles'] = titles
-        self._save_optional(titles, 'server', self.title_server)
-        self._save_optional(titles, 'server_disconnected', self.title_server_dc)
-        self._save_optional(titles, 'channel', self.title_channel)
-        self._save_optional(titles, 'query', self.title_query)
-
-
-class FilesPage(QWidget):
-    """File path settings."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        layout = QFormLayout(self)
-
-        self.history_file = _ck(QLineEdit(), 'history_file')
-        layout.addRow("History file:", self.history_file)
-
-        self.popups_file = _ck(QLineEdit(), 'popups_file')
-        layout.addRow("Popups file:", self.popups_file)
-
-        self.toolbar_file = _ck(QLineEdit(), 'toolbar_file')
-        layout.addRow("Toolbar file:", self.toolbar_file)
-
-        self.variables_file = _ck(QLineEdit(), 'variables_file')
-        layout.addRow("Variables file:", self.variables_file)
-
-    def _save_optional(self, data, key, widget):
-        val = widget.text().strip()
-        if val:
-            data[key] = val
-        elif key in data:
-            del data[key]
-
-    def load_from_data(self, data):
-        self.history_file.setText(str(data.get('history_file', 'history.db') or 'history.db'))
-        self.popups_file.setText(str(data.get('popups_file', 'popups.ini') or 'popups.ini'))
-        self.toolbar_file.setText(str(data.get('toolbar_file', 'toolbar.ini') or 'toolbar.ini'))
-        self.variables_file.setText(str(data.get('variables_file', 'variables.ini') or 'variables.ini'))
-
-    def save_to_data(self, data):
-        self._save_optional(data, 'history_file', self.history_file)
-        self._save_optional(data, 'popups_file', self.popups_file)
-        self._save_optional(data, 'toolbar_file', self.toolbar_file)
-        self._save_optional(data, 'variables_file', self.variables_file)
