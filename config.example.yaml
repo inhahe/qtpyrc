@@ -345,10 +345,6 @@ ident:
 
 # Maximum number of lines kept in each channel window's backscroll buffer.
 # Older lines are discarded as new ones arrive.  0 = unlimited.
-# SQLite database for session history replay.
-# Relative paths are resolved from the config file directory.
-history_file: history.db
-
 backscroll_limit: 10000
 
 # Lines of history to replay from the database when opening a window.
@@ -366,7 +362,7 @@ history_replay:
 # ---------------------------------------------------------------------------
 
 logging:
-  dir: logs                # directory for log files (relative to config file)
+  dir: logs                # directory for log files (relative to qtpyrc.py)
   use_subdirs: false       # create per-network subdirectories
   separate_by_month: false # create per-month log files
   debug: false             # enable debug-level logging
@@ -378,13 +374,13 @@ logging:
 # ---------------------------------------------------------------------------
 
 plugins:
-  dir: plugins             # directory for Python plugins (relative to config file)
+  dir: plugins             # directory for Python plugins (relative to qtpyrc.py)
   auto_load:               # Python plugins to load automatically on startup
     - triviabot            # plain name or wildcard pattern (*, ?, [abc])
     # - "*"                # load all .py plugins in the plugins dir
 
 scripts:
-  dir: scripts             # directory for command scripts (relative to config file)
+  dir: scripts             # directory for command scripts (relative to qtpyrc.py)
   startup: startup.rc      # startup commands file (runs first, gets quick-edit button)
   auto_load:               # additional command scripts to run on startup
     # - "*.rc"             # run all .rc scripts
