@@ -86,31 +86,40 @@ class Commands:
       window.redmessage("[Error: Can't talk in a server window]")
     elif window.type == "channel":
       conn = window.client.conn
-      conn.say(window.channel.name, text)
-      window.addline_msg(conn.nickname, text)
-      state.irclogger.log_channel(window.client.network, window.channel.name,
-                            "<%s> %s" % (conn.nickname, text))
-      if state.historydb:
-        state.historydb.add(window.client.network, window.channel.name.lower(),
-                            'message', conn.nickname, text)
+      target = window.channel.name
+      pnick = conn._pnick(conn.nickname, target)
+      pfx = conn._nick_prefix(conn.nickname, target)
+      chunks = conn.split_message(target, text)
+      for chunk in chunks:
+        conn.say(target, chunk)
+        window.addline_msg(pnick, chunk)
+        state.irclogger.log_channel(window.client.network, target,
+                              "<%s> %s" % (conn.nickname, chunk))
+        if state.historydb:
+          state.historydb.add(window.client.network, target.lower(),
+                              'message', conn.nickname, chunk, prefix=pfx)
       from link_preview import check_and_preview
       check_and_preview(window, text)
       # Dispatch to plugin chanmsg hooks for own messages
       from plugins import _dispatch_to_plugins
       user = '%s!%s@%s' % (conn.nickname, conn.username or '', '')
-      _dispatch_to_plugins('chanmsg', conn, (user, window.channel.name, text), {})
+      _dispatch_to_plugins('chanmsg', conn, (user, target, text), {})
     elif window.type == "query":
       conn = window.client.conn if window.client else None
       if not conn:
         window.redmessage('[Not connected]')
         return
-      conn.msg(window.remotenick, text)
-      window.addline_msg(conn.nickname, text)
-      if state.historydb and window.query:
-        from irc_client import _query_history_key
-        state.historydb.add(window.client.network,
-                            _query_history_key(window.query.nick, window.query.ident),
-                            'message', conn.nickname, text)
+      target = window.remotenick
+      chunks = conn.split_message(target, text)
+      for chunk in chunks:
+        conn.msg(target, chunk)
+        conn._msg_windows[conn.irclower(target)] = window
+        window.addline_msg(conn.nickname, chunk)
+        if state.historydb and window.query:
+          from irc_client import _query_history_key
+          state.historydb.add(window.client.network,
+                              _query_history_key(window.query.nick, window.query.ident),
+                              'message', conn.nickname, chunk)
       from link_preview import check_and_preview
       check_and_preview(window, text)
 
@@ -125,13 +134,17 @@ class Commands:
       window.redmessage('[Usage: /amsg <message>]')
       return
     for chan in window.client.channels.values():
-      conn.say(chan.name, text)
-      chan.window.addline_msg(conn.nickname, text)
-      state.irclogger.log_channel(window.client.network, chan.name,
-                            "<%s> %s" % (conn.nickname, text))
-      if state.historydb:
-        state.historydb.add(window.client.network, chan.name.lower(),
-                            'message', conn.nickname, text)
+      pnick = conn._pnick(conn.nickname, chan.name)
+      pfx = conn._nick_prefix(conn.nickname, chan.name)
+      chunks = conn.split_message(chan.name, text)
+      for chunk in chunks:
+        conn.say(chan.name, chunk)
+        chan.window.addline_msg(pnick, chunk)
+        state.irclogger.log_channel(window.client.network, chan.name,
+                              "<%s> %s" % (conn.nickname, chunk))
+        if state.historydb:
+          state.historydb.add(window.client.network, chan.name.lower(),
+                              'message', conn.nickname, chunk, prefix=pfx)
 
   def msg(window, text):
     parts = text.split(" ", 1)
@@ -145,10 +158,69 @@ class Commands:
     if not conn:
       window.redmessage('[Not connected]')
       return
-    conn.msg(recip, text)
+    conn._msg_windows[conn.irclower(recip)] = window
     _, existing = _find_query(window.client, recip)
-    if existing and existing.window:
-      existing.window.addline_msg(conn.nickname, text)
+    chunks = conn.split_message(recip, text)
+    for chunk in chunks:
+      conn.msg(recip, chunk)
+      if existing and existing.window:
+        existing.window.addline_msg(conn.nickname, chunk)
+
+  def me(window, text):
+    """/me <action> — send a CTCP ACTION to the current channel or query."""
+    text = _unquote(text).strip()
+    if not text:
+      window.redmessage('[Usage: /me <action>]')
+      return
+    conn = window.client.conn if window.client else None
+    if not conn:
+      window.redmessage('[Not connected]')
+      return
+    if window.type == "channel":
+      target = window.channel.name
+      pnick = conn._pnick(conn.nickname, target)
+      pfx = conn._nick_prefix(conn.nickname, target)
+      # ACTION has extra overhead: \x01ACTION ...\x01 = 9 bytes
+      chunks = conn.split_message(target, text, extra_overhead=9)
+      for chunk in chunks:
+        conn.me(target, chunk)
+        window.addline_nick(["* ", (pnick,), " %s" % chunk], state.actionformat)
+        state.irclogger.log_channel(window.client.network, target,
+                              "* %s %s" % (conn.nickname, chunk))
+        if state.historydb:
+          state.historydb.add(window.client.network, target.lower(),
+                              'action', conn.nickname, chunk, prefix=pfx)
+    elif window.type == "query":
+      target = window.remotenick
+      chunks = conn.split_message(target, text, extra_overhead=9)
+      for chunk in chunks:
+        conn.me(target, chunk)
+        window.addline_nick(["* ", (conn.nickname,), " %s" % chunk], state.actionformat)
+        if state.historydb and window.query:
+          from irc_client import _query_history_key
+          state.historydb.add(window.client.network,
+                              _query_history_key(window.query.nick, window.query.ident),
+                              'action', conn.nickname, chunk)
+    else:
+      window.redmessage("[Error: /me only works in channel or query windows]")
+  action = me
+
+  def notice(window, text):
+    """/notice <target> <message> — send a NOTICE."""
+    parts = text.split(" ", 1)
+    if len(parts) < 2 or not parts[1].strip():
+      window.redmessage('[Usage: /notice <target> <message>]')
+      return
+    target = parts[0]
+    msg_text = _unquote(parts[1])
+    conn = window.client.conn if window.client else None
+    if not conn:
+      window.redmessage('[Not connected]')
+      return
+    chunks = conn.split_message(target, msg_text)
+    for chunk in chunks:
+      conn.notice(target, chunk)
+      window.addline_nick(["-", (conn.nickname,), "- %s" % chunk], state.noticeformat)
 
   def quit(window, text):
     conn = window.client.conn
@@ -1235,6 +1307,7 @@ class Commands:
     if len(parts) > 1:
       msg = _unquote(parts[1])
       conn.msg(nick, msg)
+      conn._msg_windows[conn.irclower(nick)] = qwin
       qwin.addline_msg(conn.nickname, msg)
 
   def log(window, text):

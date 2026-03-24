@@ -227,8 +227,9 @@ class NotificationsPage(QWidget):
         if not highlights:
             self._highlight_hint.setText(
                 'Note: Your highlights list is empty. "Highlight matched" '
-                'notifications will never fire. Add "{me}" to highlights '
-                'in config.yaml to be notified when your nick is mentioned.')
+                'notifications will never fire. Add "{me}" to the highlights '
+                'list in Settings \u2192 Lists to be notified when your nick '
+                'is mentioned.')
         elif not has_me:
             self._highlight_hint.setText(
                 'Note: Your highlights list does not contain "{me}". '

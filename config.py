@@ -762,8 +762,16 @@ class AppConfig:
     self.close_on_kick = data.get('close_on_kick', False)
     self.close_on_disconnect = data.get('close_on_disconnect', False)
 
-    self.show_mode_prefix = data.get('show_mode_prefix', False)
+    # Legacy migration: old single bool -> two new bools
+    if 'show_mode_prefix' in data and 'show_mode_prefix_nicklist' not in data:
+      val = data.get('show_mode_prefix', False)
+      self.show_mode_prefix_nicklist = val
+      self.show_mode_prefix_messages = val
+    else:
+      self.show_mode_prefix_nicklist = data.get('show_mode_prefix_nicklist', True)
+      self.show_mode_prefix_messages = data.get('show_mode_prefix_messages', True)
     self.auto_copy_selection = data.get('auto_copy_selection', False)
+    self.whois_on_query = data.get('whois_on_query', False)
 
     # Nick colors
     nc = data.get('nick_colors') or {}

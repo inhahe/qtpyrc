@@ -96,7 +96,7 @@ def _history_replay(window, network, channel, limit=None, chan_obj=None):
   rows = db.get_last(network, channel.lower(), limit)
   if not rows:
     return
-  show_prefix = state.config.show_mode_prefix
+  show_prefix = state.config.show_mode_prefix_messages
   history = chan_obj.history if chan_obj else None
   for ts, etype, nick, text, prefix in rows:
     # Show timestamp from DB instead of current time
@@ -169,6 +169,7 @@ class IRCClient(asyncirc.IRCClient):
     self._alt_nick_idx = 0
     self._whois_windows = {}  # lowercased nick -> Window to display results in
     self._ctcp_windows = {}   # lowercased nick -> Window that sent CTCP request
+    self._msg_windows = {}    # lowercased nick -> Window that last sent a PRIVMSG
     self._pending_keys = {}   # irclower(channel) -> key used in JOIN
     self._user_joins = set()  # irclower(channel) names from explicit /join
     self._user_parts = set()  # irclower(channel) names from explicit /part
@@ -311,8 +312,8 @@ class IRCClient(asyncirc.IRCClient):
     return ''
 
   def _pnick(self, nick, channel=None):
-    """Return nick with mode prefix if show_mode_prefix is enabled."""
-    if not state.config.show_mode_prefix or not channel:
+    """Return nick with mode prefix if show_mode_prefix_messages is enabled."""
+    if not state.config.show_mode_prefix_messages or not channel:
       return nick
     pfx = self._nick_prefix(nick, channel)
     return pfx + nick if pfx else nick
@@ -453,6 +454,45 @@ class IRCClient(asyncirc.IRCClient):
 
   def bounce(self, info):
     state.dbg(state.LOG_DEBUG, "bounced!")
+
+  def _route_nick_error(self, params):
+    """Route an error about a nick to the window that messaged it,
+    falling back to query window, then server window."""
+    # params: [my_nick, target_nick, "error text"]
+    text = ' '.join(params[1:])
+    if len(params) >= 2:
+      nick = params[1]
+      lnick = self.irclower(nick)
+      # Check if a /msg set a reply route
+      w = self._msg_windows.pop(lnick, None)
+      if w:
+        w.redmessage(text)
+        return w
+      # Fall back to open query window
+      from commands import _find_query
+      _, q = _find_query(self.client, nick)
+      if q and q.window:
+        q.window.redmessage(text)
+        return q.window
+    self.window.addline(text)
+    return self.window
+
+  def irc_ERR_NOSUCHNICK(self, prefix, params):
+    self._route_nick_error(params)
+
+  def irc_ERR_NOSUCHSERVER(self, prefix, params):
+    self._route_nick_error(params)
+
+  def irc_RPL_AWAY(self, prefix, params):
+    # params: [my_nick, target_nick, away_message]
+    # During WHOIS, route to the whois window; otherwise route to query
+    if len(params) > 1:
+      lnick = self.irclower(params[1])
+      if lnick in self._whois_windows:
+        w = self._whois_windows[lnick]
+        w.addline("[%s] is away: %s" % (params[1], params[2] if len(params) > 2 else ''))
+        return
+    self._route_nick_error(params)
 
   def irc_unknown(self, prefix, command, params):
     self.window.addline(' '.join(params[1:]))
@@ -830,22 +870,29 @@ class IRCClient(asyncirc.IRCClient):
     if chnlower in self.client.channels:
       chan = self.client.channels[chnlower]
       pn = self._pnick(nick, channel)
-      chan.window.addline_nick(["-", (pn,), "- %s" % message], state.noticeformat,
+      target_win = chan.window
+      target_win.addline_nick(["-", (pn,), "- %s" % message], state.noticeformat,
                               timestamp_override=ts)
-      chan.window.set_activity(Window.ACTIVITY_MESSAGE)
+      target_win.set_activity(Window.ACTIVITY_MESSAGE)
       if not self._in_playback_batch():
         _history_save(self.client.network, channel, 'notice', nick, message,
                       prefix=self._nick_prefix(nick, channel))
         _save_urls(self.client.network, channel, nick, notice_host, message)
     else:
-      self.window.addline_nick(["-", (nick,), "- %s" % message], state.noticeformat,
+      # Show in active window if it belongs to this network, else server window
+      target_win = self.window
+      active_sub = state.app.mainwin.workspace.activeSubWindow()
+      if active_sub:
+        aw = active_sub.widget()
+        if aw and getattr(aw, 'client', None) is self.client:
+          target_win = aw
+      target_win.addline_nick(["-", (nick,), "- %s" % message], state.noticeformat,
                               timestamp_override=ts)
     if not self._in_playback_batch() and state.notifications:
       state.notifications.fire('notice', 'Notice from %s' % nick, message)
     # Link previews for notices
     if not self._in_playback_batch():
       from link_preview import check_and_preview
-      target_win = self.client.channels[chnlower].window if chnlower in self.client.channels else self.window
       check_and_preview(target_win, message)
 
   def action(self, user, channel, data):
@@ -1023,6 +1070,8 @@ class IRCClient(asyncirc.IRCClient):
       if state.notifications:
         if new_query:
           state.notifications.fire('new_query', 'Message from %s' % nick, message)
+      if new_query and state.config.whois_on_query:
+        self.do_whois(nick, qwin)
       from link_preview import check_and_preview
       check_and_preview(qwin, message)
 
@@ -1091,7 +1140,7 @@ class IRCClient(asyncirc.IRCClient):
       pfx = self._nick_prefix(nick, channel)
       chan.history.append(HistoryMessage(uobj, nick, channel, 'part', prefix=pfx))
       chan.removenick(nick)
-      pn = (pfx + nick) if (state.config.show_mode_prefix and pfx) else nick
+      pn = (pfx + nick) if (state.config.show_mode_prefix_messages and pfx) else nick
       chan.window.addline_nick(["* ", (pn,), " has left %s" % channel], state.infoformat,
                               timestamp_override=ts)
       if not self._in_playback_batch():
@@ -1110,7 +1159,7 @@ class IRCClient(asyncirc.IRCClient):
         pfx = self._nick_prefix(nick, chan.name)
         chan.history.append(HistoryMessage(uobj, nick, quitMessage or '', 'quit', prefix=pfx))
         chan.removenick(nick)
-        pn = (pfx + nick) if (state.config.show_mode_prefix and pfx) else nick
+        pn = (pfx + nick) if (state.config.show_mode_prefix_messages and pfx) else nick
         chan.window.addline_nick(["* ", (pn,), " has quit (%s)" % (quitMessage or "")], state.infoformat,
                                 timestamp_override=ts)
         if not playback:

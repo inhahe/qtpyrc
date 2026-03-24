@@ -20,8 +20,13 @@ from irc_client import _URL_RE
 # ---------------------------------------------------------------------------
 
 _OG_RE = re.compile(
-    r'<meta\s[^>]*?property\s*=\s*["\']og:(\w+)["\'][^>]*?content\s*=\s*["\']([^"\']*)["\']'
-    r'|<meta\s[^>]*?content\s*=\s*["\']([^"\']*)["\'][^>]*?property\s*=\s*["\']og:(\w+)["\']',
+    r'<meta\s[^>]*?property\s*=\s*["\']og:([\w:]+)["\'][^>]*?content\s*=\s*["\']([^"\']*)["\']'
+    r'|<meta\s[^>]*?content\s*=\s*["\']([^"\']*)["\'][^>]*?property\s*=\s*["\']og:([\w:]+)["\']',
+    re.IGNORECASE | re.DOTALL)
+# Fallback date meta tags: <meta name="date/last-modified/..." content="...">
+_DATE_META_RE = re.compile(
+    r'<meta\s[^>]*?name\s*=\s*["\'](?:date|last-modified|article:published_time|article:modified_time)["\']'
+    r'[^>]*?content\s*=\s*["\']([^"\']*)["\']',
     re.IGNORECASE | re.DOTALL)
 
 _TITLE_RE = re.compile(r'<title[^>]*>(.*?)</title>', re.IGNORECASE | re.DOTALL)
@@ -63,6 +68,18 @@ def _parse_head(html_bytes, encoding='utf-8'):
             result['description'] = val
         elif key == 'image' and 'image' not in result:
             result['image'] = val
+        elif key in ('article:modified_time', 'article:published_time', 'updated_time'):
+            # Prefer modified > published > updated
+            if key == 'article:modified_time':
+                result['date'] = val
+            elif 'date' not in result:
+                result['date'] = val
+
+    # Fallback: <meta name="date/last-modified/..." content="...">
+    if 'date' not in result:
+        dm = _DATE_META_RE.search(text)
+        if dm:
+            result['date'] = _decode_entities(dm.group(1).strip())
 
     # Fallback to <title> tag
     if 'title' not in result:
@@ -516,6 +533,12 @@ def _insert_preview(window, info, marker_name=None):
             '<br><span style="color: %s; font-size: 8pt;">%s</span>'
             % (text_color, _escape_html(desc))
         )
+    date_str = _format_date(info.get('date', ''))
+    if date_str:
+        html += (
+            '<br><span style="color: %s; font-size: 7pt;">%s</span>'
+            % (text_color, _escape_html(date_str))
+        )
     html += (
         '<br><span style="color: %s; font-size: 7pt;">%s</span>'
         % (link_color, _escape_html(_truncate_url(url)))
@@ -526,6 +549,39 @@ def _insert_preview(window, info, marker_name=None):
     # Restore the main cursor to end of document
     window.cur.movePosition(QTextCursor.MoveOperation.End)
     window._updateBottomAlign()
+
+
+def _format_date(date_str):
+    """Parse an ISO 8601 or similar date string and return a human-readable age."""
+    if not date_str:
+        return ''
+    from datetime import datetime, timezone
+    # Try common date formats
+    for fmt in ('%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%dT%H:%M:%SZ', '%Y-%m-%dT%H:%M:%S',
+                '%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+        try:
+            dt = datetime.strptime(date_str.strip()[:25], fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            delta = now - dt
+            days = delta.days
+            if days < 0:
+                return date_str[:10]
+            if days == 0:
+                return 'today'
+            if days == 1:
+                return 'yesterday'
+            if days < 30:
+                return '%d days ago' % days
+            months = days // 30
+            if months < 12:
+                return '%d month%s ago' % (months, 's' if months != 1 else '')
+            years = days // 365
+            return '%d year%s ago' % (years, 's' if years != 1 else '')
+        except (ValueError, OverflowError):
+            continue
+    return ''
 
 
 def _escape_html(s):
@@ -543,7 +599,6 @@ def _truncate_url(url, max_len=60):
 # ---------------------------------------------------------------------------
 
 _pending = set()   # URLs currently being fetched (avoid duplicates)
-_previewed = set()  # URLs that have already been previewed (avoid re-preview)
 
 
 def check_and_preview(window, text):
@@ -562,8 +617,14 @@ def check_and_preview(window, text):
             url = url[:-1]
         while url.endswith(')') and url.count(')') > url.count('('):
             url = url[:-1]
-        if url and url not in _pending and url not in _previewed:
+        if url and url not in _pending:
             urls.append(url)
+        elif url:
+            state.dbg(state.LOG_DEBUG, '[link_preview] skipped (pending): %s' % url)
+
+    state.dbg(state.LOG_DEBUG, '[link_preview] extracted %d URL(s) from: %s' % (len(urls), text[:200]))
+    if not urls:
+        return
 
     # Insert a marker anchor at end of document so we can find it later
     _preview_marker_id = id(window.output.document()) + window.output.document().characterCount()
@@ -585,17 +646,18 @@ def check_and_preview(window, text):
 async def _fetch_and_insert(window, url, marker_name=None):
     """Fetch a preview and insert it into the window."""
     try:
+        state.dbg(state.LOG_DEBUG, '[link_preview] fetching: %s' % url)
         info = await fetch_preview(
             url,
             max_size=state.config.link_preview_max_size,
             timeout=state.config.link_preview_timeout,
             proxy=state.config.link_preview_proxy)
         if info:
+            state.dbg(state.LOG_DEBUG, '[link_preview] got title=%r for: %s' % (info.get('title', ''), url))
             _insert_preview(window, info, marker_name)
-            _previewed.add(url)
-            if len(_previewed) > 500:
-                _previewed.clear()
-    except Exception:
-        pass
+        else:
+            state.dbg(state.LOG_DEBUG, '[link_preview] no info returned for: %s' % url)
+    except Exception as e:
+        state.dbg(state.LOG_DEBUG, '[link_preview] error for %s: %s' % (url, e))
     finally:
         _pending.discard(url)

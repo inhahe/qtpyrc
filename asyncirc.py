@@ -534,16 +534,71 @@ class IRCClient:
 
     part = leave
 
+    def _max_msg_bytes(self, target):
+        """Return the max byte length for the text portion of a PRIVMSG to *target*.
+
+        IRC lines are max 512 bytes including \\r\\n.  The server prepends
+        :nick!user@host so we must account for our own prefix.
+        """
+        # Best-effort own prefix length; fall back to generous estimate
+        nick = self.nickname or ''
+        ident = getattr(self, 'username', '') or nick
+        # Try to get our actual host from user tracking
+        host = ''
+        client = getattr(self, 'client', None)
+        if client:
+            own = client.users.get(self.irclower(nick))
+            if own and own.host:
+                host = own.host
+        if not host:
+            host = 'x' * 63  # max hostname length as safe fallback
+        # :nick!ident@host PRIVMSG target :\r\n
+        overhead = 1 + len(nick.encode('utf-8')) + 1 + len(ident.encode('utf-8')) + \
+                   1 + len(host.encode('utf-8')) + 1 + 8 + len(target.encode('utf-8')) + 2 + 2
+        return max(512 - overhead, 100)  # floor at 100 to avoid degenerate splits
+
+    def split_message(self, target, message, extra_overhead=0):
+        """Split *message* into chunks that fit within IRC line limits.
+
+        *extra_overhead* accounts for additional bytes consumed by wrapping
+        (e.g. 9 for CTCP ACTION: ``\\x01ACTION ...\\x01``).
+        Splits on word boundaries when possible.  Returns a list of strings.
+        """
+        max_bytes = self._max_msg_bytes(target) - extra_overhead
+        encoded = message.encode('utf-8')
+        if len(encoded) <= max_bytes:
+            return [message]
+        chunks = []
+        while encoded:
+            if len(encoded) <= max_bytes:
+                chunks.append(encoded.decode('utf-8', errors='replace'))
+                break
+            # Find a split point at or before max_bytes
+            split = max_bytes
+            # Don't split in the middle of a UTF-8 sequence
+            while split > 0 and (encoded[split] & 0xC0) == 0x80:
+                split -= 1
+            # Try to split on a space
+            space = encoded.rfind(b' ', 0, split + 1)
+            if space > max_bytes // 2:  # only use space if it's not too far back
+                split = space
+            chunk = encoded[:split].decode('utf-8', errors='replace')
+            chunks.append(chunk)
+            encoded = encoded[split:].lstrip(b' ')  # skip the space at split point
+        return chunks
+
     def say(self, channel, message, length=None):
         if channel[0] not in CHANNEL_PREFIXES:
             channel = '#' + channel
         self.msg(channel, message, length)
 
     def msg(self, user, message, length=None):
-        self.sendLine("PRIVMSG %s :%s" % (user, message))
+        for chunk in self.split_message(user, message):
+            self.sendLine("PRIVMSG %s :%s" % (user, chunk))
 
     def notice(self, user, message):
-        self.sendLine("NOTICE %s :%s" % (user, message))
+        for chunk in self.split_message(user, message):
+            self.sendLine("NOTICE %s :%s" % (user, chunk))
 
     def kick(self, channel, user, reason=None):
         if channel[0] not in CHANNEL_PREFIXES:

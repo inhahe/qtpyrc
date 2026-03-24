@@ -37,6 +37,8 @@ if sys.platform == 'win32':
   except Exception:
     pass
 
+os.environ.setdefault('QT_LOGGING_RULES', 'qt.text.font.db=false;qt.qpa.fonts=false')
+
 from PySide6.QtWidgets import *
 from PySide6.QtGui import *
 from PySide6.QtCore import *
@@ -489,7 +491,7 @@ def _bg_replay_tick():
     idx = bg['index']
     chunk = state.config.history_bg_chunk if state.config else 50
     end = min(idx + chunk, len(rows))
-    show_prefix = state.config.show_mode_prefix
+    show_prefix = state.config.show_mode_prefix_messages
     history = bg['chan_obj'].history if bg['chan_obj'] else None
 
     # Batch all insertions to suppress per-line document relayout
