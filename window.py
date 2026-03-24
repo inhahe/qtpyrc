@@ -166,368 +166,31 @@ class NetworkTree(QTreeWidget):
       state.app.mainwin.workspace.setActiveSubWindow(window.subwindow)
       self._updating = False
 
-  def contextMenuEvent(self, event):
-    item = self.itemAt(event.pos())
-    if item:
-      window = item.data(0, self._ROLE_WINDOW)
-      if window:
-        import popups
-        popups.show_popup('tab', window, event.globalPos())
-
 
 # ---------------------------------------------------------------------------
 # GUI: Window classes
 # ---------------------------------------------------------------------------
 
 class ChatOutput(QTextEdit):
-  """QTextEdit subclass that supports right-clicking on nick anchors and clickable URLs."""
+  """QTextEdit subclass that supports right-clicking on nick anchors."""
   def __init__(self, parent_window):
     super().__init__(parent_window)
     self._parent_window = parent_window
-    self.setMouseTracking(True)
-
-  def mouseMoveEvent(self, event):
-    anchor = self.anchorAt(event.pos())
-    if anchor and anchor.startswith('http'):
-      self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
-    else:
-      self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
-    super().mouseMoveEvent(event)
-
-  def mouseReleaseEvent(self, event):
-    super().mouseReleaseEvent(event)
-    if event.button() == Qt.MouseButton.LeftButton:
-      if self.textCursor().hasSelection():
-        # Text was selected (drag) — auto-copy if enabled, don't open links
-        if state.config.auto_copy_selection:
-          self.copy()
-          c = self.textCursor()
-          c.clearSelection()
-          self.setTextCursor(c)
-      else:
-        # Plain click — open link if on one
-        anchor = self.anchorAt(event.pos())
-        if anchor and anchor.startswith('http'):
-          from PySide6.QtGui import QDesktopServices
-          from PySide6.QtCore import QUrl
-          QDesktopServices.openUrl(QUrl(anchor))
 
   def contextMenuEvent(self, event):
     import popups
-    has_selection = self.textCursor().hasSelection()
     anchor = self.anchorAt(event.pos())
     if anchor and anchor.startswith("nick:"):
       nick = anchor[5:]
-      # Determine parent section for additive mode
-      wtype = getattr(self._parent_window, 'type', '')
-      parent_section = {'channel': 'channel', 'server': 'status',
-                        'query': 'query'}.get(wtype)
       popups.show_popup('nicklist', self._parent_window, event.globalPos(),
-                        extra_vars={'nick': nick, '1': nick},
-                        copy_action=has_selection,
-                        parent_section=parent_section)
-    elif anchor and anchor.startswith('http'):
-      # Determine parent section for additive mode
-      wtype = getattr(self._parent_window, 'type', '')
-      parent_section = {'channel': 'channel', 'server': 'status',
-                        'query': 'query'}.get(wtype)
-      popups.show_popup('link', self._parent_window, event.globalPos(),
-                        extra_vars={'link': anchor},
-                        copy_action=has_selection,
-                        parent_section=parent_section)
+                        extra_vars={'nick': nick, '1': nick})
     else:
       # Try window-type-specific popup
       wtype = getattr(self._parent_window, 'type', '')
       section = {'channel': 'channel', 'server': 'status',
                  'query': 'query'}.get(wtype)
-      if not section or not popups.show_popup(
-          section, self._parent_window, event.globalPos(),
-          copy_action=has_selection):
+      if not section or not popups.show_popup(section, self._parent_window, event.globalPos()):
         super().contextMenuEvent(event)
-
-
-# ---------------------------------------------------------------------------
-# Reusable search bar for any QTextEdit / QPlainTextEdit
-# ---------------------------------------------------------------------------
-
-class SearchBar(QWidget):
-  """A find bar that searches within a text widget (QTextEdit or QPlainTextEdit).
-
-  *text_widget* is the widget whose document is searched.
-  *on_close_focus* is an optional widget to focus when the bar is closed.
-  *set_cursor* — if True, the text widget's cursor is moved to the match
-  position (useful for editable text).  If False, only extra-selections
-  are used for highlighting (useful for read-only chat output).
-  """
-
-  def __init__(self, text_widget, on_close_focus=None, set_cursor=False,
-               parent=None):
-    super().__init__(parent)
-    self._text = text_widget
-    self._close_focus = on_close_focus
-    self._set_cursor = set_cursor
-    self._search_cursor = QTextCursor()
-
-    lay = QHBoxLayout(self)
-    lay.setContentsMargins(2, 2, 2, 2)
-
-    self._input = QLineEdit()
-    self._input.setPlaceholderText("Search\u2026")
-    self._input.returnPressed.connect(lambda: self.find(forward=False))
-    self._input.textChanged.connect(self._reset)
-    lay.addWidget(self._input, 1)
-
-    self._case_cb = QCheckBox("Case sensitive")
-    self._case_cb.stateChanged.connect(self._reset)
-    lay.addWidget(self._case_cb)
-
-    self._regex_cb = QCheckBox("Regex")
-    self._regex_cb.stateChanged.connect(self._reset)
-    lay.addWidget(self._regex_cb)
-
-    btn_up = QPushButton("\u25b2")
-    btn_up.setFixedWidth(30)
-    btn_up.setToolTip("Previous match")
-    btn_up.clicked.connect(lambda: self.find(forward=False))
-    lay.addWidget(btn_up)
-
-    btn_down = QPushButton("\u25bc")
-    btn_down.setFixedWidth(30)
-    btn_down.setToolTip("Next match")
-    btn_down.clicked.connect(lambda: self.find(forward=True))
-    lay.addWidget(btn_down)
-
-    btn_close = QPushButton("\u2715")
-    btn_close.setFixedWidth(30)
-    btn_close.clicked.connect(self.close_bar)
-    lay.addWidget(btn_close)
-
-  def open_bar(self):
-    self.setVisible(True)
-    self._input.setFocus()
-    self._input.selectAll()
-
-  def close_bar(self):
-    self.setVisible(False)
-    self._search_cursor = QTextCursor()
-    self._text.setExtraSelections([])
-    if self._close_focus:
-      self._close_focus.setFocus()
-
-  def _reset(self):
-    self._search_cursor = QTextCursor()
-    self._text.setExtraSelections([])
-
-  def find(self, forward=False):
-    query = self._input.text()
-    if not query:
-      return
-    case_sensitive = self._case_cb.isChecked()
-    use_regex = self._regex_cb.isChecked()
-    doc = self._text.document()
-
-    if use_regex:
-      try:
-        flags = 0 if case_sensitive else re.IGNORECASE
-        pat = re.compile(query, flags)
-      except re.error:
-        return
-      found = self._regex_find(doc, pat, forward)
-    else:
-      found = self._plain_find(doc, query, case_sensitive, forward)
-
-    if found and not found.isNull() and found.hasSelection():
-      self._search_cursor = found
-      sel = QTextEdit.ExtraSelection()
-      sel.cursor = found
-      fmt = QTextCharFormat()
-      fmt.setBackground(state.config.color_search_bg)
-      fmt.setForeground(state.config.color_search_fg)
-      sel.format = fmt
-      self._text.setExtraSelections([sel])
-      view_cursor = QTextCursor(found)
-      if self._set_cursor:
-        self._text.setTextCursor(found)
-      else:
-        view_cursor.clearSelection()
-        self._text.setTextCursor(view_cursor)
-      self._text.ensureCursorVisible()
-    else:
-      self._text.setExtraSelections([])
-      self._search_cursor = QTextCursor()
-
-  def _plain_find(self, doc, query, case_sensitive, forward):
-    text = doc.toPlainText()
-    if case_sensitive:
-      search_text, search_query = text, query
-    else:
-      search_text, search_query = text.casefold(), query.casefold()
-
-    if self._search_cursor.hasSelection():
-      if forward:
-        start = self._search_cursor.selectionEnd()
-      else:
-        start = self._search_cursor.selectionStart() - 1
-    else:
-      start = len(search_text) if not forward else 0
-
-    if forward:
-      idx = search_text.find(search_query, start)
-      if idx < 0:
-        idx = search_text.find(search_query, 0)
-    else:
-      idx = search_text.rfind(search_query, 0, max(start + 1, 0))
-      if idx < 0:
-        idx = search_text.rfind(search_query)
-
-    if idx < 0:
-      return QTextCursor()
-    cursor = QTextCursor(doc)
-    cursor.setPosition(idx)
-    cursor.setPosition(idx + len(search_query), QTextCursor.MoveMode.KeepAnchor)
-    return cursor
-
-  def _regex_find(self, doc, pat, forward):
-    text = doc.toPlainText()
-    if self._search_cursor.hasSelection():
-      if forward:
-        start = self._search_cursor.selectionEnd()
-      else:
-        start = self._search_cursor.selectionStart()
-    else:
-      start = len(text) if not forward else 0
-
-    if forward:
-      m = pat.search(text, start)
-      if not m:
-        m = pat.search(text, 0)
-    else:
-      m = None
-      for candidate in pat.finditer(text, 0):
-        if candidate.start() < start:
-          m = candidate
-        else:
-          break
-      if not m:
-        for candidate in pat.finditer(text, 0):
-          m = candidate
-
-    if not m:
-      return QTextCursor()
-    cursor = QTextCursor(doc)
-    cursor.setPosition(m.start())
-    cursor.setPosition(m.end(), QTextCursor.MoveMode.KeepAnchor)
-    return cursor
-
-  def keyPressEvent(self, event):
-    if event.key() == Qt.Key.Key_Escape:
-      self.close_bar()
-      return
-    super().keyPressEvent(event)
-
-
-class _HistoryPopup(QListWidget):
-  """Popup list showing input history, appears above the input field."""
-
-  picked = Signal(str)
-
-  def __init__(self, parent=None):
-    super().__init__(parent)
-    self.setWindowFlags(Qt.WindowType.Popup)
-    self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-    self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    self.setMaximumHeight(200)
-    self._last_key = ''
-    self._last_key_row = -1
-    self.itemActivated.connect(self._on_activated)
-    self.itemClicked.connect(self._on_activated)
-
-  def populate(self, history):
-    self.clear()
-    # Show most recent at the bottom (reverse order so bottom = newest)
-    for text in history:
-      item = QListWidgetItem(text.replace('\n', ' '))
-      item.setData(Qt.ItemDataRole.UserRole, text)
-      self.addItem(item)
-    if self.count():
-      self.setCurrentRow(self.count() - 1)
-      self.scrollToBottom()
-
-  def select_prev(self):
-    row = self.currentRow()
-    if row > 0:
-      self.setCurrentRow(row - 1)
-      self._preview()
-
-  def select_next(self):
-    row = self.currentRow()
-    if row < self.count() - 1:
-      self.setCurrentRow(row + 1)
-      self._preview()
-
-  def _preview(self):
-    item = self.currentItem()
-    if item:
-      self.picked.emit(item.data(Qt.ItemDataRole.UserRole))
-
-  def _on_activated(self, item):
-    self.picked.emit(item.data(Qt.ItemDataRole.UserRole))
-    self.hide()
-
-  def keyPressEvent(self, event):
-    key = event.key()
-    if key == Qt.Key.Key_Return:
-      item = self.currentItem()
-      if item:
-        self._on_activated(item)
-      return
-    if key == Qt.Key.Key_Escape:
-      self.hide()
-      return
-    if key == Qt.Key.Key_Up:
-      self.select_prev()
-      return
-    if key == Qt.Key.Key_Down:
-      self.select_next()
-      return
-    if key == Qt.Key.Key_Home:
-      self.setCurrentRow(0)
-      self._preview()
-      return
-    if key == Qt.Key.Key_End:
-      self.setCurrentRow(self.count() - 1)
-      self._preview()
-      return
-    if key == Qt.Key.Key_PageUp:
-      row = max(0, self.currentRow() - 10)
-      self.setCurrentRow(row)
-      self._preview()
-      return
-    if key == Qt.Key.Key_PageDown:
-      row = min(self.count() - 1, self.currentRow() + 10)
-      self.setCurrentRow(row)
-      self._preview()
-      return
-    # Printable key — jump to next entry starting with that character
-    ch = event.text()
-    if ch and ch.isprintable():
-      ch_lower = ch.lower()
-      if ch_lower == self._last_key:
-        start = self._last_key_row + 1
-      else:
-        start = 0
-        self._last_key = ch_lower
-      # Search from start, wrapping around
-      for i in range(self.count()):
-        row = (start + i) % self.count()
-        item = self.item(row)
-        text = (item.data(Qt.ItemDataRole.UserRole) or '').lower()
-        if text.startswith(ch_lower):
-          self.setCurrentRow(row)
-          self._last_key_row = row
-          self._preview()
-          return
-    super().keyPressEvent(event)
 
 
 class Window(QWidget):
@@ -538,51 +201,13 @@ class Window(QWidget):
       # Avoid consecutive duplicates
       if not self.inputhistory or self.inputhistory[-1] != text:
         self.inputhistory.append(text)
-        # Cap and persist
-        _MAX_INPUT_HISTORY = 200
-        if len(self.inputhistory) > _MAX_INPUT_HISTORY:
-          self.inputhistory = self.inputhistory[-_MAX_INPUT_HISTORY:]
-        if state.ui_state:
-          state.ui_state.input_history = self.inputhistory
     self._history_index = -1
-    # Split multiline input into separate lines
-    lines = text.split('\n')
-    for line in lines:
-      line = line.rstrip('\r')
-      if not line:
-        continue
-      if line.startswith(state.config.cmdprefix):
-        from commands import docommand
-        docommand(self, *(line[len(state.config.cmdprefix):].split(" ", 1)))
-      else:
-        from commands import docommand
-        docommand(self, "say", line)
-
-  def _show_history_popup(self):
-    """Show the input history popup above the input field."""
-    if not self.inputhistory:
-      return
-    if not self._history_popup:
-      self._history_popup = _HistoryPopup()
-      self._history_popup.picked.connect(self._pick_history)
-    self._history_popup.populate(self.inputhistory)
-    # Position above the input field
-    pos = self.input.mapToGlobal(self.input.rect().topLeft())
-    w = self.input.width()
-    self._history_popup.setFixedWidth(w)
-    h = min(200, self._history_popup.sizeHintForRow(0) * min(self._history_popup.count(), 10) + 4)
-    self._history_popup.setFixedHeight(h)
-    self._history_popup.move(pos.x(), pos.y() - h)
-    self._history_popup.show()
-    self._history_popup.setFocus()
-
-  def _pick_history(self, text):
-    """Called when a history item is selected."""
-    self.input.setPlainText(text)
-    c = self.input.textCursor()
-    c.movePosition(c.MoveOperation.End)
-    self.input.setTextCursor(c)
-    self.input.setFocus()
+    if text.startswith(state.config.cmdprefix):
+      from commands import docommand
+      docommand(self, *(text[len(state.config.cmdprefix):].split(" ", 1)))
+    else:
+      from commands import docommand
+      docommand(self, "say", text)
 
   def _get_completable_nicks(self):
     """Return the set of nicks available for completion in this window."""
@@ -809,8 +434,6 @@ class Window(QWidget):
     self.output.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
     _chatfont = QFont(state.config.fontfamily, state.config.fontheight)
     self.output.setFont(_chatfont)
-    # Set default document font explicitly
-    self.output.document().setDefaultFont(_chatfont)
     if state.config.backscroll_limit > 0:
       self.output.document().setMaximumBlockCount(state.config.backscroll_limit)
     self.vs = self.output.verticalScrollBar()
@@ -830,29 +453,193 @@ class Window(QWidget):
       Qt.ScrollBarPolicy.ScrollBarAlwaysOff if lines <= 1
       else Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
-    self._search_bar = SearchBar(self.output, on_close_focus=None, parent=self)
+    self._search_bar = self._build_search_bar()
     self._search_bar.setVisible(False)
+    self._search_cursor = QTextCursor()  # null cursor = no current match
 
     self._build_layout()
 
-    self.inputhistory = list(state.ui_state.input_history) if state.ui_state else []
+    self.inputhistory = []
     self._history_index = -1
     self._history_saved = ''  # text in input before browsing history
-    self._history_popup = None
     # Nick tab-completion state
     self._comp_popup = None    # NickCompletionPopup instance
     self._comp_prefix = ''     # the text fragment being completed
     self._comp_start = 0       # cursor position where the fragment starts
     self.input.installEventFilter(self)
+    self._search_input.installEventFilter(self)
     self.subwindow = state.app.mainwin.workspace.addSubWindow(self)
     self.show()
 
+  def _build_search_bar(self):
+    bar = QWidget(self)
+    lay = QHBoxLayout(bar)
+    lay.setContentsMargins(2, 2, 2, 2)
+
+    self._search_input = QLineEdit()
+    self._search_input.setPlaceholderText("Search…")
+    self._search_input.returnPressed.connect(lambda: self._search_do(forward=False))
+    self._search_input.textChanged.connect(self._search_reset_highlight)
+    lay.addWidget(self._search_input, 1)
+
+    self._search_case = QCheckBox("Case sensitive")
+    self._search_case.setChecked(False)
+    self._search_case.stateChanged.connect(self._search_reset_highlight)
+    lay.addWidget(self._search_case)
+
+    self._search_regex = QCheckBox("Regex")
+    self._search_regex.setChecked(False)
+    self._search_regex.stateChanged.connect(self._search_reset_highlight)
+    lay.addWidget(self._search_regex)
+
+    btn_up = QPushButton("▲")
+    btn_up.setFixedWidth(30)
+    btn_up.setToolTip("Previous match")
+    btn_up.clicked.connect(lambda: self._search_do(forward=False))
+    lay.addWidget(btn_up)
+
+    btn_down = QPushButton("▼")
+    btn_down.setFixedWidth(30)
+    btn_down.setToolTip("Next match")
+    btn_down.clicked.connect(lambda: self._search_do(forward=True))
+    lay.addWidget(btn_down)
+
+    btn_close = QPushButton("✕")
+    btn_close.setFixedWidth(30)
+    btn_close.clicked.connect(self._search_close)
+    lay.addWidget(btn_close)
+
+    return bar
+
   def _search_open(self):
-    self._search_bar.open_bar()
+    self._search_bar.setVisible(True)
+    self._search_input.setFocus()
+    self._search_input.selectAll()
 
   def _search_close(self):
-    self._search_bar.close_bar()
+    self._search_bar.setVisible(False)
+    self._search_cursor = QTextCursor()
+    self.output.setExtraSelections([])
     self.input.setFocus()
+
+  def _search_reset_highlight(self):
+    """Clear the current match when search text or options change."""
+    self._search_cursor = QTextCursor()
+    self.output.setExtraSelections([])
+
+  def _search_do(self, forward=False):
+    """Find the next (or previous) match.  Default direction is backward (up)."""
+    query = self._search_input.text()
+    if not query:
+      return
+    case_sensitive = self._search_case.isChecked()
+    use_regex = self._search_regex.isChecked()
+    doc = self.output.document()
+
+    if use_regex:
+      try:
+        flags = 0 if case_sensitive else re.IGNORECASE
+        pat = re.compile(query, flags)
+      except re.error as e:
+        self.redmessage('[Search: invalid regex: %s]' % e)
+        return
+      found_cursor = self._search_regex_find(doc, pat, forward)
+    else:
+      found_cursor = self._search_plain_find(doc, query, case_sensitive, forward)
+
+    if found_cursor and not found_cursor.isNull() and found_cursor.hasSelection():
+      self._search_cursor = found_cursor
+      # Highlight the match
+      sel = QTextEdit.ExtraSelection()
+      sel.cursor = found_cursor
+      fmt = QTextCharFormat()
+      fmt.setBackground(state.config.color_search_bg)
+      fmt.setForeground(state.config.color_search_fg)
+      sel.format = fmt
+      self.output.setExtraSelections([sel])
+      # Scroll to the match
+      view_cursor = QTextCursor(found_cursor)
+      view_cursor.clearSelection()
+      self.output.setTextCursor(view_cursor)
+      self.output.ensureCursorVisible()
+    else:
+      self.output.setExtraSelections([])
+      self._search_cursor = QTextCursor()
+
+  def _search_plain_find(self, doc, query, case_sensitive, forward):
+    """Plain text search with optional case insensitivity."""
+    text = doc.toPlainText()
+    if case_sensitive:
+      search_text = text
+      search_query = query
+    else:
+      search_text = text.casefold()
+      search_query = query.casefold()
+
+    # Determine start position from current match
+    if self._search_cursor.hasSelection():
+      if forward:
+        start = self._search_cursor.selectionEnd()
+      else:
+        start = self._search_cursor.selectionStart() - 1
+    else:
+      # Default: start from end (searching up) or start (searching down)
+      start = len(search_text) if not forward else 0
+
+    if forward:
+      idx = search_text.find(search_query, start)
+      if idx < 0:  # wrap around
+        idx = search_text.find(search_query, 0)
+    else:
+      idx = search_text.rfind(search_query, 0, max(start + 1, 0))
+      if idx < 0:  # wrap around
+        idx = search_text.rfind(search_query)
+
+    if idx < 0:
+      return QTextCursor()
+
+    cursor = QTextCursor(doc)
+    cursor.setPosition(idx)
+    cursor.setPosition(idx + len(search_query), QTextCursor.MoveMode.KeepAnchor)
+    return cursor
+
+  def _search_regex_find(self, doc, pat, forward):
+    """Regex search."""
+    text = doc.toPlainText()
+    search_text = text
+
+    # Determine start position
+    if self._search_cursor.hasSelection():
+      if forward:
+        start = self._search_cursor.selectionEnd()
+      else:
+        start = self._search_cursor.selectionStart()
+    else:
+      start = len(search_text) if not forward else 0
+
+    if forward:
+      m = pat.search(search_text, start)
+      if not m:  # wrap
+        m = pat.search(search_text, 0)
+    else:
+      # Find the last match before start
+      m = None
+      for candidate in pat.finditer(search_text, 0):
+        if candidate.start() < start:
+          m = candidate
+        else:
+          break
+      if not m:  # wrap — find last match in entire text
+        for candidate in pat.finditer(search_text, 0):
+          m = candidate
+
+    if not m:
+      return QTextCursor()
+
+    cursor = QTextCursor(doc)
+    cursor.setPosition(m.start())
+    cursor.setPosition(m.end(), QTextCursor.MoveMode.KeepAnchor)
+    return cursor
 
   def _build_layout(self):
     """Default layout — subclasses may override."""
@@ -919,13 +706,13 @@ class Window(QWidget):
     sep_fmt.setForeground(QBrush(QColor(128, 128, 128)))
     width = self.output.viewport().width()
     fm = QFontMetrics(self.output.font())
-    label_px = fm.horizontalAdvance(' ' + label + ' ')
-    char_w = fm.horizontalAdvance('\u2500')
-    if char_w > 0:
-      avail = max(width - label_px - char_w * 4, char_w * 4)
-      side = max(int(avail / char_w / 2), 2)
+    label_width = fm.horizontalAdvance(label)
+    char_width = fm.horizontalAdvance('\u2500')
+    if char_width > 0:
+      total_chars = max((width // char_width) - 4, 20)
+      side = max((total_chars - len(label) - 2) // 2, 2)
     else:
-      side = 10
+      side = 20
     line = '\u2500' * side + ' ' + label + ' ' + '\u2500' * side
     self.cur.insertText(line, sep_fmt)
 
@@ -938,9 +725,9 @@ class Window(QWidget):
     else:
       self._insert_timestamp()
     if fmt:
-      self._render_text(line, base_format=fmt)
+      self._render_mirc(line, base_format=fmt)
     else:
-      self._render_text(line)
+      self._render_mirc(line)
     self._updateBottomAlign()
 
   def addline_nick(self, parts, fmt=None, timestamp_override=None):
@@ -968,22 +755,9 @@ class Window(QWidget):
         anchor_fmt.setFontUnderline(False)
         cur.insertText(nick, anchor_fmt)
       else:
-        self._render_text(part, base_format=base)
+        cur.insertText(part, base)
     cur.movePosition(QTextCursor.MoveOperation.End)
     self._updateBottomAlign()
-
-  @staticmethod
-  def _nick_color(nick):
-    """Return a QColor for *nick* based on the nick_colors palette, or None."""
-    cfg = state.config
-    if not cfg.nick_colors_enabled or not cfg.nick_color_palette:
-      return None
-    # Strip mode prefixes (@+%) for consistent coloring
-    clean = nick.lstrip('@+%~&')
-    h = hash(clean.lower())
-    palette = cfg.nick_color_palette
-    color_str = palette[h % len(palette)]
-    return QColor(color_str)
 
   def addline_msg(self, nick, message, timestamp_override=None):
     """Add a <nick> message line with the nick as a right-clickable anchor."""
@@ -995,76 +769,32 @@ class Window(QWidget):
       self._insert_timestamp_override(timestamp_override)
     else:
       self._insert_timestamp()
-    # Determine nick color
-    nick_qcolor = self._nick_color(nick)
-    bracket_fmt = QTextCharFormat(state.defaultformat)
-    if nick_qcolor:
-      bracket_fmt.setForeground(QBrush(nick_qcolor))
     # Insert "<"
-    cur.insertText('<', bracket_fmt)
+    cur.insertText('<', state.defaultformat)
     # Insert nick as anchor
     anchor_fmt = QTextCharFormat(state.defaultformat)
     anchor_fmt.setAnchor(True)
     anchor_fmt.setAnchorHref("nick:" + nick)
     anchor_fmt.setFontUnderline(False)
-    if nick_qcolor:
-      anchor_fmt.setForeground(QBrush(nick_qcolor))
-    else:
-      anchor_fmt.setForeground(QBrush(state.config.fgcolor))
+    anchor_fmt.setForeground(QBrush(state.config.fgcolor))
     cur.insertText(nick, anchor_fmt)
     # Insert "> "
-    cur.insertText('> ', bracket_fmt)
+    cur.insertText('> ', state.defaultformat)
     cur.movePosition(QTextCursor.MoveOperation.End)
     # Now render the message body with mIRC formatting
-    self._render_text(message)
+    self._render_mirc(message)
     self._updateBottomAlign()
 
-  def _insert_with_urls(self, cur, text, fmt):
-    """Insert *text* with URLs rendered as clickable anchors."""
-    from irc_client import _URL_RE
-    pos = 0
-    for m in _URL_RE.finditer(text):
-      # Insert text before the URL
-      if m.start() > pos:
-        cur.insertText(text[pos:m.start()], fmt)
-      # Strip trailing punctuation (same logic as _extract_urls)
-      url = m.group(0)
-      while url and url[-1] in '.,;:!?\'"':
-        url = url[:-1]
-      while url.endswith(')') and url.count(')') > url.count('('):
-        url = url[:-1]
-      if url:
-        url_fmt = QTextCharFormat(fmt)
-        url_fmt.setAnchor(True)
-        url_fmt.setAnchorHref(url)
-        url_fmt.setFontUnderline(True)
-        url_fmt.setForeground(state.config.color_link)
-        cur.insertText(url, url_fmt)
-      # Insert any stripped trailing chars as plain text
-      stripped = text[m.start() + len(url):m.end()]
-      if stripped:
-        cur.insertText(stripped, fmt)
-      pos = m.end()
-    # Insert remaining text after last URL
-    if pos < len(text):
-      cur.insertText(text[pos:], fmt)
-
-  def _render_text(self, line, base_format=None):
+  def _render_mirc(self, line, base_format=None):
     """Render mIRC-formatted text at current cursor position."""
     bold = underline = italics = False
-    base_fg = base_format.foreground().color() if base_format else state.config.fgcolor
-    if base_format:
-      tf = QTextCharFormat(base_format)
-    else:
-      tf = QTextCharFormat()
-      tf.setForeground(QBrush(base_fg))
-    fg = base_fg
+    fg = base_format.foreground().color() if base_format else state.config.fgcolor
     bg = state.config.bgcolor
-    tf.setBackground(QBrush(bg))
+    tf = QTextCharFormat()
     cur = self.cur
     for code, fgs, bgs, text in mircre.findall(line):
       if code in "\x03\x0F":
-        fg, bg = base_fg, state.config.bgcolor
+        fg, bg = state.config.fgcolor, state.config.bgcolor
         tf.setForeground(fg)
         tf.setBackground(bg)
         if code=="\x0F":
@@ -1096,7 +826,7 @@ class Window(QWidget):
       elif code=="":
         tf.setForeground(fg)
         tf.setBackground(bg)
-      self._insert_with_urls(cur, text, tf)
+      cur.insertText(text, tf)
       cur.movePosition(QTextCursor.MoveOperation.End)
 
   def redmessage(self, text):
@@ -1241,12 +971,6 @@ class Window(QWidget):
     cursor.insertText(ch)
 
   def eventFilter(self, obj, event):
-    # Propagate nicklist width to other windows when splitter drag finishes
-    if (hasattr(self, 'splitter') and obj is self.splitter.handle(1)
-        and event.type() == QEvent.Type.MouseButtonRelease):
-      if self._splitter_dirty:
-        self._splitter_dirty = False
-        self._propagate_nicklist_width()
     # Claim Tab so QTextEdit doesn't consume it for indentation
     if (event.type() == QEvent.Type.ShortcutOverride
         and event.key() == Qt.Key.Key_Tab
@@ -1262,6 +986,14 @@ class Window(QWidget):
       if key == Qt.Key.Key_F and (mods & Qt.KeyboardModifier.ControlModifier):
         self._search_open()
         return True
+
+      # Search input-specific keys
+      if obj is self._search_input:
+        if key == Qt.Key.Key_Escape:
+          self._search_close()
+          return True
+        # Let the search input handle its own keys normally
+        return False
 
       # Escape — skip this tab and activate next
       if key == Qt.Key.Key_Escape:
@@ -1281,17 +1013,31 @@ class Window(QWidget):
         if self._start_tab_completion():
           return True
 
-      # Ctrl+Up — open/navigate input history popup
+      # Ctrl+Up/Down — input history
       if key == Qt.Key.Key_Up and (mods & Qt.KeyboardModifier.ControlModifier):
         if self.inputhistory:
-          if not self._history_popup or not self._history_popup.isVisible():
-            self._show_history_popup()
-          else:
-            self._history_popup.select_prev()
+          if self._history_index == -1:
+            self._history_saved = obj.toPlainText()
+            self._history_index = len(self.inputhistory) - 1
+          elif self._history_index > 0:
+            self._history_index -= 1
+          obj.setPlainText(self.inputhistory[self._history_index])
+          # Move cursor to end
+          c = obj.textCursor()
+          c.movePosition(c.MoveOperation.End)
+          obj.setTextCursor(c)
         return True
       if key == Qt.Key.Key_Down and (mods & Qt.KeyboardModifier.ControlModifier):
-        if self._history_popup and self._history_popup.isVisible():
-          self._history_popup.select_next()
+        if self._history_index != -1:
+          if self._history_index < len(self.inputhistory) - 1:
+            self._history_index += 1
+            obj.setPlainText(self.inputhistory[self._history_index])
+          else:
+            self._history_index = -1
+            obj.setPlainText(self._history_saved)
+          c = obj.textCursor()
+          c.movePosition(c.MoveOperation.End)
+          obj.setTextCursor(c)
         return True
 
       if key == Qt.Key.Key_Return:
@@ -1398,10 +1144,6 @@ class Querywindow(Window):
     self._vlayout.addWidget(self._search_bar, 0)
     self._vlayout.addWidget(self.input, 0)
 
-  @property
-  def remotenick(self):
-    return self.query.nick if self.query else ''
-
   _TYPING_TIMEOUT = 6000
   _TYPING_SEND_INTERVAL = 3
 
@@ -1460,16 +1202,6 @@ class NicksList(QListWidget):
                          cfg.nicklist_font_size or cfg.fontheight))
     else:
       self.setFont(QFont(cfg.fontfamily, cfg.fontheight))
-    # Reduce vertical spacing between items
-    self.setSpacing(0)
-    self.setUniformItemSizes(True)
-    class _CompactDelegate(QStyledItemDelegate):
-      def sizeHint(self, option, index):
-        sh = super().sizeHint(option, index)
-        fm = option.fontMetrics
-        sh.setHeight(fm.height() + 2)
-        return sh
-    self.setItemDelegate(_CompactDelegate(self))
     # Prevent persistent selection highlight
     self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
     self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1480,8 +1212,7 @@ class NicksList(QListWidget):
       import popups
       nick = item._nick
       popups.show_popup('nicklist', self.channelwindow, event.globalPos(),
-                        extra_vars={'nick': nick, '1': nick},
-                        parent_section='channel')
+                        extra_vars={'nick': nick, '1': nick})
 
   def mouseDoubleClickEvent(self, event):
     """Double-click a nick to open a message window."""
@@ -1601,56 +1332,18 @@ class Channelwindow(Window):
     self.splitter.addWidget(left)
     self.nickslist = NicksList(self)
     self.splitter.addWidget(self.nickslist)
-    # Allow both sides to be resized smaller than their default sizeHint
-    left.setMinimumWidth(50)
-    self.nickslist.setMinimumWidth(20)
-    self.splitter.setCollapsible(0, False)
-    self.splitter.setCollapsible(1, False)
-    self._target_nw = state.ui_state.nicklist_width if state.ui_state else 150
-    self._nw_user_set = False  # True once the user drags the splitter
-    self._splitter_dirty = False  # True while dragging, propagate on release
-    self.splitter.setSizes([600, self._target_nw])
+    nw = state.ui_state.nicklist_width if state.ui_state else 150
+    self.splitter.setSizes([600, nw])
     self.splitter.splitterMoved.connect(self._on_splitter_moved)
-    # Install event filter on the splitter handle to detect drag end
-    self.splitter.handle(1).installEventFilter(self)
     self._vlayout.addWidget(self.splitter, 1)
     self._vlayout.addWidget(self._search_bar, 0)
     self._vlayout.addWidget(self.input, 0)
 
-  def resizeEvent(self, event):
-    super().resizeEvent(event)
-    if not self._nw_user_set:
-      total = self.splitter.width()
-      nw = self._target_nw
-      if total > nw:
-        self.splitter.blockSignals(True)
-        self.splitter.setSizes([total - nw, nw])
-        self.splitter.blockSignals(False)
-
   def _on_splitter_moved(self, pos, index):
-    self._nw_user_set = True
-    self._splitter_dirty = True
-    sizes = self.splitter.sizes()
-    if len(sizes) < 2:
-      return
-    nw = sizes[1]
-    self._target_nw = nw
     if state.ui_state:
-      state.ui_state.nicklist_width = nw
-
-  def _propagate_nicklist_width(self):
-    """Apply nicklist width to all other channel windows (debounced)."""
-    nw = self._target_nw
-    for client in state.clients:
-      for chan in client.channels.values():
-        w = chan.window
-        if w and w is not self and hasattr(w, 'splitter'):
-          w._target_nw = nw
-          total = w.splitter.width()
-          if total > nw:
-            w.splitter.blockSignals(True)
-            w.splitter.setSizes([total - nw, nw])
-            w.splitter.blockSignals(False)
+      sizes = self.splitter.sizes()
+      if len(sizes) >= 2:
+        state.ui_state.nicklist_width = sizes[1]
 
   # --- Typing indicator ---
 

@@ -6,7 +6,6 @@ from PySide6.QtWidgets import (
     QPushButton,
 )
 from PySide6.QtCore import Qt
-from settings.page_general import _ck
 
 
 class NotificationsPage(QWidget):
@@ -93,23 +92,21 @@ class NotificationsPage(QWidget):
         # Hint about highlight patterns
         self._highlight_hint = QLabel()
         self._highlight_hint.setWordWrap(True)
-        from settings import SETTINGS_HINT_STYLE
-        # Use hint style but with warning color instead of gray
-        self._highlight_hint.setStyleSheet(SETTINGS_HINT_STYLE.replace('gray', '#996600'))
+        self._highlight_hint.setStyleSheet("color: #996600; font-size: 11px;")
         self._highlight_hint.setTextFormat(Qt.TextFormat.PlainText)
         layout.addRow(self._highlight_hint)
 
-        self.check_interval = _ck(QSpinBox(), 'notifications.check_interval')
+        self.check_interval = QSpinBox()
         self.check_interval.setRange(10, 600)
         self.check_interval.setSuffix(" s")
+        self.check_interval.setToolTip("How often to check if /notify nicks are online (ISON polling interval)")
         layout.addRow("Notify check interval:", self.check_interval)
 
         tip = QLabel("For per-nick, per-channel, or per-pattern notifications, "
                      "use /on commands with -s/-d/-h flags. Add them to "
                      "your startup commands file to persist across restarts.")
         tip.setWordWrap(True)
-        from settings import SETTINGS_HINT_STYLE
-        tip.setStyleSheet(SETTINGS_HINT_STYLE)
+        tip.setStyleSheet("color: gray; font-size: 11px;")
         layout.addRow(tip)
 
 

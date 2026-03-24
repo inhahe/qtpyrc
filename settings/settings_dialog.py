@@ -3,29 +3,25 @@ from PySide6.QtWidgets import (
     QStackedWidget, QPushButton, QDialogButtonBox, QInputDialog,
     QMessageBox, QMenu, QLabel, QWidget, QFrame, QScrollArea,
     QStyledItemDelegate, QStyle, QLineEdit, QComboBox, QSpinBox,
-    QDoubleSpinBox, QAbstractSpinBox, QApplication,
+    QDoubleSpinBox, QAbstractSpinBox,
 )
-from PySide6.QtCore import Qt, QEvent
+from PySide6.QtCore import Qt, QTimer, QEvent
 from PySide6.QtGui import QShortcut, QKeySequence, QPalette, QColor, QPen, QBrush
 import copy
 from ruamel.yaml.comments import CommentedMap
 import state
 
-from settings.page_general import GeneralPage, InterfacePage, TitlesPage, FilesPage
+from settings.page_general import GeneralPage
 from settings.page_identity import IdentityPage
-from settings.page_font import (BaseColorsPage, ChatFontPage, TabFontPage,
-    MenuFontPage, TreeFontPage, NicklistFontPage, ToolbarFontPage,
-    SettingsFontPage, EditorFontPage)
+from settings.page_font import (ChatFontPage, TabFontPage, MenuFontPage,
+    TreeFontPage, NicklistFontPage, ToolbarFontPage, SettingsFontPage,
+    EditorFontPage)
 from settings.page_ident_server import IdentServerPage
 from settings.page_logging import LoggingPage
 from settings.page_network import NetworkPage
 from settings.page_server import ServerPage
 from settings.page_sasl import SASLPage
 from settings.page_autojoin import AutoJoinPage
-from settings.page_lists import ListsPage
-from settings.page_plugin_config import SinglePluginConfigPage, get_plugin_names
-from settings.page_link_preview import LinkPreviewPage
-from settings.page_nick_colors import NickColorsPage
 from settings.page_notifications import NotificationsPage
 from settings.page_scripts import ScriptsPage
 from settings.page_file_editor import FileEditorPage
@@ -34,71 +30,6 @@ from settings.page_file_editor import FileEditorPage
 # Item data role for storing page type / network key
 ROLE_PAGE = Qt.ItemDataRole.UserRole
 ROLE_NETKEY = Qt.ItemDataRole.UserRole + 1
-
-# Settings tree structure: (ui_path_suffix, page_id, label, children)
-# Used for both building the tree and registering --ui paths.
-SETTINGS_PAGES = [
-    ('general', 'general', 'General', [
-        ('general.interface', 'interface', 'Interface', []),
-        ('general.titles', 'titles', 'Titles', []),
-        ('general.identserver', 'ident_server', 'Ident Server', []),
-        ('general.logging', 'logging', 'Logging', []),
-        ('general.linkpreview', 'link_preview', 'Link Previews', []),
-        ('general.files', 'files', 'Files', []),
-    ]),
-    ('identity', 'identity', 'Identity', []),
-    ('lists', 'lists', 'Lists', []),
-    ('fonts', 'font_root', 'Font / Colors', [
-        ('fonts.chat', 'font_chat', 'Chat', []),
-        ('fonts.tab', 'font_tab', 'Tab Bar', []),
-        ('fonts.menu', 'font_menu', 'Menus', []),
-        ('fonts.tree', 'font_tree', 'Network Tree', []),
-        ('fonts.nicklist', 'font_nicklist', 'Nick List', []),
-        ('fonts.toolbar', 'font_toolbar', 'Toolbar', []),
-        ('fonts.settings', 'font_settings', 'Settings Dialog', []),
-        ('fonts.editor', 'font_editor', 'File Editor', []),
-        ('fonts.nickcolors', 'nick_colors', 'Nick Colors', []),
-    ]),
-    ('notifications', 'notifications', 'Notifications', []),
-    ('scripts', 'scripts', 'Scripts', []),
-    ('plugins', 'plugin_config', 'Plugins', []),
-    ('editor', 'editor', 'File Editor', []),
-]
-
-
-NETWORK_SUB_PAGES = [
-    ('server', 'Servers'),
-    ('sasl', 'SASL'),
-    ('autojoin', 'Channels'),
-    ('lists', 'Lists'),
-]
-
-
-def get_settings_ui_paths(config_data=None):
-    """Yield (ui_path, page_id, label) for all settings pages.
-
-    If *config_data* is provided, also yields network-specific paths.
-    """
-    def _walk(pages, prefix='settings'):
-        for suffix, pid, label, children in pages:
-            path = prefix + '.' + suffix
-            yield path, pid, label
-            if children:
-                yield from _walk(children, prefix)
-    yield from _walk(SETTINGS_PAGES)
-    # Network pages (dynamic from config)
-    if config_data:
-        networks = config_data.get('networks') or {}
-        for netkey in networks:
-            base = 'settings.networks.' + netkey.lower()
-            yield base, 'networks.' + netkey, 'Networks > %s' % netkey
-            for sub, label in NETWORK_SUB_PAGES:
-                yield base + '.' + sub, 'networks.%s.%s' % (netkey, sub), 'Networks > %s > %s' % (netkey, label)
-    # Plugin config pages (dynamic from loaded plugins + saved config)
-    if config_data:
-        for pname in get_plugin_names(config_data):
-            path = 'settings.plugins.' + pname.lower()
-            yield path, 'plugin_config_' + pname, 'Plugins > %s' % pname
 
 
 class _FlatSelectionDelegate(QStyledItemDelegate):
@@ -146,37 +77,32 @@ class SettingsDialog(QDialog):
         QShortcut(QKeySequence("Ctrl+W"), self, self.reject)
         self.config = config
         # Deep copy the YAML data so we only write back on OK/Apply
+        self._original_data = copy.deepcopy(config._data)
         self._data = copy.deepcopy(config._data)
-        self._applied = False  # True when Apply used without Save
 
         # --- layout ---
-        main_layout = QVBoxLayout(self)
+        main_layout = QHBoxLayout(self)
 
         # Apply settings dialog colors
-        self._apply_dialog_style()
-
-        from PySide6.QtWidgets import QSplitter
-        splitter = QSplitter(self)
+        self._apply_colors()
 
         # Tree
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
-        self.tree.setMinimumWidth(120)
+        self.tree.setMinimumWidth(180)
+        self.tree.setMaximumWidth(220)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._tree_context_menu)
         self._tree_delegate = _FlatSelectionDelegate(parent=self.tree)
         self.tree.setItemDelegate(self._tree_delegate)
-        self._apply_tree_style()
+        self._apply_tree_colors()
         self.tree.setFrameShape(QFrame.Shape.StyledPanel)
-        splitter.addWidget(self.tree)
+        main_layout.addWidget(self.tree)
 
         # Right side: stacked pages + buttons
-        right_widget = QWidget()
-        right = QVBoxLayout(right_widget)
-        right.setContentsMargins(4, 0, 0, 0)
+        right = QVBoxLayout()
         self.page_title = QLabel()
-        from settings import SETTINGS_TITLE_STYLE
-        self.page_title.setStyleSheet(SETTINGS_TITLE_STYLE)
+        self.page_title.setStyleSheet("font-weight: bold; font-size: 14px;")
         right.addWidget(self.page_title)
 
         self.stack = QStackedWidget()
@@ -184,245 +110,53 @@ class SettingsDialog(QDialog):
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok |
-            QDialogButtonBox.StandardButton.Cancel
+            QDialogButtonBox.StandardButton.Cancel |
+            QDialogButtonBox.StandardButton.Apply
         )
         buttons.accepted.connect(self._on_ok)
         buttons.rejected.connect(self.reject)
-        self._btn_apply = QPushButton("Apply")
-        self._btn_apply.setToolTip("Apply changes to the running UI (does not save to disk)")
-        buttons.addButton(self._btn_apply, QDialogButtonBox.ButtonRole.ApplyRole)
-        self._btn_apply.clicked.connect(self._on_apply)
-        self._reset_page_btn = QPushButton('Reset Page to Defaults')
-        self._reset_page_btn.setToolTip('Reset all settings on this page to their default values')
-        self._reset_page_btn.clicked.connect(self._reset_current_page)
-        buttons.addButton(self._reset_page_btn, QDialogButtonBox.ButtonRole.ResetRole)
+        buttons.button(QDialogButtonBox.StandardButton.Apply).clicked.connect(self._on_apply)
         right.addWidget(buttons)
-        from settings import SETTINGS_HINT_STYLE
-        hint = QLabel('Tip: right-click any field for Help or Reset to Default')
-        hint.setStyleSheet(SETTINGS_HINT_STYLE)
-        hint.setAlignment(Qt.AlignmentFlag.AlignRight)
-        right.addWidget(hint)
 
-        splitter.addWidget(right_widget)
-        splitter.setCollapsible(0, False)
-        splitter.setCollapsible(1, False)
-        main_layout.addWidget(splitter)
-        self._splitter = splitter
+        main_layout.addLayout(right, 1)
 
         # --- pages ---
         self._pages = {}        # page_id -> widget (actual page for save/load)
         self._stack_widgets = {} # page_id -> widget in the stack (may be a scroll area)
         self._net_pages = {}    # (net_key, sub) -> widget   sub in ('net','server','sasl','autojoin')
 
-        from dialogs import install_input_focus_handler
-        install_input_focus_handler(self)
-
-        # Right-click context menu (Reset to Default, Help) on all settings widgets
-        from settings.widget_context import SettingsContextFilter
-        self._ctx_filter = SettingsContextFilter(self)
+        self.installEventFilter(self)
 
         self._build_global_pages()
         self._build_network_tree()
-        self._build_plugin_config_tree()
-
-        # Round-trip: collect all pages back to normalize the data
-        # (pages may add default keys on load), then snapshot as original
-        self._collect_all()
-        self._original_data = copy.deepcopy(self._data)
-
-        # Install right-click context menus and tag defaults
-        self._install_widget_context_menus()
-
-        # Apply label font size if configured
-        from settings import SETTINGS_LABEL_STYLE
-        if SETTINGS_LABEL_STYLE:
-            from PySide6.QtWidgets import QFormLayout
-            for page in list(self._pages.values()) + list(self._net_pages.values()):
-                for child in page.findChildren(QLabel):
-                    # Only style labels that are form row labels (not notes/hints)
-                    parent_layout = child.parent().layout() if child.parent() else None
-                    if isinstance(parent_layout, QFormLayout):
-                        for row in range(parent_layout.rowCount()):
-                            label_item = parent_layout.itemAt(row, QFormLayout.ItemRole.LabelRole)
-                            if label_item and label_item.widget() is child:
-                                child.setStyleSheet(SETTINGS_LABEL_STYLE)
-                                break
-
-        # Defer initial sizing until the dialog has its font applied
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(0, self._initial_sizing)
 
         self.tree.currentItemChanged.connect(self._on_tree_select)
         # Select first item
         if self.tree.topLevelItemCount():
             self.tree.setCurrentItem(self.tree.topLevelItem(0))
 
+        # Debounce timer for live font/color preview
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(150)
+        self._preview_timer.timeout.connect(self._do_font_preview)
 
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.KeyPress and \
+                event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            w = self.focusWidget()
+            if isinstance(w, (QLineEdit, QSpinBox, QDoubleSpinBox,
+                              QAbstractSpinBox, QComboBox)):
+                w.clearFocus()
+                return True
+        return super().eventFilter(obj, event)
 
-    def _install_widget_context_menus(self):
-        """Install right-click context filter on all settings input widgets.
-
-        Uses the 'config_key' property set on each widget (via _ck()) to
-        look up help text and default values from config.defaults.yaml.
-        No manual mapping dict needed — the config_key IS the YAML key.
-        """
-        from settings.widget_context import (
-            set_default, set_help, show_widget_context_menu,
-            QCheckBox, QLineEdit, QSpinBox, QDoubleSpinBox,
-            QComboBox, QFontComboBox, QPlainTextEdit,
-        )
-        from PySide6.QtWidgets import QWidget as _QW
-
-        # Load defaults from config.defaults.yaml
-        default_data = {}
-        try:
-            import os
-            from ruamel.yaml import YAML
-            example_path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                'defaults', 'config.defaults.yaml')
-            if os.path.isfile(example_path):
-                yaml = YAML()
-                yaml.preserve_quotes = True
-                with open(example_path, 'r', encoding='utf-8') as f:
-                    default_data = yaml.load(f) or {}
-        except Exception:
-            pass
-
-        # Load help text from config.defaults.yaml comments
-        from settings.config_help import get_all_help
-        all_help = get_all_help()
-
-        for page in list(self._pages.values()) + list(self._net_pages.values()):
-            # Install event filter on ALL descendant widgets so right-click
-            # works everywhere (the filter walks up to find defaults/help)
-            for child in page.findChildren(_QW):
-                child.installEventFilter(self._ctx_filter)
-
-            for attr_name in dir(page):
-                if attr_name.startswith('_'):
-                    continue
-                widget = getattr(page, attr_name, None)
-                if not isinstance(widget, _QW):
-                    continue
-                # Only tag defaults/help for widgets with a config_key
-                cfg_key = widget.property('config_key')
-                if not cfg_key:
-                    continue
-                if not cfg_key:
-                    continue
-
-                # Help text from YAML comments
-                help_text = all_help.get(cfg_key, '')
-                if not help_text:
-                    help_text = self._resolve_help(all_help, cfg_key)
-                if help_text:
-                    if not widget.toolTip():
-                        widget.setToolTip(help_text)
-                    set_help(widget, help_text)
-
-                # Default value from YAML data
-                default = self._resolve_yaml_value(default_data, cfg_key)
-                if default is None:
-                    default = self._resolve_yaml_value_network(default_data, cfg_key)
-                if default is not None:
-                    set_default(widget, default)
-
-    @staticmethod
-    def _resolve_yaml_value(data, dotted_key):
-        """Resolve a dotted key like 'logging.dir' from nested YAML data."""
-        parts = dotted_key.split('.')
-        node = data
-        for part in parts:
-            if not isinstance(node, dict):
-                return None
-            node = node.get(part)
-            if node is None:
-                return None
-        return node
-
-    @staticmethod
-    def _resolve_yaml_value_network(data, dotted_key):
-        """Fall back: try resolving key under the first network in the example.
-
-        For per-network widgets with config_key like 'sasl.mechanism',
-        tries 'networks.<first_net>.sasl.mechanism'.
-        """
-        networks = data.get('networks')
-        if not isinstance(networks, dict) or not networks:
-            return None
-        first_net = next(iter(networks))
-        net_data = networks[first_net]
-        parts = dotted_key.split('.')
-        node = net_data
-        for part in parts:
-            if not isinstance(node, dict):
-                return None
-            node = node.get(part)
-            if node is None:
-                return None
-        return node
-
-    @staticmethod
-    def _resolve_help(all_help, cfg_key):
-        """Fall back: search help keys matching networks.*.<cfg_key>.
-
-        For per-network widgets with config_key like 'sasl.mechanism',
-        finds help for 'networks.libera.sasl.mechanism' etc.
-        """
-        suffix = '.' + cfg_key
-        for key, text in all_help.items():
-            if key.startswith('networks.') and key.endswith(suffix):
-                return text
-        return ''
-
-    def _reset_current_page(self):
-        """Reset all config widgets on the current page to their defaults."""
-        from PySide6.QtWidgets import QMessageBox
-        reply = QMessageBox.question(
-            self, 'Reset Page',
-            'Reset all settings on this page to their default values?',
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        from settings.widget_context import _get_default, _reset_widget
-        widget = self.stack.currentWidget()
-        if not widget:
-            return
-        # Find the actual page (may be wrapped in a scroll area or container)
-        page = None
-        for pid, w in self._pages.items():
-            sw = self._stack_widgets.get(pid)
-            if sw is widget or w is widget:
-                page = w
-                break
-        if not page:
-            # Check network pages
-            for key, w in self._net_pages.items():
-                if w is widget:
-                    page = w
-                    break
-        if not page:
-            return
-        from PySide6.QtWidgets import QWidget as _QW
-        count = 0
-        for attr_name in dir(page):
-            if attr_name.startswith('_'):
-                continue
-            w = getattr(page, attr_name, None)
-            if isinstance(w, _QW):
-                default = _get_default(w)
-                if default is not None:
-                    _reset_widget(w, default)
-                    count += 1
-
-    def _apply_dialog_style(self):
-        """Apply settings dialog colors and font."""
+    def _apply_colors(self):
+        """Apply settings dialog colors and font if explicitly configured."""
         cfg = self.config
         colors = (cfg._data.get('colors') or {})
         settings = colors.get('settings') or {}
         parts = []
-        # Only apply colors if explicitly configured (not inherited from chat colors)
         if settings.get('foreground') or settings.get('background'):
             if cfg.settings_bgcolor:
                 parts.append("background-color: %s;" % cfg.settings_bgcolor.name())
@@ -432,21 +166,10 @@ class SettingsDialog(QDialog):
             parts.append("font-family: '%s';" % cfg.settings_font_family)
         if cfg.settings_font_size:
             parts.append("font-size: %dpt;" % cfg.settings_font_size)
-        # Apply via QFont directly — more reliable than stylesheet for dialogs
-        from PySide6.QtGui import QFont
-        f = self.font()
-        if cfg.settings_font_family:
-            f.setFamily(cfg.settings_font_family)
-        if cfg.settings_font_size:
-            f.setPointSize(cfg.settings_font_size)
-        self.setFont(f)
-        # Stylesheet for colors only
         if parts:
-            self.setStyleSheet("* { %s }" % ' '.join(parts))
-        else:
-            self.setStyleSheet('')
+            self.setStyleSheet("SettingsDialog { %s }" % ' '.join(parts))
 
-    def _apply_tree_style(self):
+    def _apply_tree_colors(self):
         """Apply settings tree colors and selection colors."""
         cfg = self.config
         parts = []
@@ -485,15 +208,22 @@ class SettingsDialog(QDialog):
     def _build_global_pages(self):
         general = GeneralPage()
         self._add_page('general', 'General', general)
-        self._add_page('interface', 'Interface', InterfacePage())
-        self._add_page('titles', 'Titles', TitlesPage())
-        self._add_page('files', 'Files', FilesPage())
+        # Live-preview layout changes
+        general.input_lines.valueChanged.connect(self._on_font_page_changed)
+        general.navigation.currentTextChanged.connect(self._on_font_page_changed)
         self._add_page('identity', 'Identity', IdentityPage())
-        self._add_page('lists', 'Lists', ListsPage())
-        # Font / Colors parent — base foreground/background colors
-        base_colors = BaseColorsPage()
-        self._add_page('font_root', 'Font / Colors', base_colors)
+        # Font / Colors parent placeholder (not a real page — just a stack widget)
+        font_landing = QLabel("Select a category below to configure fonts and colors.")
+        font_landing.setWordWrap(True)
+        sw = QWidget()
+        wrapper = QVBoxLayout(sw)
+        wrapper.setContentsMargins(0, 0, 0, 0)
+        wrapper.addWidget(font_landing)
+        wrapper.addStretch(1)
+        self._stack_widgets['font_root'] = sw
+        self.stack.addWidget(sw)
         # Font / Colors sub-pages
+        self._font_pages = []
         for pid, cls in [('font_chat', ChatFontPage), ('font_tab', TabFontPage),
                          ('font_menu', MenuFontPage), ('font_tree', TreeFontPage),
                          ('font_nicklist', NicklistFontPage),
@@ -501,12 +231,16 @@ class SettingsDialog(QDialog):
                          ('font_editor', EditorFontPage)]:
             page = cls()
             self._add_page(pid, '', page)
+            page.changed.connect(self._on_font_page_changed)
+            self._font_pages.append(page)
         self._add_page('ident_server', 'Ident Server', IdentServerPage())
         self._add_page('logging', 'Logging', LoggingPage())
         self._add_page('notifications', 'Notifications', NotificationsPage())
 
+        self._loading = True
         for pid, page in self._pages.items():
             page.load_from_data(self._data)
+        self._loading = False
 
         # Scripts / Plugins page
         import os
@@ -515,28 +249,7 @@ class SettingsDialog(QDialog):
         scripts_page = ScriptsPage()
         scripts_page.setup(config_dir)
         scripts_page.load_from_data(self._data)
-        self._add_page('scripts', 'Scripts', scripts_page, stack_widget=scripts_page)
-
-        # Plugins — show only the plugins section of the scripts page
-        # Scripts — show only the scripts section
-        self._plugin_config_pages = {}
-        # plugins_group was built by ScriptsPage but not added to its layout
-        pc_widget = QWidget()
-        pc_layout = QVBoxLayout(pc_widget)
-        pc_layout.setContentsMargins(0, 0, 0, 0)
-        pc_layout.addWidget(scripts_page.plugins_group, 1)
-        pc_layout.addWidget(QLabel("Select a plugin below for per-plugin settings."))
-        self._stack_widgets['plugin_config'] = pc_widget
-        self._pages['plugin_config'] = scripts_page  # save still goes through scripts_page
-        self.stack.addWidget(pc_widget)
-
-        link_preview_page = LinkPreviewPage()
-        link_preview_page.load_from_data(self._data)
-        self._add_page('link_preview', 'Link Previews', link_preview_page)
-
-        nick_colors_page = NickColorsPage()
-        nick_colors_page.load_from_data(self._data)
-        self._add_page('nick_colors', 'Nick Colors', nick_colors_page, stack_widget=nick_colors_page)
+        self._add_page('scripts', 'Scripts / Plugins', scripts_page)
 
         # File editor page (handles config, startup, popups, toolbar, variables)
         config_path = os.path.abspath(self.config.path)
@@ -561,23 +274,38 @@ class SettingsDialog(QDialog):
                 scripts_dir = os.path.join(config_dir, scripts_dir)
             return os.path.join(scripts_dir, name)
 
-        self._editor_page = FileEditorPage()
-        self._editor_page.setup(config_dir, config_path,
+        editor_page = FileEditorPage()
+        editor_page.setup(config_dir, config_path,
                           startup_path=_resolve_startup(),
                           popups_path=_resolve('popups_file'),
                           toolbar_path=_resolve('toolbar_file'),
                           variables_path=_resolve('variables_file'))
-        self._add_page('editor', 'File Editor', self._editor_page, stack_widget=self._editor_page)
+        self._add_page('editor', 'File Editor', editor_page, stack_widget=editor_page)
 
-        # Tree items from SETTINGS_PAGES structure
-        def _build_tree(parent, pages):
-            for suffix, pid, label, children in pages:
-                item = QTreeWidgetItem(parent, [label])
-                item.setData(0, ROLE_PAGE, pid)
-                if children:
-                    item.setExpanded(True)
-                    _build_tree(item, children)
-        _build_tree(self.tree, SETTINGS_PAGES)
+        # Tree items for global pages
+        for pid, label in [('general', 'General'), ('identity', 'Identity')]:
+            item = QTreeWidgetItem(self.tree, [label])
+            item.setData(0, ROLE_PAGE, pid)
+        # Font / Colors parent with sub-pages
+        font_root = QTreeWidgetItem(self.tree, ['Font / Colors'])
+        font_root.setData(0, ROLE_PAGE, 'font_root')
+        font_root.setExpanded(True)
+        for pid, label in [('font_chat', 'Chat'),
+                           ('font_tab', 'Tab Bar'),
+                           ('font_menu', 'Menus'),
+                           ('font_tree', 'Network Tree'),
+                           ('font_nicklist', 'Nick List'),
+                           ('font_toolbar', 'Toolbar'),
+                           ('font_settings', 'Settings Dialog'),
+                           ('font_editor', 'File Editor')]:
+            child = QTreeWidgetItem(font_root, [label])
+            child.setData(0, ROLE_PAGE, pid)
+        for pid, label in [('ident_server', 'Ident Server'),
+                           ('logging', 'Logging'), ('notifications', 'Notifications'),
+                           ('scripts', 'Scripts / Plugins'),
+                           ('editor', 'File Editor')]:
+            item = QTreeWidgetItem(self.tree, [label])
+            item.setData(0, ROLE_PAGE, pid)
 
     # ----- network tree -----
 
@@ -602,14 +330,18 @@ class SettingsDialog(QDialog):
         node.setExpanded(True)
 
         # Sub-pages
-        for sub_id, sub_label in NETWORK_SUB_PAGES:
+        for sub_id, sub_label, cls in [
+            ('server', 'Server', ServerPage),
+            ('sasl', 'SASL', SASLPage),
+            ('autojoin', 'Auto-Join', AutoJoinPage),
+        ]:
             child = QTreeWidgetItem(node, [sub_label])
             child.setData(0, ROLE_PAGE, sub_id)
             child.setData(0, ROLE_NETKEY, netkey)
 
         # Create page widgets
         net_page = NetworkPage()
-        net_page.load_from_data(net_data, global_data=self._data)
+        net_page.load_from_data(net_data)
         self._net_pages[(netkey, 'net')] = net_page
         self.stack.addWidget(net_page)
 
@@ -627,11 +359,6 @@ class SettingsDialog(QDialog):
         aj_page.load_from_data(net_data)
         self._net_pages[(netkey, 'autojoin')] = aj_page
         self.stack.addWidget(aj_page)
-
-        lists_page = ListsPage(level='network')
-        lists_page.load_from_data(net_data)
-        self._net_pages[(netkey, 'lists')] = lists_page
-        self.stack.addWidget(lists_page)
 
         return node
 
@@ -679,44 +406,11 @@ class SettingsDialog(QDialog):
             return
 
         page_id = self._PAGE_ALIASES.get(page_id, page_id)
-        def _find(parent, pid):
-            for i in range(parent.childCount() if hasattr(parent, 'childCount') else parent.topLevelItemCount()):
-                item = parent.child(i) if hasattr(parent, 'child') else parent.topLevelItem(i)
-                if item.data(0, ROLE_PAGE) == pid:
-                    return item
-                found = _find(item, pid)
-                if found:
-                    return found
-            return None
-        item = _find(self.tree, page_id)
-        if item:
-            self.tree.setCurrentItem(item)
-
-    def _build_plugin_config_tree(self):
-        """Build Plugin Config parent node with per-plugin child pages."""
-        plugin_names = get_plugin_names(self._data)
-        if not plugin_names:
-            return
-        # Find the Plugin Config tree item
-        root = None
         for i in range(self.tree.topLevelItemCount()):
             item = self.tree.topLevelItem(i)
-            if item.data(0, ROLE_PAGE) == 'plugin_config':
-                root = item
-                break
-        if not root:
-            return
-        root.setExpanded(True)
-        for pname in plugin_names:
-            child = QTreeWidgetItem(root, [pname])
-            page_id = 'plugin_config_' + pname
-            child.setData(0, ROLE_PAGE, page_id)
-            page = SinglePluginConfigPage(pname)
-            page.load_from_data(self._data)
-            self._plugin_config_pages[pname] = page
-            self._pages[page_id] = page
-            self._stack_widgets[page_id] = page
-            self.stack.addWidget(page)
+            if item.data(0, ROLE_PAGE) == page_id:
+                self.tree.setCurrentItem(item)
+                return
 
     def _on_tree_select(self, current, previous):
         if not current:
@@ -732,7 +426,7 @@ class SettingsDialog(QDialog):
             w = self._net_pages.get((netkey, 'net'))
             if w:
                 self.stack.setCurrentWidget(w)
-        elif page_id in ('server', 'sasl', 'autojoin', 'lists') and netkey:
+        elif page_id in ('server', 'sasl', 'autojoin') and netkey:
             w = self._net_pages.get((netkey, page_id))
             if w:
                 self.stack.setCurrentWidget(w)
@@ -810,7 +504,7 @@ class SettingsDialog(QDialog):
         for i in range(item.childCount()):
             item.child(i).setData(0, ROLE_NETKEY, new_key)
         # Re-key page widgets
-        for sub in ('net', 'server', 'sasl', 'autojoin', 'lists'):
+        for sub in ('net', 'server', 'sasl', 'autojoin'):
             w = self._net_pages.pop((old_key, sub), None)
             if w:
                 self._net_pages[(new_key, sub)] = w
@@ -825,7 +519,7 @@ class SettingsDialog(QDialog):
         if netkey in nets:
             del nets[netkey]
         # Remove page widgets
-        for sub in ('net', 'server', 'sasl', 'autojoin', 'lists'):
+        for sub in ('net', 'server', 'sasl', 'autojoin'):
             w = self._net_pages.pop((netkey, sub), None)
             if w:
                 self.stack.removeWidget(w)
@@ -847,214 +541,64 @@ class SettingsDialog(QDialog):
         for netkey in list(networks.keys()):
             net_data = networks[netkey]
             for sub, method in [('net', 'save_to_data'), ('server', 'save_to_data'),
-                                ('sasl', 'save_to_data'), ('autojoin', 'save_to_data'),
-                                ('lists', 'save_to_data')]:
+                                ('sasl', 'save_to_data'), ('autojoin', 'save_to_data')]:
                 w = self._net_pages.get((netkey, sub))
                 if w:
                     w.save_to_data(net_data if sub == 'net' else net_data)
 
     def _apply_to_ui(self, data, visible_only=True):
         """Re-init config from data and refresh the running UI (no disk save)."""
-        from qtpyrc import (_build_app_stylesheet, _apply_palette,
-                            _refresh_all_window_fonts,
+        from qtpyrc import (_build_app_stylesheet, _refresh_all_window_fonts,
                             _get_message_colors, _recolor_chat_text,
                             _refresh_navigation)
-        # Snapshot old state before reinit
+        # Snapshot old message colors before reinit
         old_colors = _get_message_colors()
-        old_cfg = self.config
-        old_font = (old_cfg.fontfamily, old_cfg.fontheight, old_cfg.input_lines,
-                    old_cfg.nicklist_font_family, old_cfg.nicklist_font_size)
-        old_nav = (old_cfg.show_tabs, old_cfg.show_tree)
-        old_toolbar = old_cfg.show_toolbar
-        old_stylesheet = _build_app_stylesheet()
-
         self.config._data = data
         self.config.__init__(self.config.path, data, self.config._yaml)
         from config import _update_text_formats
         _update_text_formats(self.config)
-
-        # Only rebuild stylesheet if it actually changed
-        new_stylesheet = _build_app_stylesheet()
-        if new_stylesheet != old_stylesheet:
-            from PySide6.QtWidgets import QApplication
-            QApplication.instance().setStyleSheet(new_stylesheet)
-            _apply_palette()
-
-        new_font = (self.config.fontfamily, self.config.fontheight,
-                    self.config.input_lines,
-                    self.config.nicklist_font_family,
-                    self.config.nicklist_font_size)
-        if new_font != old_font:
-            _refresh_all_window_fonts()
-
-        new_nav = (self.config.show_tabs, self.config.show_tree)
-        if new_nav != old_nav:
-            _refresh_navigation()
-
+        from PySide6.QtWidgets import QApplication
+        QApplication.instance().setStyleSheet(_build_app_stylesheet())
+        _refresh_all_window_fonts()
+        _refresh_navigation()
         _recolor_chat_text(old_colors, visible_only=visible_only)
-
         from tabbar import TabbedWorkspace
         ws = state.app.mainwin.workspace
         if isinstance(ws, TabbedWorkspace):
             ws._load_colors()
             for entry in ws._tabs:
                 ws._style_tab(entry)
+        from toolbar import reload_toolbar
+        reload_toolbar()
 
-        if self.config.show_toolbar != old_toolbar:
-            from toolbar import reload_toolbar
-            reload_toolbar()
+    def _on_font_page_changed(self):
+        """Live preview: debounce font/color changes."""
+        if getattr(self, '_loading', False):
+            return
+        self._preview_timer.start()
 
-        # Refresh live client connection settings from updated config
-        for client in state.clients:
-            client.refresh_server_config()
+    def _do_font_preview(self):
+        """Apply font/color changes to the running UI without saving to disk."""
+        self._pages['general'].save_to_data(self._data)
+        for page in self._font_pages:
+            page.save_to_data(self._data)
+        self._apply_to_ui(self._data)
+        # Refresh settings dialog's own font/colors
+        self._apply_colors()
+        self._apply_tree_colors()
 
     def _on_apply(self):
-        """Apply changes to the running UI without saving to disk."""
-        self.setCursor(Qt.CursorShape.WaitCursor)
-        self._btn_apply.setEnabled(False)
-        self._btn_apply.setText('Applying...')
-        QApplication.processEvents()
-        try:
-            self._collect_all()
-            self._apply_to_ui(self._data, visible_only=True)
-            self._applied = True
-            # Refresh settings dialog's own appearance
-            self._apply_dialog_style()
-            self._apply_tree_style()
-        finally:
-            self._btn_apply.setText('Apply')
-            self._btn_apply.setEnabled(True)
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-        # Defer font-dependent sizing until Qt processes the font change
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(0, self._refresh_dialog_fonts)
-
-    def _refresh_dialog_fonts(self):
-        """Reapply settings dialog element font sizes after config change."""
-        import settings as _settings_mod
-        # Refresh the cached style strings from current config
-        _s = _settings_mod.get_styles()
-        _settings_mod.SETTINGS_TITLE_STYLE = _s['title']
-        _settings_mod.SETTINGS_LABEL_STYLE = _s['label']
-        _settings_mod.SETTINGS_LIST_STYLE = _s['list']
-        _settings_mod.SETTINGS_NOTE_STYLE = _s['note']
-        _settings_mod.SETTINGS_HINT_STYLE = _s['hint']
-        _settings_mod.SETTINGS_DELETE_STYLE = _s['delete']
-
-        # Apply title style
-        self.page_title.setStyleSheet(_s['title'])
-
-        # Apply to all pages
-        from PySide6.QtWidgets import QFormLayout, QPlainTextEdit
-        for page in list(self._pages.values()) + list(self._net_pages.values()):
-            # Labels
-            if _s['label']:
-                for child in page.findChildren(QLabel):
-                    parent_layout = child.parent().layout() if child.parent() else None
-                    if isinstance(parent_layout, QFormLayout):
-                        for row in range(parent_layout.rowCount()):
-                            li = parent_layout.itemAt(row, QFormLayout.ItemRole.LabelRole)
-                            if li and li.widget() is child:
-                                child.setStyleSheet(_s['label'])
-                                break
-            # List/text fields
-            if _s['list']:
-                for te in page.findChildren(QPlainTextEdit):
-                    te.setStyleSheet(_s['list'])
-            # Resize font size combos and color rows
-            if hasattr(page, 'resize_combos'):
-                page.resize_combos()
-            if hasattr(page, 'resize_color_rows'):
-                page.resize_color_rows()
-        self._autosize_tree()
-
-    def _initial_sizing(self):
-        """Deferred sizing after the dialog font is applied."""
-        font_settings = self._pages.get('font_settings')
-        if font_settings and hasattr(font_settings, 'resize_combos'):
-            font_settings.resize_combos()
-        if font_settings and hasattr(font_settings, 'resize_color_rows'):
-            font_settings.resize_color_rows()
-        self._autosize_tree()
-
-    def _autosize_tree(self):
-        """Resize the tree panel to fit its content."""
-        self.tree.expandAll()
-        # Measure widest item text with current font
-        from PySide6.QtGui import QFontMetrics
-        fm = QFontMetrics(self.tree.font())
-        max_w = 0
-        indent = self.tree.indentation() or 20
-        def _measure(item, depth):
-            nonlocal max_w
-            w = fm.horizontalAdvance(item.text(0)) + (depth + 1) * indent + 10
-            if w > max_w:
-                max_w = w
-            for i in range(item.childCount()):
-                _measure(item.child(i), depth + 1)
-        for i in range(self.tree.topLevelItemCount()):
-            _measure(self.tree.topLevelItem(i), 0)
-        # Add scrollbar width + frame + generous padding
-        tree_w = max_w + 40
-        tree_w = max(tree_w, 180)
-        self.tree.setMinimumWidth(tree_w)
-        total = self._splitter.width() or 700
-        self._splitter.setSizes([tree_w, max(total - tree_w, 300)])
-
-    def _on_save_and_apply(self):
-        """Save to disk and apply changes to the running UI."""
-        self._on_apply()
+        self._collect_all()
+        self._apply_to_ui(self._data, visible_only=False)
         self.config.save()
-        self._original_data = copy.deepcopy(self._data)
-        self._applied = False  # saved — nothing to revert
         import popups
         popups.load()
-        # Refresh network settings paths in the /ui registry
-        from qtpyrc import _register_settings_paths
-        _register_settings_paths()
 
     def _on_ok(self):
-        if not self._editor_page._check_unsaved():
-            return
-        self._on_save_and_apply()
+        self._on_apply()
         self.accept()
 
-    def _has_unsaved_changes(self):
-        """Check if any settings have been modified from the original."""
-        self._collect_all()
-        return self._data != self._original_data
-
-    def mousePressEvent(self, event):
-        """Click on background clears focus from any edit widget."""
-        focused = self.focusWidget()
-        if focused and focused is not self:
-            focused.clearFocus()
-        super().mousePressEvent(event)
-
-    def closeEvent(self, event):
-        """Handle window close (Alt+F4, X button) — delegate to reject()."""
-        event.ignore()
-        self.reject()
-
     def reject(self):
-        """Handle Cancel/Ctrl+F4/Alt+F4."""
-        if not self._editor_page._check_unsaved():
-            return
-        if self._has_unsaved_changes():
-            from PySide6.QtWidgets import QMessageBox
-            reply = QMessageBox.question(
-                self, "Unsaved Changes",
-                "Settings have been modified. Save before closing?",
-                QMessageBox.StandardButton.Save
-                | QMessageBox.StandardButton.Discard
-                | QMessageBox.StandardButton.Cancel)
-            if reply == QMessageBox.StandardButton.Save:
-                self._on_save_and_apply()
-                self.accept()
-                return
-            elif reply == QMessageBox.StandardButton.Cancel:
-                return
-        # Revert UI if Apply was used without Save
-        if self._applied:
-            self._apply_to_ui(self._original_data, visible_only=False)
+        """Revert live preview changes on Cancel."""
+        self._apply_to_ui(self._original_data)
         super().reject()

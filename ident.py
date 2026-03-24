@@ -10,7 +10,7 @@ class IdentdProtocol(asyncio.Protocol):
   def connection_made(self, transport):
     self.transport = transport
   def data_received(self, data):
-    response = data.decode('utf-8', errors='replace').strip() + " : USERID : UNIX : " + state.config.identid + "\r\n"
+    response = data.decode().strip() + " : USERID : UNIX : " + state.config.identid + "\r\n"
     self.transport.write(response.encode())
 
 async def runidentd():

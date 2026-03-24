@@ -46,32 +46,26 @@ class ScriptsPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
 
         # --- Plugins section ---
-        self.plugins_group = pg = QGroupBox("Python Plugins")
-        pl = QVBoxLayout(pg)
-        pl.setContentsMargins(4, 4, 4, 4)
+        pg = QGroupBox("Python Plugins")
+        pl = QFormLayout(pg)
 
-        dir_row = QHBoxLayout()
-        self._plugins_dir_label = QLabel("Directory:")
-        dir_row.addWidget(self._plugins_dir_label)
         self.plugins_dir = QLineEdit()
         self.plugins_dir.setPlaceholderText("plugins%s (default)" % os.sep)
         self.plugins_dir.setToolTip(
             "Directory for Python plugins (relative to config file)")
-        dir_row.addWidget(self.plugins_dir)
-        pl.addLayout(dir_row)
+        self._plugins_dir_label = QLabel("Directory:")
+        pl.addRow(self._plugins_dir_label, self.plugins_dir)
 
         hint = QLabel("Checked = auto-loaded on startup.")
-        from settings import SETTINGS_HINT_STYLE
-        hint.setStyleSheet(SETTINGS_HINT_STYLE)
-        pl.addWidget(hint)
+        hint.setStyleSheet("color: gray; font-size: 11px;")
+        pl.addRow(hint)
 
         self.plugins_list = self._make_reorderable_list()
         self.plugins_list.itemChanged.connect(
             lambda item: self._style_local_item(item))
-        pl.addWidget(self.plugins_list, 1)
+        pl.addRow(self.plugins_list)
 
         btns = QHBoxLayout()
         btn = QPushButton("Refresh")
@@ -98,36 +92,29 @@ class ScriptsPage(QWidget):
         btn.setToolTip("Move selected item down")
         btn.clicked.connect(lambda: self._move_item(self.plugins_list, 1))
         btns.addWidget(btn)
-        pl.addLayout(btns)
+        pl.addRow(btns)
 
-        # plugins_group is NOT added to this layout — it gets moved to the
-        # Plugins page by the settings dialog.
+        layout.addWidget(pg)
 
         # --- Command Scripts section ---
-        self.scripts_group = sg = QGroupBox("Command Scripts")
-        sl = QVBoxLayout(sg)
-        sl.setContentsMargins(4, 4, 4, 4)
+        sg = QGroupBox("Command Scripts")
+        sl = QFormLayout(sg)
 
-        dir_row2 = QHBoxLayout()
-        self._scripts_dir_label = QLabel("Directory:")
-        dir_row2.addWidget(self._scripts_dir_label)
         self.scripts_dir = QLineEdit()
         self.scripts_dir.setPlaceholderText("scripts%s (default)" % os.sep)
         self.scripts_dir.setToolTip(
             "Directory for command scripts (relative to config file)")
-        dir_row2.addWidget(self.scripts_dir)
-        sl.addLayout(dir_row2)
+        self._scripts_dir_label = QLabel("Directory:")
+        sl.addRow(self._scripts_dir_label, self.scripts_dir)
 
-        hint = QLabel("Checked = auto-run on startup. The startup script is set in\n"
-                      "config.yaml under scripts.startup (edit via File Editor).")
-        from settings import SETTINGS_HINT_STYLE
-        hint.setStyleSheet(SETTINGS_HINT_STYLE)
-        sl.addWidget(hint)
+        hint = QLabel("Checked = auto-run on startup.")
+        hint.setStyleSheet("color: gray; font-size: 11px;")
+        sl.addRow(hint)
 
         self.scripts_list = self._make_reorderable_list()
         self.scripts_list.itemChanged.connect(
             lambda item: self._style_local_item(item))
-        sl.addWidget(self.scripts_list, 1)
+        sl.addRow(self.scripts_list)
 
         btns = QHBoxLayout()
         btn = QPushButton("Refresh")
@@ -154,9 +141,9 @@ class ScriptsPage(QWidget):
         btn.setToolTip("Move selected item down")
         btn.clicked.connect(lambda: self._move_item(self.scripts_list, 1))
         btns.addWidget(btn)
-        sl.addLayout(btns)
+        sl.addRow(btns)
 
-        layout.addWidget(sg, 1)
+        layout.addWidget(sg)
 
         # --- Editor selection ---
         editor_row = QHBoxLayout()
@@ -170,9 +157,7 @@ class ScriptsPage(QWidget):
         self._config_dir = ''
         self._startup_file = ''
         self._auto_load_plugins = set()
-        self._auto_load_plugins_ordered = []
         self._auto_load_scripts = set()
-        self._auto_load_scripts_ordered = []
 
     def _make_reorderable_list(self):
         """Create a QListWidget with drag-and-drop reordering."""
@@ -432,56 +417,15 @@ class ScriptsPage(QWidget):
     # -- checklist population --
 
     @staticmethod
-    def _build_auto_load_order(raw_entries, expanded):
-        """Build an ordered list from raw config auto_load entries.
+    def _apply_saved_order(names, saved_order):
+        """Sort *names* according to *saved_order*.
 
-        Explicit (non-glob) entries keep their config position.
-        Glob-expanded items that weren't explicitly listed are appended
-        sorted alphabetically.
+        Names present in saved_order appear first (in that order),
+        followed by new names sorted alphabetically.
         """
-        ordered = []
-        seen = set()
-        has_globs = False
-        for entry in raw_entries:
-            s = str(entry).strip()
-            if any(c in s for c in ('*', '?', '[')):
-                has_globs = True
-            elif s in expanded and s not in seen:
-                ordered.append(s)
-                seen.add(s)
-        if has_globs:
-            for n in sorted(expanded):
-                if n not in seen:
-                    ordered.append(n)
-                    seen.add(n)
-        return ordered
-
-    @staticmethod
-    def _apply_order(names, auto_load_order, saved_order):
-        """Order *names*: auto_load items first (in config order),
-        then remaining items in ui.yaml saved order, then new items
-        alphabetically.
-        """
-        name_set = set(names)
-        auto_set = set(auto_load_order)
-        result = []
-        seen = set()
-        # 1. Auto-load items in config order
-        for n in auto_load_order:
-            if n in name_set and n not in seen:
-                result.append(n)
-                seen.add(n)
-        # 2. Remaining items in saved ui.yaml order
-        for n in saved_order:
-            if n in name_set and n not in seen:
-                result.append(n)
-                seen.add(n)
-        # 3. New items not in either list, alphabetically
-        for n in sorted(names):
-            if n not in seen:
-                result.append(n)
-                seen.add(n)
-        return result
+        order_map = {n: i for i, n in enumerate(saved_order)}
+        sentinel = len(saved_order)
+        return sorted(names, key=lambda n: (order_map.get(n, sentinel), n))
 
     def _scan_plugins(self):
         import state
@@ -512,24 +456,15 @@ class ScriptsPage(QWidget):
                 external.append(name)
                 seen.add(name)
         if state.ui_state:
-            import importlib.util
-            for name in list(state.ui_state.recent_plugin_names):
+            for name in state.ui_state.recent_plugin_names:
                 if name not in local_set and name not in seen:
-                    try:
-                        if importlib.util.find_spec(name) is None:
-                            state.ui_state.remove_recent_plugin_name(name)
-                            continue
-                    except (ModuleNotFoundError, ValueError):
-                        state.ui_state.remove_recent_plugin_name(name)
-                        continue
                     external.append(name)
                     seen.add(name)
 
-        # Apply order: auto_load first (config order), then saved ui order
+        # Apply saved order
         saved = state.ui_state.plugins_order if state.ui_state else []
-        auto_order = list(self._auto_load_plugins_ordered)
-        local = self._apply_order(local, auto_order, saved)
-        external = self._apply_order(external, auto_order, saved)
+        local = self._apply_saved_order(local, saved)
+        external = self._apply_saved_order(external, saved)
 
         # Local items (plain checkable items, bold if checked)
         for name in local:
@@ -582,19 +517,15 @@ class ScriptsPage(QWidget):
                 external.append(name)
                 seen.add(name)
         if state.ui_state:
-            for path in list(state.ui_state.recent_script_paths):
+            for path in state.ui_state.recent_script_paths:
                 if path not in local_set and path not in seen:
-                    if not os.path.isfile(path):
-                        state.ui_state.remove_recent_script_path(path)
-                        continue
                     external.append(path)
                     seen.add(path)
 
-        # Apply order: auto_load first (config order), then saved ui order
+        # Apply saved order
         saved = state.ui_state.scripts_order if state.ui_state else []
-        auto_order = list(self._auto_load_scripts_ordered)
-        local = self._apply_order(local, auto_order, saved)
-        external = self._apply_order(external, auto_order, saved)
+        local = self._apply_saved_order(local, saved)
+        external = self._apply_saved_order(external, saved)
 
         for name in local:
             if name == startup_name:
@@ -711,8 +642,6 @@ class ScriptsPage(QWidget):
         pdir = self._abs_dir(self.plugins_dir.text(), 'plugins')
         self._auto_load_plugins = self._expand_patterns(
             raw_plugins, pdir, is_plugin=True)
-        self._auto_load_plugins_ordered = self._build_auto_load_order(
-            raw_plugins, self._auto_load_plugins)
 
         # Persist external auto_load entries to recent list
         if state.ui_state:
@@ -727,8 +656,6 @@ class ScriptsPage(QWidget):
         sdir = self._abs_dir(self.scripts_dir.text(), 'scripts')
         self._auto_load_scripts = self._expand_patterns(
             raw_scripts, sdir, is_plugin=False)
-        self._auto_load_scripts_ordered = self._build_auto_load_order(
-            raw_scripts, self._auto_load_scripts)
 
         if state.ui_state:
             for name in self._auto_load_scripts:

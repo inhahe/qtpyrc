@@ -17,18 +17,9 @@ debug_level = LOG_INFO
 _dbg_labels = {LOG_ERROR: 'ERROR', LOG_WARN: 'WARN', LOG_INFO: 'INFO',
                LOG_DEBUG: 'DEBUG', LOG_TRACE: 'TRACE'}
 
-_dbg_file = None  # file object for debug log, set by /debuglog command
-
 def dbg(level, *args):
   if level <= debug_level:
-    line = '[%s] %s' % (_dbg_labels.get(level, '?'), ' '.join(str(a) for a in args))
-    print(line)
-    if _dbg_file:
-      try:
-        _dbg_file.write(line + '\n')
-        _dbg_file.flush()
-      except Exception:
-        pass
+    print('[%s]' % _dbg_labels.get(level, '?'), *args)
 
 # ---------------------------------------------------------------------------
 # Shared mutable globals (set at startup by qtpyrc.py)
@@ -56,11 +47,6 @@ tray_icon = None
 
 # Global list tracking open color-picker dialogs (so we can close them)
 _colorcodewindow = []
-
-# UI registry for /ui command — maps dot-paths to QAction or callable
-# Populated by makeapp() for menu items; config pages handled by the command.
-ui_registry = {}
-ui_descriptions = {}  # dot-path -> human-readable description
 
 # Named timers (/timer)
 # _timers[name] = {'timer': QTimer, 'remaining': int, 'command': str,
@@ -144,33 +130,6 @@ def load_variables():
     pass
   except Exception as e:
     dbg(LOG_ERROR, 'Error loading variables.ini: %s' % e)
-  _merge_variables()
-
-def load_variables_text(text):
-  """Load persistent variables from text content."""
-  global _persistent_vars
-  _persistent_vars = {}
-  for line in text.splitlines():
-    stripped = line.strip()
-    if not stripped or stripped.startswith(';'):
-      continue
-    if stripped.startswith('[') and stripped.endswith(']'):
-      continue
-    if '=' in stripped:
-      name, _, value = stripped.partition('=')
-      name = name.strip()
-      value = value.strip()
-      if name and name[0].isdigit() and value.startswith('%'):
-        parts = value[1:].split(None, 1)
-        if parts:
-          _persistent_vars[parts[0]] = parts[1] if len(parts) > 1 else ''
-        continue
-      if name:
-        _persistent_vars[name] = value
-    elif stripped.startswith('%'):
-      parts = stripped[1:].split(None, 1)
-      if parts:
-        _persistent_vars[parts[0]] = parts[1] if len(parts) > 1 else ''
   _merge_variables()
 
 def save_variables():

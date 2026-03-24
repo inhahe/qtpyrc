@@ -10,7 +10,6 @@ import state
 class TabLabel(QLabel):
   """A single clickable tab label."""
   clicked = Signal()
-  rightClicked = Signal(QPoint)
 
   def __init__(self, text, parent=None):
     super().__init__(text, parent)
@@ -20,8 +19,6 @@ class TabLabel(QLabel):
   def mousePressEvent(self, event):
     if event.button() == Qt.MouseButton.LeftButton:
       self.clicked.emit()
-    elif event.button() == Qt.MouseButton.RightButton:
-      self.rightClicked.emit(event.globalPosition().toPoint())
     super().mousePressEvent(event)
 
 
@@ -69,20 +66,13 @@ class TabbedWorkspace(QWidget):
     self._active = None    # active entry
     self._max_rows = 0     # 0 = dynamic
     self._activating = False
-    self._relayout_timer = QTimer(self)
-    self._relayout_timer.setSingleShot(True)
-    self._relayout_timer.timeout.connect(self._do_relayout)
-    self._relayout_delay_ms = 200
 
     layout = QVBoxLayout(self)
     layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(0)
 
-    # Tab bar area — override minimum size so it doesn't force a wide window
-    class _TabBarWidget(QWidget):
-      def minimumSizeHint(self):
-        return QSize(100, 0)
-    self._tabbar_widget = _TabBarWidget(self)
+    # Tab bar area
+    self._tabbar_widget = QWidget(self)
     self._tabbar_layout = QVBoxLayout(self._tabbar_widget)
     self._tabbar_layout.setContentsMargins(0, 0, 0, 0)
     self._tabbar_layout.setSpacing(0)
@@ -155,7 +145,6 @@ class TabbedWorkspace(QWidget):
              'title': title, 'disconnected': False}
     self._tabs.append(entry)
     label.clicked.connect(lambda e=entry: self._on_tab_clicked(e))
-    label.rightClicked.connect(lambda pos, e=entry: self._on_tab_right_clicked(e, pos))
     self._group_tab(entry)
     self._relayout()
     self._style_tab(entry)
@@ -230,8 +219,6 @@ class TabbedWorkspace(QWidget):
   def update_tab_title(self, proxy, title):
     for t in self._tabs:
       if t['proxy'] is proxy:
-        if t['title'] == title:
-          return  # no change
         t['title'] = title
         self._style_tab(t)
         self._relayout()
@@ -286,12 +273,6 @@ class TabbedWorkspace(QWidget):
         return
 
   # --- Internal ---
-
-  def _on_tab_right_clicked(self, entry, pos):
-    """Show a context menu for a tab."""
-    import popups
-    widget = entry['widget']
-    popups.show_popup('tab', widget, pos)
 
   def _on_tab_clicked(self, entry):
     if entry is self._active:
@@ -404,12 +385,6 @@ class TabbedWorkspace(QWidget):
   # --- Row layout ---
 
   def _relayout(self):
-    """Schedule a relayout after a short delay. Each call resets the timer,
-    so rapid changes (batch tab adds) result in one rebuild at the end."""
-    self._relayout_timer.setInterval(self._relayout_delay_ms)
-    self._relayout_timer.start()
-
-  def _do_relayout(self):
     # Clear existing rows (but keep tab labels alive)
     while self._tabbar_layout.count():
       item = self._tabbar_layout.takeAt(0)
@@ -442,18 +417,25 @@ class TabbedWorkspace(QWidget):
       for t in group:
         items.append(t)
 
+    # Measure widths using the configured tab font
+    cfg = state.config
+    f = QFont(cfg.tab_font_family or self.font().family())
+    if cfg.tab_font_size:
+      f.setPointSize(cfg.tab_font_size)
+    fm = QFontMetrics(f)
+
     sep_width = 6
-    available_width = self._tabbar_widget.width() if self._tabbar_widget.width() > 100 else self.width()
-    if available_width < 100:
-      available_width = 800
+    padding = 16
+    available_width = self.width() if self.width() > 100 else 800
 
     item_widths = []
     for item in items:
       if item is None:
         item_widths.append(sep_width)
       else:
-        w = item['label'].sizeHint().width()
-        item_widths.append(max(w, 40))
+        title_text = '  ' + item['title'] + ('  ✕' if item.get('disconnected') else '') + '  '
+        tw = fm.horizontalAdvance(title_text) + padding
+        item_widths.append(max(tw, 40))
 
     # Distribute into rows
     rows = [[]]
@@ -471,11 +453,9 @@ class TabbedWorkspace(QWidget):
     # Build row widgets
     for row in rows:
       row_widget = QWidget(self._tabbar_widget)
-      row_widget.setMinimumWidth(0)
       row_layout = QHBoxLayout(row_widget)
       row_layout.setContentsMargins(0, 0, 0, 0)
       row_layout.setSpacing(0)
-      row_layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
 
       for item in row:
         if item is None:

@@ -6,8 +6,7 @@ Entrypoint: `qtpyrc.py`
 
 **Always update docs when making changes:**
 - `docs/reference.md` — commands, variables, CLI options, scripting API
-- `config.defaults.yaml` — any new or changed config option (in `defaults/`)
-- `copy_to_github.bat` — add new files to the copy list
+- `config.example.yaml` — any new or changed config option
 
 ## File Map
 
@@ -29,7 +28,7 @@ Entrypoint: `qtpyrc.py`
 | `logger.py` | File logging (IRCLogger) |
 | `settings/` | Settings dialog pages. Pattern: `load_from_data(dict)` / `save_to_data(dict)` |
 | `docs/reference.md` | Command reference and scripting API docs. Update when adding/changing commands |
-| `config.defaults.yaml` | Documents every config option. Update when adding new options |
+| `config.example.yaml` | Documents every config option. Update when adding new options |
 
 ## Architecture
 
@@ -66,46 +65,9 @@ Enter key -> Window.lineinput(text)
 
 ### Adding a new config option
 
-**Every config option must be editable in the settings UI.** No YAML-only options.
-
 1. **`config.py`**: Add `self.<option> = data.get('<option>', default)` in AppConfig.__init__
-2. **`config.defaults.yaml`**: Document the option with a comment (see format below)
-3. **`settings/page_general.py`** (or appropriate page): Add widget in `__init__` using `_ck(Widget(), 'dotted.yaml.key')`, load in `load_from_data`, save in `save_to_data`
-
-### config.defaults.yaml comment format
-
-Comments in `config.defaults.yaml` are auto-parsed to generate tooltips and right-click Help text in the settings dialog (`settings/config_help.py`). The parser uses a simple convention:
-
-- `# comment` — help text (accumulated for the next key)
-- `key: value` — active config key (help buffer assigned to it)
-- `#~ key: value` — commented-out config key (treated same as active key)
-- `# ===` or `# ---` — section separator (resets help buffer)
-
-**Rules:**
-- Comment lines (`# text`) above a key become that key's help text
-- Multiple consecutive `# ` lines are joined with newlines
-- A single blank line between comment lines is preserved (as paragraph break)
-- Inline comments (`key: value  # comment`) are used as fallback if no block comment exists
-- Use `#~` (not plain `#`) for commented-out config keys — this is how the parser distinguishes "this is a disabled config option" from "this is a description comment"
-
-**Example:**
-```yaml
-# Maximum lines kept in each window's backscroll buffer.
-# Older lines are discarded. 0 = unlimited.
-backscroll_limit: 10000
-
-# Lines of history to replay from the database.
-history_replay:
-  # lines to replay on channel join
-  channels: 10000
-  # lines to replay on query open
-  queries: 0
-
-# Main window title format. Leave empty for the default.
-#~ titlebar_format: ""
-```
-
-The `_ck()` helper tags each settings widget with its dotted YAML key (e.g. `'history_replay.channels'`), which is used to look up both the help text and the default value automatically. No manual mapping dicts needed.
+2. **`config.example.yaml`**: Document the option with comment
+3. **`settings/page_general.py`** (or appropriate page): Add widget in `__init__`, load in `load_from_data`, save in `save_to_data`
 
 ### Adding a new slash command
 

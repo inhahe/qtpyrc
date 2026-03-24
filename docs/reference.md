@@ -10,7 +10,6 @@ python qtpyrc.py [options]
 |--------|-------------|
 | `-c`, `--config FILE` | Path to YAML configuration file |
 | `-d`, `--debug LEVEL` | Debug output level (0=silent .. 5=trace) |
-| `--headless` | Run without GUI (for bots, scripts, headless servers) |
 | `--startup FILE` | Run this startup script instead of the configured one |
 | `--no-startup` | Suppress loading the startup script |
 | `-r`, `--run PATTERN` | Run additional command scripts (repeatable, wildcards) |
@@ -18,10 +17,6 @@ python qtpyrc.py [options]
 | `-p`, `--plugin PATTERN` | Load additional plugins (repeatable, wildcards) |
 | `--no-plugins PATTERN` | Suppress autoload plugins matching pattern (repeatable, wildcards) |
 | `-e`, `--exec COMMAND` | Execute a /command on startup (repeatable) |
-| `--ui PATH` | Trigger a `/ui` path on startup (e.g. `--ui menu.tools.colorpicker`) |
-| `--ui-list` | Print all registered `/ui` paths to stdout and exit |
-| `-o`, `--override KEY=VALUE` | Override a config option at runtime without saving (dot path, repeatable, e.g. `-o font.size=15`). With `--init`, seeds the value into the new file |
-| `--init [PATH]` | Generate a new config file and exit. PATH can be a filename, directory, or dir/filename (default: `config.yaml` in current directory). Errors if file exists. Can combine with `-o` to seed values |
 
 Examples:
 
@@ -34,14 +29,6 @@ python qtpyrc.py --run extra.rc --run debug.rc # run two extra scripts
 python qtpyrc.py --run "*.rc"                  # run all .rc scripts
 python qtpyrc.py --plugin "*"                  # load all plugins
 python qtpyrc.py -e "/connect libera" -e "/join #test"
-python qtpyrc.py -o font.size=18 -o font.family=Consolas  # override config at runtime
-python qtpyrc.py --init                        # create config.yaml in current dir
-python qtpyrc.py --init myconfig.yaml          # create myconfig.yaml in current dir
-python qtpyrc.py --init path/to/dir/           # create config.yaml in path/to/dir/
-python qtpyrc.py --init path/to/myconfig.yaml  # create myconfig.yaml in path/to/
-python qtpyrc.py --init newdir/ -o logging.dir=logs -o history_file=history.db
-python qtpyrc.py --ui menu.tools.colorpicker     # launch app and open color picker
-python qtpyrc.py --ui-list                        # print all /ui paths and exit
 ```
 
 ## Slash Commands
@@ -76,8 +63,6 @@ Parameters that accept arbitrary text (messages, reasons, titles) must be quoted
 | `/ctcp` | `/ctcp <nick> <type> [data]` | Send a CTCP query (PING, VERSION, TIME, etc.) |
 | `/invite` | `/invite <nick> [#channel]` | Invite a user to a channel (defaults to current) |
 | `/raw` | `/raw <line>` | Send a raw IRC command to the server |
-| `/openurl` | `/openurl <url>` | Open a URL in the system browser |
-| `/clipboard` | `/clipboard <text>` | Copy text to the system clipboard |
 | `/quote` | `/quote <line>` | Alias for `/raw` |
 | `/echo` | `/echo [-w target] <text>` | Print text to the current window (or target window with `-w`) |
 | `/log` | `/log [-w target] "text"` | Write a line to the log file for the current window (or target) |
@@ -92,8 +77,6 @@ Parameters that accept arbitrary text (messages, reasons, titles) must be quoted
 | `/kick` | `/kick <nick> [reason]` | Kick a user from the current channel |
 | `/ban` | `/ban <nick\|mask>` | Ban a user (nicks are expanded to `nick!*@*`) |
 | `/kban` | `/kban <nick> [reason]` | Ban and kick a user in one command |
-| `/chaninfo` | `/chaninfo` | Show channel details dialog (modes, bans, topic) |
-| `/list` | `/list [params]` | Open the channel list browser. See ELIST params below. |
 | `/op` | `/op <nick>` | Give operator status (+o) |
 | `/deop` | `/deop <nick>` | Remove operator status (-o) |
 | `/halfop` | `/halfop <nick>` | Give halfop status (+h) |
@@ -102,24 +85,6 @@ Parameters that accept arbitrary text (messages, reasons, titles) must be quoted
 | `/devoice` | `/devoice <nick>` | Remove voice (-v) |
 | `/quiet` | `/quiet <nick>` | Quiet a user (+q) |
 | `/unquiet` | `/unquiet <nick>` | Remove quiet (-q) |
-
-#### /list ELIST Parameters
-
-`/list` with no parameters opens the browser without fetching. Any parameters are passed to the server as ELIST filters (server-side filtering, reduces load). Multiple parameters can be combined.
-
-| Parameter | Meaning | Example |
-|-----------|---------|---------|
-| `>N` | Channels with **more than** N users | `/list >50` — busy channels only |
-| `<N` | Channels with **fewer than** N users | `/list <20` — small channels |
-| `*mask*` | Channel name matches wildcard | `/list *python*` — channels with "python" in the name |
-| `C>N` | Channel **created more than** N minutes ago | `/list C>1440` — channels older than 1 day |
-| `C<N` | Channel **created less than** N minutes ago | `/list C<60` — channels created in the last hour |
-| `T>N` | **Topic changed more than** N minutes ago | `/list T>10080` — stale topics (>1 week) |
-| `T<N` | **Topic changed less than** N minutes ago | `/list T<60` — recently active topics |
-
-Combined example: `/list >10 <500 *chat*` — channels with 10-500 users and "chat" in the name.
-
-Not all servers support all ELIST parameters. The `>N` filter is the most widely supported. The browser also has a client-side text filter for searching results after they arrive.
 
 ### User Info
 
@@ -193,13 +158,9 @@ Examples:
 | `/on` | `/on -r [-p] <event> <name>` | Remove a hook (`-p` also removes from startup script) |
 | `/on` | `/on -l [event]` | List active hooks |
 | `/hooks` | `/hooks` | Alias for `/on -l` |
-| `/plugin` | `/plugin <name>` | Load a Python plugin |
-| `/plugin` | `/plugin -u <name>` | Unload a plugin |
-| `/plugin` | `/plugin -r <name>` | Reload a plugin (unload + load) |
-| `/load` | `/load <name>` | Alias for `/plugin` |
-| `/unload` | `/unload <name>` | Alias for `/plugin -u` |
-| `/plugins` | `/plugins [-l or -a]` | List available plugins (-l loaded only, -a auto-load only) |
-| `/scripts` | `/scripts [-a]` | List available command scripts (`-a` auto-load) |
+| `/load` | `/load <script_name>` | Load a Python plugin script |
+| `/unload` | `/unload <script_name>` | Unload a Python plugin script |
+| `/scripts` | `/scripts` | List loaded Python plugin scripts |
 | `/script` | `/script <filename>` | Run a command script (text file of /commands) |
 | `/play` | `/play <filename>` | Send a plain text file to the current window line by line |
 | `/alias` | `/alias [name] [command...]` | Define, show, or list command aliases |
@@ -243,7 +204,6 @@ These are always available and reflect the active window's state. User-defined v
 | `{window_type}` | `server`, `channel`, or `query` |
 | `{networks}` | Number of connected networks |
 | `{channels}` | Total channel count across all networks |
-| `{replay}` | History replay progress (e.g. ` [history: 12/85]`), empty when not loading. Main titlebar only. |
 
 ### Function calls
 
@@ -288,7 +248,6 @@ n1=%other value
 | `/reload` | `/reload` | Re-read configuration from the current YAML file |
 | `/config` | `/config [-e] <key.path> [value]` | View or change a config option by YAML path (e.g. `/config font.size 15`). `-e` expands {variables} in value |
 | `/settings` | `/settings [page]` | Open the settings dialog. Pages: `general`, `identity`, `font` (or `colors`), `ident_server` (or `ident`), `logging`, `notifications`, `scripts`, `editor`, or `networks.<name>[.server\|sasl\|auto_join]` |
-| `/ui` | `/ui [path]` | Trigger any menu action, settings page, or toolbar button by dot-path. With no argument, lists all paths. Prefixes: `menu.*` for menu items (e.g. `menu.tools.colorpicker`, `menu.file.edit.startup`), `settings.*` for settings pages (e.g. `settings.general`, `settings.fonts.chat`, `settings.networks.libera.sasl`), `toolbar.*` for toolbar buttons (derived from tooltip text). Any prefix lists matching paths. Disabled menu actions show a warning |
 | `/sounds` | `/sounds [name]` | Browse system sounds, or play one by name |
 | `/urls` | `/urls` | Open the URL catcher (browse captured URLs with filters) |
 | `/urlcatcher` | `/urlcatcher` | Alias for `/urls` |
@@ -453,10 +412,9 @@ Use `/popups` to reload the file after editing.
 | `-d` | Show a desktop notification |
 | `-h` | Highlight the channel tab |
 | `-p` | Persist by appending to the startup script |
-| `-x` | Suppress the default handler (event won't appear in window) |
 
 - **pattern** — matched against the event's primary text. Supports wildcards (`*`, `?`) or `/regex/` with optional flags: `i` (case-insensitive), `m` (multiline), `s` (dotall). Example: `/regex/i`, `/regex/ims`. Default `*` (match everything).
-- **command** — a command string to execute. Optional if action flags (`-s`, `-d`, `-h`) are used. Multiple commands can be separated with ` | ` (space-pipe-space), e.g. `/mode # +b nick!*@* | /kick # nick`. `{variables}` are expanded before execution (`\{` / `\}` for literal braces, `\\` for literal backslash, so a literal `\{` requires `\\{`). If the command starts with `/exec`, variables are available as Python names instead (see below).
+- **command** — a command string to execute. Optional if action flags (`-s`, `-d`, `-h`) are used. `{variables}` are expanded before execution (`\{` / `\}` for literal braces, `\\` for literal backslash, so a literal `\{` requires `\\{`). If the command starts with `/exec`, variables are available as Python names instead (see below).
 
 ### Examples
 
@@ -468,8 +426,6 @@ Use `/popups` to reload the file after editing.
 /on chanmsg vip -n boss -s sounds/vip.wav -d *
 /on kick kick_alert -s beep -d *
 /on mode ban_alert *+b* -s beep -d /echo Ban: {modes} {args}
-/on join hide_bots -x -n *bot* *
-/on chanmsg kban_spam -n spammer * /mode # +b {nick}!*@* | /kick # {nick} Spam
 /on -r chanmsg friend
 /on -l
 ```
@@ -596,7 +552,7 @@ All methods below take `conn` (an IRCClient connection) as their first argument.
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `on` | `on(event, name, pattern, command, *, channel=None, network=None, window=None)` | Register an event hook. `command` can be a string or callable `(vars, conn)` |
+| `on` | `on(event, name, pattern, command, *, channel=None, network=None, window=None)` | Register an event hook |
 | `remove_on` | `remove_on(event, name)` | Remove a hook by event and name |
 | `remove_all_hooks` | `remove_all_hooks()` | Remove all hooks registered through this instance |
 
@@ -606,49 +562,6 @@ All methods below take `conn` (an IRCClient connection) as their first argument.
 |--------|-----------|-------------|
 | `timer` | `timer(name, reps, secs, command, *, window=None)` | Create a named timer (0 reps = infinite) |
 | `cancel_timer` | `cancel_timer(name)` | Stop and remove a timer |
-
-### UI Methods
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `ui` | `ui(path)` | Trigger a UI action by path (e.g. `'menu.tools.colorpicker'`). Raises `KeyError` if not found |
-| `ui_list` | `ui_list()` | Returns `[(path, description), ...]` for all registered UI paths |
-| `ui_tree` | `ui_tree()` | Returns a nested dict of the UI path hierarchy (leaf nodes have `'_desc'` key) |
-
-### Convenience Methods
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `say` | `say(conn, target, message)` | Send a message to a channel or nick |
-| `channel` | `channel(window)` | Get the channel name or query nick for a window |
-| `nicks` | `nicks(conn, channel)` | Get the set of nicks in a channel |
-| `me` | `me(conn)` | Get conn's current nickname (alias for `nick()`) |
-| `echo` | `echo(window, text)` | Display text in a window |
-| `error` | `error(window, text)` | Display red system message in a window |
-| `inputbox` | `inputbox(prompt='', title='Input')` | Show input dialog, return text or '' |
-| `stdin` | `stdin(prompt='')` | Read a line from stdin (blocking) |
-| `dbg` | `dbg(level, *args)` | Write to console debug log. Levels: `irc.LOG_ERROR` (1), `irc.LOG_WARN` (2), `irc.LOG_INFO` (3), `irc.LOG_DEBUG` (4), `irc.LOG_TRACE` (5) |
-
-### Plugin Config Methods
-
-| Method | Signature | Description |
-|--------|-----------|-------------|
-| `get_config` | `get_config(plugin_name, key, default=None)` | Get a plugin config value |
-| `set_config` | `set_config(plugin_name, key, value)` | Set a plugin config value and save |
-
-Plugins can declare config fields that appear in Settings > Plugin Config:
-
-```python
-class MyPlugin(plugin.Callbacks):
-    config_fields = [
-        ('enabled', bool, True, 'Enable this plugin'),
-        ('interval', int, 60, 'Check interval in seconds'),
-        ('api_key', str, '', 'API key for the service'),
-    ]
-```
-
-Supported types: `str`, `int`, `float`, `bool`. Values are stored under
-`plugins.<name>:` in the config YAML.
 
 ### Plugin Example
 
@@ -674,45 +587,6 @@ class MyPlugin(plugin.Callbacks):
 
 Class = MyPlugin
 ```
-
-For a full working example, see the **triviabot** plugin in `plugins/triviabot/__init__.py`. It demonstrates channel message handling, config fields, timers, fuzzy matching, mIRC colors, and per-channel allow/block lists.
-
-### `irc.on()` — Registering Hooks from Plugins
-
-```python
-irc.on(event, name, pattern, command='', *, channel=None, network=None,
-       nick_mask=None, sound=None, desktop=False, highlight_tab=False,
-       suppress=False, window=None)
-```
-
-The `command` argument can be:
-
-- A **string** — executed as a slash command. Multiple commands separated by ` | `:
-  ```python
-  irc.on('chanmsg', 'kban', '*', '/mode # +b {nick}!*@* | /kick # {nick}',
-         nick_mask='spammer')
-  ```
-
-- A **callable** — receives `(variables_dict, conn)`. Return truthy to suppress the event:
-  ```python
-  def my_filter(variables, conn):
-      if variables['nick'] == 'annoying':
-          return True  # suppress
-  irc.on('chanmsg', 'filter', '*', my_filter)
-  ```
-
-- A **list** of callables and/or strings — executed in order. Any callable returning truthy suppresses:
-  ```python
-  def log_it(variables, conn):
-      print('Join:', variables['nick'])
-
-  irc.on('join', 'multi', '*', [
-      log_it,
-      '/echo {nick} joined {channel}',
-  ])
-  ```
-
-Set `suppress=True` to always suppress the event when the hook matches (regardless of command return value).
 
 ---
 

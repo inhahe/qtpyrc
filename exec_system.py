@@ -24,13 +24,6 @@ def _timer_fire(name):
   window = info['window']
   command = info['command']
 
-  # Resolve window if None
-  if window is None:
-    sub = state.app.mainwin.workspace.activeSubWindow() if state.app else None
-    window = sub.widget() if sub else None
-  if window is None:
-    return
-
   # Execute the associated command string
   _exec_command_string(window, command)
 
@@ -44,21 +37,14 @@ def _timer_fire(name):
       del state._timers[name]
 
 def _exec_command_string(window, cmdstr):
-  """Execute a command string as if the user typed it in *window*.
-
-  Multiple commands can be separated with ``|``, e.g.
-  ``/mode # +b nick!*@* | /kick # nick``
-  """
+  """Execute a command string as if the user typed it in *window*."""
   from commands import docommand
-  parts = cmdstr.split(' | ')
-  for part in parts:
-    part = part.strip()
-    if not part:
-      continue
-    if part.startswith(state.config.cmdprefix):
-      docommand(window, *(part[len(state.config.cmdprefix):].split(" ", 1)))
-    else:
-      docommand(window, "say", part)
+  cmdstr = cmdstr.strip()
+  if cmdstr.startswith(state.config.cmdprefix):
+    docommand(window, *(cmdstr[len(state.config.cmdprefix):].split(" ", 1)))
+  else:
+    # Treat as literal text (say command)
+    docommand(window, "say", cmdstr)
 
 def _exec_on_command(window, code, variables, conn):
   """Execute Python code from an /on hook with event variables available.
@@ -242,7 +228,7 @@ def _on_pattern_match(pattern, text):
 
 
 def _dispatch_on_hooks(internal_event, conn, args):
-  """Fire /on hooks for *internal_event*.  Returns True if any hook suppressed the event."""
+  """Fire /on hooks for *internal_event*.  Returns True if any hook fired."""
   # Find which /on event names map to this internal event
   matched_events = []
   for on_name, internal_name in _ON_EVENT_MAP.items():
@@ -251,7 +237,7 @@ def _dispatch_on_hooks(internal_event, conn, args):
   if not matched_events:
     return False
 
-  suppressed = False
+  fired = False
   for on_name in matched_events:
     hooks = state._on_hooks.get(on_name)
     if not hooks:
@@ -301,39 +287,8 @@ def _dispatch_on_hooks(internal_event, conn, args):
       if hinfo.get('highlight_tab') and chan and conn:
         _highlight_event_window(conn, chan)
 
-      # Suppress the default handler (like mIRC's /halt)
-      if hinfo.get('suppress'):
-        suppressed = True
-
-      # Command execution — callable, list of callables/strings, or string
+      # Command execution
       cmd = hinfo.get('command', '')
-      if isinstance(cmd, (list, tuple)):
-        bare = {k.strip('{}'): str(v) for k, v in variables.items()}
-        for c in cmd:
-          if callable(c):
-            try:
-              if c(bare, conn):
-                suppressed = True
-            except Exception:
-              import traceback; traceback.print_exc()
-          elif c:
-            window = hinfo.get('window')
-            if not window:
-              sub = state.app.mainwin.workspace.activeSubWindow()
-              window = sub.widget() if sub else None
-            if window:
-              expanded = _expand_vars(c, bare)
-              _exec_command_string(window, expanded)
-        continue
-      if callable(cmd):
-        try:
-          bare = {k.strip('{}'): str(v) for k, v in variables.items()}
-          result = cmd(bare, conn)
-          if result:
-            suppressed = True
-        except Exception:
-          import traceback; traceback.print_exc()
-        continue
       if cmd:
         # Find window for command execution
         window = hinfo.get('window')
@@ -354,7 +309,8 @@ def _dispatch_on_hooks(internal_event, conn, args):
             cmd = _expand_vars(cmd, bare)
             _exec_command_string(window, cmd)
 
-  return suppressed
+      fired = True
+  return fired
 
 
 def _highlight_event_window(conn, channel):

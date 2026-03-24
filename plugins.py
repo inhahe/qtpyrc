@@ -177,19 +177,18 @@ def load_script_by_name(name, report_window=None):
     return False
 
   # If already loaded, unload first
-  _reloading = name in state.activescripts
-  if _reloading:
+  if name in state.activescripts:
     old = state.activescripts.pop(name)
     if hasattr(old, 'instance') and hasattr(old.instance, 'die'):
       try:
         old.instance.die()
-      except Exception as e:
-        dbg(LOG_WARN, '[plugins] %s.die() failed: %s' % (name, e))
+      except Exception:
+        pass
     elif hasattr(old, 'script') and hasattr(old.script, 'die'):
       try:
         old.script.die()
-      except Exception as e:
-        dbg(LOG_WARN, '[plugins] %s.die() failed: %s' % (name, e))
+      except Exception:
+        pass
 
   try:
     # Force reimport if already cached
@@ -206,10 +205,9 @@ def load_script_by_name(name, report_window=None):
     loaded = load_plugin(name, mod)
     if loaded:
       state.activescripts[name] = loaded
-      verb = 'Reloaded' if _reloading else 'Loaded'
-      dbg(LOG_INFO, '%s plugin: %s' % (verb, name))
+      dbg(LOG_INFO, 'Loaded script: %s' % name)
       if report_window:
-        report_window.redmessage("[%s plugin: %s]" % (verb, name))
+        report_window.redmessage("[Loaded script: %s]" % name)
       return True
     else:
       msg = 'Script "%s" has no Class or Script attribute' % name
@@ -382,7 +380,7 @@ _SCRIPT_HOOKS = frozenset({
 def _dispatch_to_plugins(name, conn, args, kwargs):
   """Call plugin hooks for event *name*.  Returns True if any suppressed."""
   from exec_system import _dispatch_on_hooks
-  for sname, loaded in state.activescripts.items():
+  for loaded in state.activescripts.values():
     if isinstance(loaded, LoadedPlugin):
       handler = getattr(loaded.instance, name, None)
       if handler:
@@ -415,8 +413,7 @@ def _dispatch_to_plugins(name, conn, args, kwargs):
           traceback.print_exc()
   # Dispatch /on hooks
   try:
-    if _dispatch_on_hooks(name, conn, args):
-      return True
+    _dispatch_on_hooks(name, conn, args)
   except Exception:
     traceback.print_exc()
   return False

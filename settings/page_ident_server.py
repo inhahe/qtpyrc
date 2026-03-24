@@ -1,7 +1,6 @@
 from PySide6.QtWidgets import (
     QWidget, QFormLayout, QCheckBox, QLineEdit, QSpinBox,
 )
-from settings.page_general import _ck
 
 
 class IdentServerPage(QWidget):
@@ -10,21 +9,18 @@ class IdentServerPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QFormLayout(self)
-        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
-        self.enabled = _ck(QCheckBox(), 'ident.enabled')
+        self.enabled = QCheckBox()
         layout.addRow("Enable ident server:", self.enabled)
 
-        self.host = _ck(QLineEdit(), 'ident.host')
-        self.host.setMinimumWidth(200)
+        self.host = QLineEdit()
         layout.addRow("Listen host:", self.host)
 
-        self.port = _ck(QSpinBox(), 'ident.port')
+        self.port = QSpinBox()
         self.port.setRange(1, 65535)
         layout.addRow("Listen port:", self.port)
 
-        self.username = _ck(QLineEdit(), 'ident_username')
-        self.username.setMinimumWidth(200)
+        self.username = QLineEdit()
         layout.addRow("Ident username:", self.username)
 
     def load_from_data(self, data):
