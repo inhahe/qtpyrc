@@ -340,7 +340,7 @@ async def _try_twitter(url, timeout=10.0, proxy=''):
     info = {'title': title}
     text = tweet.get('text', '')
     if text:
-        info['description'] = text[:300]
+        info['description'] = text
     # Try to get a media thumbnail
     media = tweet.get('media', {})
     photos = media.get('photos', [])
@@ -368,7 +368,7 @@ async def _try_wikipedia(url, timeout=10.0, proxy=''):
         return None
     info = {'title': data['title']}
     if data.get('extract'):
-        info['description'] = data['extract'][:300]
+        info['description'] = data['extract']
     thumb = data.get('thumbnail', {})
     if thumb.get('source'):
         info['image'] = thumb['source']
@@ -502,12 +502,10 @@ def _insert_preview(window, info, marker_name=None):
     url = info.get('url', '')
     image_data = info.get('image_data')
 
-    # Truncate description
-    if len(desc) > 200:
-        desc = desc[:197] + '...'
-
     # Register thumbnail image with the document if available
     img_name = ''
+    thumb_w = 0
+    thumb_h = 0
     if image_data:
         img = QImage()
         if img.loadFromData(image_data):
@@ -526,42 +524,112 @@ def _insert_preview(window, info, marker_name=None):
                 3,  # QTextDocument.ResourceType.ImageResource
                 QUrl(img_name), img)
 
-    # Build as HTML table for compact layout
-    html = (
-        '<table cellpadding="4" cellspacing="0" '
-        'style="border: 1px solid %s; background-color: %s; '
-        'max-width: %dpx; margin: 2px 0 2px 20px;">'
-        '<tr>'
-        % (border_color, bg_color, width)
-    )
-    # Thumbnail cell (clickable — opens the URL)
-    if img_name:
-        html += '<td style="vertical-align: top; padding-right: 6px;"><a href="%s"><img src="%s"></a></td>' % (url, img_name)
-    # Text cell
-    html += (
-        '<td style="vertical-align: top;">'
-        '<a href="%s" style="color: %s; font-weight: bold; '
-        'text-decoration: none; font-size: 9pt;">%s</a>'
-        % (url, link_color, _escape_html(title))
-    )
-    if desc:
-        html += (
-            '<br><span style="color: %s; font-size: 8pt;">%s</span>'
-            % (text_color, _escape_html(desc))
-        )
-    date_str = _format_date(info.get('date', ''))
-    if date_str:
-        html += (
-            '<br><span style="color: %s; font-size: 7pt;">%s</span>'
-            % (text_color, _escape_html(date_str))
-        )
-    html += (
-        '<br><span style="color: %s; font-size: 7pt;">%s</span>'
-        % (link_color, _escape_html(_truncate_url(url)))
-    )
-    html += '</td></tr></table>'
+    # Calculate optimal table width based on text length and image size.
+    # Goal: text shouldn't wrap the box taller than the image unless
+    # the text is too long to fit at max width.
+    text_len = len(title) + len(desc) + len(url) + 20  # rough char count
+    char_width = 7  # approximate pixels per character at 9pt
+    min_width = 200
+    max_width = width
 
-    cur.insertHtml(html)
+    if thumb_w and thumb_h:
+      # Estimate how many lines the image height can hold (~14px per line)
+      img_lines = max(thumb_h // 14, 1)
+      # Width needed so text fits in that many lines
+      text_area_w = (text_len * char_width) // img_lines
+      # Add image width + padding
+      table_w = thumb_w + 16 + text_area_w
+      # Clamp to min/max
+      table_w = max(min_width, min(table_w, max_width))
+    else:
+      # No image: use enough width to show text in ~2-3 lines
+      lines_target = max(2, min(4, text_len // 60))
+      table_w = (text_len * char_width) // lines_target
+      table_w = max(min_width, min(table_w, max_width))
+
+    # Truncate description to fit within the preview box.
+    _est_img_w = (thumb_w + 20) if thumb_w else 0
+    _chars_per_line = max(20, (table_w - _est_img_w - 30) // 6)
+    _max_desc_chars = _chars_per_line * 8  # ~8 lines of description
+    if len(desc) > _max_desc_chars:
+        desc = desc[:_max_desc_chars - 3] + '...'
+
+    # Build preview using QTextTable API to avoid HTML rendering bugs
+    from PySide6.QtGui import QTextTableFormat, QTextLength, QTextFrameFormat
+    from PySide6.QtGui import QFont as _QFont
+
+    cols = 2 if img_name else 1
+    tf = QTextTableFormat()
+    tf.setBorder(1)
+    tf.setBorderBrush(QBrush(QColor(border_color)))
+    tf.setBorderStyle(QTextFrameFormat.BorderStyle.BorderStyle_Solid)
+    tf.setCellPadding(4)
+    tf.setCellSpacing(0)
+    tf.setBackground(QBrush(QColor(bg_color)))
+    tf.setMargin(0)
+    tf.setLeftMargin(20)
+    # Set column widths
+    if img_name:
+        constraints = [
+            QTextLength(QTextLength.Type.FixedLength, thumb_w + 12),
+            QTextLength(QTextLength.Type.FixedLength, table_w - thumb_w - 20),
+        ]
+    else:
+        constraints = [QTextLength(QTextLength.Type.FixedLength, table_w - 8)]
+    tf.setColumnWidthConstraints(constraints)
+
+    table = cur.insertTable(1, cols, tf)
+
+    # Image cell
+    col = 0
+    if img_name:
+        cell = table.cellAt(0, 0)
+        cc = cell.firstCursorPosition()
+        from PySide6.QtGui import QTextImageFormat
+        img_fmt = QTextImageFormat()
+        img_fmt.setName(img_name)
+        img_fmt.setWidth(thumb_w)
+        img_fmt.setHeight(thumb_h)
+        img_fmt.setAnchor(True)
+        img_fmt.setAnchorHref(url)
+        cc.insertImage(img_fmt)
+        col = 1
+
+    # Text cell
+    cell = table.cellAt(0, col)
+    cc = cell.firstCursorPosition()
+    preview_font = _QFont(cfg.fontfamily, 8)
+
+    # Title (bold, link colored)
+    title_fmt = QTextCharFormat()
+    title_fmt.setFont(preview_font)
+    title_fmt.setFontWeight(_QFont.Weight.Bold)
+    title_fmt.setForeground(QBrush(QColor(link_color)))
+    title_fmt.setAnchor(True)
+    title_fmt.setAnchorHref(url)
+    title_fmt.setFontUnderline(False)
+    cc.insertText(title, title_fmt)
+
+    # Description
+    if desc:
+        cc.insertText('\n')
+        desc_fmt = QTextCharFormat()
+        desc_fmt.setFont(preview_font)
+        desc_fmt.setForeground(QBrush(QColor(text_color)))
+        cc.insertText(desc, desc_fmt)
+
+    # Date + URL line
+    date_str = _format_date(info.get('date', ''))
+    url_display = _truncate_url(url, max_len=80)
+    footer = ''
+    if date_str:
+        footer = '%s \u00b7 ' % date_str
+    footer += url_display
+    cc.insertText('\n')
+    footer_fmt = QTextCharFormat()
+    footer_fmt.setFont(preview_font)
+    footer_fmt.setForeground(QBrush(QColor(link_color)))
+    cc.insertText(footer, footer_fmt)
     # Restore the main cursor to end of document
     window.cur.movePosition(QTextCursor.MoveOperation.End)
     window._updateBottomAlign()
@@ -675,5 +743,6 @@ async def _fetch_and_insert(window, url, marker_name=None):
             state.dbg(state.LOG_DEBUG, '[link_preview] no info returned for: %s' % url)
     except Exception as e:
         state.dbg(state.LOG_DEBUG, '[link_preview] error for %s: %s' % (url, e))
+        import traceback; traceback.print_exc()
     finally:
         _pending.discard(url)
