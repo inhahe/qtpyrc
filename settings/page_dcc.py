@@ -1,9 +1,14 @@
 from PySide6.QtWidgets import (
     QWidget, QFormLayout, QCheckBox, QSpinBox, QComboBox, QLineEdit,
-    QHBoxLayout, QPushButton, QFileDialog, QLabel,
+    QHBoxLayout, QPushButton, QFileDialog, QLabel, QPlainTextEdit,
 )
 from settings.page_general import _ck
-from settings import SETTINGS_NOTE_STYLE
+from settings import SETTINGS_NOTE_STYLE, SETTINGS_LIST_STYLE
+
+
+_MAX_FIELD_W = 150  # max width for small fields (combos, spinboxes, line edits)
+_PORT_W = 115       # width for port spinboxes
+_LIST_HEIGHT = 120  # height for list text areas
 
 
 class DCCPage(QWidget):
@@ -33,18 +38,27 @@ class DCCPage(QWidget):
         port_row = QHBoxLayout()
         self.port_min = _ck(QSpinBox(), 'dcc.port_min')
         self.port_min.setRange(1024, 65535)
+        self.port_min.setMinimumWidth(_PORT_W)
+        self.port_min.setMaximumWidth(_PORT_W)
         port_row.addWidget(self.port_min)
         port_row.addWidget(QLabel("to"))
         self.port_max = _ck(QSpinBox(), 'dcc.port_max')
         self.port_max.setRange(1024, 65535)
+        self.port_max.setMinimumWidth(_PORT_W)
+        self.port_max.setMaximumWidth(_PORT_W)
         port_row.addWidget(self.port_max)
+        port_row.addStretch()
         layout.addRow("Port range:", port_row)
 
         # Auto-accept
         self.auto_accept = _ck(QComboBox(), 'dcc.auto_accept')
-        self.auto_accept.addItems(["never", "known", "always"])
+        self.auto_accept.addItems(["never", "known", "trusted", "always"])
         self.auto_accept.setToolTip(
-            '"known" auto-accepts from users in your channels or open queries')
+            "never: always prompt\n"
+            "known: auto-accept from users in your channels or open queries\n"
+            "trusted: auto-accept only from trusted hostmasks (reject all others)\n"
+            "always: auto-accept from everyone")
+        self.auto_accept.setMaximumWidth(_MAX_FIELD_W)
         layout.addRow("Auto-accept transfers:", self.auto_accept)
 
         # Max file size
@@ -52,6 +66,7 @@ class DCCPage(QWidget):
         self.max_filesize.setRange(0, 999999)
         self.max_filesize.setSuffix(" MB")
         self.max_filesize.setSpecialValueText("(no limit)")
+        self.max_filesize.setMaximumWidth(_MAX_FIELD_W)
         layout.addRow("Max file size:", self.max_filesize)
 
         # On file exists
@@ -59,6 +74,7 @@ class DCCPage(QWidget):
         self.on_exists.addItems(["ask", "resume", "rename", "overwrite"])
         self.on_exists.setToolTip(
             "What to do when a received file already exists")
+        self.on_exists.setMaximumWidth(_MAX_FIELD_W)
         layout.addRow("If file exists:", self.on_exists)
 
         # NAT traversal
@@ -66,7 +82,17 @@ class DCCPage(QWidget):
         self.nat_traversal.addItems(["auto", "upnp", "natpmp", "disabled"])
         self.nat_traversal.setToolTip(
             '"auto" tries UPnP first, then NAT-PMP')
+        self.nat_traversal.setMaximumWidth(_MAX_FIELD_W)
         layout.addRow("NAT traversal:", self.nat_traversal)
+
+        # IP override
+        self.dcc_ip = _ck(QLineEdit(), 'dcc.ip')
+        self.dcc_ip.setPlaceholderText("(auto-detect)")
+        self.dcc_ip.setToolTip(
+            "Manual IP for DCC offers. Leave empty to auto-detect.\n"
+            "Set your public IP if auto-detect fails, or 127.0.0.1 for local testing.")
+        self.dcc_ip.setMaximumWidth(_MAX_FIELD_W)
+        layout.addRow("DCC IP:", self.dcc_ip)
 
         # Passive mode
         self.passive = _ck(QCheckBox(), 'dcc.passive')
@@ -79,27 +105,23 @@ class DCCPage(QWidget):
         self.timeout = _ck(QSpinBox(), 'dcc.timeout')
         self.timeout.setRange(10, 600)
         self.timeout.setSuffix(" seconds")
+        self.timeout.setMaximumWidth(_MAX_FIELD_W + 30)
         layout.addRow("Connection timeout:", self.timeout)
+
+        # Show get dialog
+        self.show_get_dialog = _ck(QCheckBox(), 'dcc.show_get_dialog')
+        self.show_get_dialog.setToolTip(
+            "Show accept/reject dialog for transfers not auto-accepted")
+        layout.addRow("Show get dialog:", self.show_get_dialog)
 
         layout.addRow(QLabel(""))  # spacer
 
         # Trusted hosts
-        from PySide6.QtWidgets import QPlainTextEdit
-        from settings import SETTINGS_LIST_STYLE
         self.trusted_hosts = _ck(QPlainTextEdit(), 'dcc.trusted_hosts')
         self.trusted_hosts.setPlaceholderText("nick!ident@host masks, one per line")
         self.trusted_hosts.setStyleSheet(SETTINGS_LIST_STYLE)
-        self.trusted_hosts.setMaximumHeight(80)
+        self.trusted_hosts.setMinimumHeight(_LIST_HEIGHT)
         layout.addRow("Trusted hosts:", self.trusted_hosts)
-
-        self.trust_only = _ck(QCheckBox(), 'dcc.trust_only')
-        self.trust_only.setToolTip("Reject all DCC from non-trusted users")
-        layout.addRow("Trust only:", self.trust_only)
-
-        self.show_get_dialog = _ck(QCheckBox(), 'dcc.show_get_dialog')
-        self.show_get_dialog.setToolTip(
-            "Show accept/reject dialog for non-trusted, non-auto-accepted transfers")
-        layout.addRow("Show get dialog:", self.show_get_dialog)
 
         # File filter
         self.file_filter_mode = _ck(QComboBox(), 'dcc.file_filter_mode')
@@ -107,12 +129,13 @@ class DCCPage(QWidget):
         self.file_filter_mode.setToolTip(
             "whitelist: only accept listed extensions.\n"
             "blacklist: reject listed extensions.")
+        self.file_filter_mode.setMaximumWidth(_MAX_FIELD_W)
         layout.addRow("File type filter:", self.file_filter_mode)
 
         self.file_filter = _ck(QPlainTextEdit(), 'dcc.file_filter')
         self.file_filter.setPlaceholderText("extensions, one per line (e.g. .exe)")
         self.file_filter.setStyleSheet(SETTINGS_LIST_STYLE)
-        self.file_filter.setMaximumHeight(60)
+        self.file_filter.setMinimumHeight(_LIST_HEIGHT)
         layout.addRow("Filter list:", self.file_filter)
 
     def _browse_dir(self):
@@ -134,15 +157,15 @@ class DCCPage(QWidget):
         idx = self.nat_traversal.findText(nat)
         if idx >= 0:
             self.nat_traversal.setCurrentIndex(idx)
+        self.dcc_ip.setText(str(dcc.get('ip', '')))
         self.passive.setChecked(bool(dcc.get('passive', False)))
         self.timeout.setValue(int(dcc.get('timeout', 120)))
         oe = str(dcc.get('on_exists', 'ask'))
         idx = self.on_exists.findText(oe)
         if idx >= 0:
             self.on_exists.setCurrentIndex(idx)
-        self.trusted_hosts.setPlainText('\n'.join(dcc.get('trusted_hosts') or []))
-        self.trust_only.setChecked(bool(dcc.get('trust_only', False)))
         self.show_get_dialog.setChecked(bool(dcc.get('show_get_dialog', True)))
+        self.trusted_hosts.setPlainText('\n'.join(dcc.get('trusted_hosts') or []))
         fm = str(dcc.get('file_filter_mode', 'disabled'))
         idx = self.file_filter_mode.findText(fm)
         if idx >= 0:
@@ -166,16 +189,20 @@ class DCCPage(QWidget):
         dcc['max_filesize'] = self.max_filesize.value()
         dcc['on_exists'] = self.on_exists.currentText()
         dcc['nat_traversal'] = self.nat_traversal.currentText()
+        ip = self.dcc_ip.text().strip()
+        if ip:
+            dcc['ip'] = ip
+        elif 'ip' in dcc:
+            del dcc['ip']
         dcc['passive'] = self.passive.isChecked()
         dcc['timeout'] = self.timeout.value()
+        dcc['show_get_dialog'] = self.show_get_dialog.isChecked()
         # Trusted hosts
         th = self.trusted_hosts.toPlainText().strip()
         if th:
             dcc['trusted_hosts'] = [e.strip() for e in th.splitlines() if e.strip()]
         elif 'trusted_hosts' in dcc:
             del dcc['trusted_hosts']
-        dcc['trust_only'] = self.trust_only.isChecked()
-        dcc['show_get_dialog'] = self.show_get_dialog.isChecked()
         dcc['file_filter_mode'] = self.file_filter_mode.currentText()
         ff = self.file_filter.toPlainText().strip()
         if ff:

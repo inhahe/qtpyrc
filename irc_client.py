@@ -611,9 +611,12 @@ class IRCClient(asyncirc.IRCClient):
             nick, filename))
           return
 
-      # Check trusted hosts
+      # Check auto-accept mode
+      auto = state.config.dcc_auto_accept
       is_trusted = self._is_trusted_host(user)
-      if state.config.dcc_trust_only and not is_trusted:
+
+      # "trusted" mode: reject non-trusted users entirely
+      if auto == 'trusted' and not is_trusted:
         self.window.redmessage('[DCC SEND from %s rejected: not a trusted user]' % nick)
         return
 
@@ -626,17 +629,15 @@ class IRCClient(asyncirc.IRCClient):
         nick, xfer.filename, _format_size(filesize)))
 
       # Decide whether to accept
-      if is_trusted or state.config.dcc_auto_accept == 'always':
+      if auto == 'always':
         asyncio.ensure_future(mgr.accept_receive(xfer))
-      elif state.config.dcc_auto_accept == 'known' and self._is_known_user(nick):
+      elif auto == 'trusted' and is_trusted:
+        asyncio.ensure_future(mgr.accept_receive(xfer))
+      elif auto == 'known' and (is_trusted or self._is_known_user(nick)):
         asyncio.ensure_future(mgr.accept_receive(xfer))
       elif state.config.dcc_show_get_dialog:
-        from dcc_ui import show_accept_dialog
-        if show_accept_dialog(xfer):
-          asyncio.ensure_future(mgr.accept_receive(xfer))
-        else:
-          xfer.status = Status.CANCELLED
-          self.window.addline('[DCC SEND from %s rejected]' % nick)
+        from dcc_ui import show_accept_dialog_nonblocking
+        show_accept_dialog_nonblocking(xfer, mgr)
       else:
         # No dialog, not auto-accepted — leave pending
         self.window.addline('[DCC SEND from %s pending — use /dcc get %s to accept]' % (
@@ -1001,7 +1002,7 @@ class IRCClient(asyncirc.IRCClient):
   # Non-standard WHOIS numerics that aren't in the symbolic map and arrive
   # as raw number strings:  330 = logged-in-as, 338 = actually-using-host,
   # 671 = is using a secure connection
-  _WHOIS_RAW_NUMERICS = frozenset({'330', '338', '671'})
+  _WHOIS_RAW_NUMERICS = frozenset({'275', '330', '338', '671'})
 
   def handleCommand(self, command, prefix, params):
     # Route non-standard WHOIS numerics to the requesting window

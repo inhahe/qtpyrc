@@ -198,8 +198,9 @@ dcc:
   port_min: 1024
   port_max: 65535
 
-  # Auto-accept incoming file transfers: never, known, always.
-  # "known" accepts from users in your channels.
+  # Auto-accept incoming file transfers: never, known, trusted, always.
+  # "known" accepts from users in your channels or open queries.
+  # "trusted" accepts only from trusted hostmasks (rejects all others).
   auto_accept: never
 
   # Maximum file size to accept (MB). 0 = no limit.
@@ -214,6 +215,11 @@ dcc:
   # passive automatically if the connection times out.
   passive: false
 
+  # Manual IP address override for DCC offers.
+  # Leave empty to auto-detect (UPnP > IRC host > LAN IP).
+  # Set to your public IP if auto-detect fails, or 127.0.0.1 for local testing.
+  #~ ip: ""
+
   # Timeout in seconds for DCC connection attempts.
   timeout: 120
 
@@ -225,11 +231,8 @@ dcc:
   #~ trusted_hosts:
   #~   - "friend!*@trusted.host"
 
-  # Only accept DCC from trusted hostmasks (reject all others).
-  trust_only: false
-
-  # Show a get/accept dialog for transfers from non-trusted users.
-  # If false, non-trusted transfers follow auto_accept setting silently.
+  # Show a get/accept dialog for transfers not auto-accepted.
+  # If false, non-accepted transfers are left pending (use /dcc get).
   show_get_dialog: true
 
   # File type filter: disabled, whitelist, blacklist.
