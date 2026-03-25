@@ -780,10 +780,10 @@ class AppConfig:
     self.dcc_max_filesize = int(dcc.get('max_filesize', 0))
     self.dcc_nat_traversal = dcc.get('nat_traversal', 'auto')
     self.dcc_passive = dcc.get('passive', False)
+    self.dcc_ip = dcc.get('ip', '')  # manual IP override for DCC
     self.dcc_timeout = int(dcc.get('timeout', 120))
     self.dcc_on_exists = dcc.get('on_exists', 'ask')  # ask, resume, rename, overwrite
     self.dcc_trusted_hosts = list(dcc.get('trusted_hosts') or [])
-    self.dcc_trust_only = dcc.get('trust_only', False)
     self.dcc_show_get_dialog = dcc.get('show_get_dialog', True)  # for non-trusted
     self.dcc_file_filter_mode = dcc.get('file_filter_mode', 'disabled')  # disabled, whitelist, blacklist
     self.dcc_file_filter = list(dcc.get('file_filter') or [])

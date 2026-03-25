@@ -195,12 +195,9 @@ class ChatOutput(QTextEdit):
     except RuntimeError:
       pass  # C++ object deleted
 
-  def focusInEvent(self, event):
-    """Never keep focus — always redirect to the input widget."""
-    super().focusInEvent(event)
-    # Use a single-shot timer to avoid re-entrancy during Qt focus handling
-    from PySide6.QtCore import QTimer
-    QTimer.singleShot(0, self._refocus_input)
+  # focusInEvent intentionally not overridden — output can take focus
+  # for scrolling. Focus returns to input after completed actions
+  # (text selection, nick/link click, context menu).
 
   def mouseMoveEvent(self, event):
     anchor = self.anchorAt(event.pos())
@@ -220,6 +217,7 @@ class ChatOutput(QTextEdit):
           c = self.textCursor()
           c.clearSelection()
           self.setTextCursor(c)
+        self._refocus_input()
       else:
         # Plain click — open link if on one
         anchor = self.anchorAt(event.pos())
@@ -227,6 +225,7 @@ class ChatOutput(QTextEdit):
           from PySide6.QtGui import QDesktopServices
           from PySide6.QtCore import QUrl
           QDesktopServices.openUrl(QUrl(anchor))
+          self._refocus_input()
 
   def mouseDoubleClickEvent(self, event):
     anchor = self.anchorAt(event.pos())
@@ -237,6 +236,8 @@ class ChatOutput(QTextEdit):
         _open_query(client, nick)
         return
     super().mouseDoubleClickEvent(event)
+    if self.textCursor().hasSelection():
+      self._refocus_input()
 
   def _highlight_anchor_at(self, pos):
     """Select the anchor text at pos to visually highlight it.
@@ -298,6 +299,7 @@ class ChatOutput(QTextEdit):
           section, self._parent_window, event.globalPos(),
           copy_action=has_selection):
         super().contextMenuEvent(event)
+    self._refocus_input()
 
 
 # ---------------------------------------------------------------------------
@@ -1271,6 +1273,7 @@ class Window(QWidget):
       if key == Qt.Key.Key_End and (mods & Qt.KeyboardModifier.ControlModifier):
         self.vs.setValue(self.vs.maximum())
         return True
+
 
       # Escape — skip this tab and activate next
       if key == Qt.Key.Key_Escape:

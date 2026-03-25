@@ -162,31 +162,44 @@ class DCCTransfersWindow(QDialog):
 # DCC Accept Dialog
 # ---------------------------------------------------------------------------
 
-def show_accept_dialog(xfer):
-  """Show a dialog asking the user to accept/reject a DCC SEND.
-  Returns True if accepted, False otherwise."""
+def show_accept_dialog_nonblocking(xfer, mgr):
+  """Show a non-blocking dialog asking the user to accept/reject a DCC SEND."""
+  import asyncio
   from PySide6.QtWidgets import QApplication
+  from dcc import Status
   parent = QApplication.activeWindow()
   msg = '%s wants to send you:\n\n%s (%s)\n\nFrom: %s:%s' % (
     xfer.nick, xfer.filename, _format_size(xfer.filesize),
     xfer.host, xfer.port)
   if state.config.dcc_max_filesize and xfer.filesize > state.config.dcc_max_filesize * 1024 * 1024:
     msg += '\n\nWARNING: File exceeds maximum size limit (%d MB)' % state.config.dcc_max_filesize
-  reply = QMessageBox.question(
-    parent, 'DCC SEND from %s' % xfer.nick, msg,
-    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-  return reply == QMessageBox.StandardButton.Yes
+  box = QMessageBox(parent)
+  box.setWindowTitle('DCC SEND from %s' % xfer.nick)
+  box.setText(msg)
+  box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+  def _on_finished(result):
+    if result == QMessageBox.StandardButton.Yes:
+      asyncio.ensure_future(mgr.accept_receive(xfer))
+    else:
+      xfer.status = Status.CANCELLED
+      if xfer.client and xfer.client.window:
+        xfer.client.window.addline('[DCC SEND from %s rejected]' % xfer.nick)
+  box.finished.connect(_on_finished)
+  box.setModal(False)
+  box.show()
 
 
-def show_exists_dialog(filename, existing_size, new_size):
-  """Show a dialog asking what to do when a file already exists.
+async def show_exists_dialog_async(filename, existing_size, new_size):
+  """Show a non-blocking dialog asking what to do when a file already exists.
   Returns 'resume', 'overwrite', 'rename', or 'cancel'."""
+  import asyncio
   from PySide6.QtWidgets import QApplication
   parent = QApplication.activeWindow()
   msg = '"%s" already exists.\n\nExisting: %s\nIncoming: %s' % (
     filename, _format_size(existing_size), _format_size(new_size))
   if existing_size < new_size:
     msg += '\n\nThe existing file is smaller — it may be a partial download.'
+  future = asyncio.get_event_loop().create_future()
   box = QMessageBox(parent)
   box.setWindowTitle('File Exists')
   box.setText(msg)
@@ -196,15 +209,20 @@ def show_exists_dialog(filename, existing_size, new_size):
   btn_cancel = box.addButton('Cancel', QMessageBox.ButtonRole.RejectRole)
   if existing_size >= new_size:
     btn_resume.setEnabled(False)
-  box.exec()
-  clicked = box.clickedButton()
-  if clicked is btn_resume:
-    return 'resume'
-  elif clicked is btn_overwrite:
-    return 'overwrite'
-  elif clicked is btn_rename:
-    return 'rename'
-  return 'cancel'
+  def _on_finished(_result):
+    clicked = box.clickedButton()
+    if clicked is btn_resume:
+      future.set_result('resume')
+    elif clicked is btn_overwrite:
+      future.set_result('overwrite')
+    elif clicked is btn_rename:
+      future.set_result('rename')
+    else:
+      future.set_result('cancel')
+  box.finished.connect(_on_finished)
+  box.setModal(False)
+  box.show()
+  return await future
 
 
 # ---------------------------------------------------------------------------

@@ -165,6 +165,10 @@ class DCCManager:
     """Determine our external IP address."""
     if self._external_ip:
       return self._external_ip
+    # Manual override from config
+    if state.config.dcc_ip:
+      self._external_ip = state.config.dcc_ip
+      return self._external_ip
     # Try UPnP, then NAT-PMP
     try:
       from upnp import get_external_ip
@@ -174,7 +178,31 @@ class DCCManager:
         return ip
     except Exception:
       pass
-    # Fallback: None (triggers reverse DCC)
+    # Try to get IP from the IRC server (some servers report it in 001)
+    if client and client.conn:
+      own = client.users.get(client.conn.irclower(client.conn.nickname))
+      if own and own.host and not own.host.startswith('gateway/'):
+        # Check if it looks like an IP address
+        try:
+          socket.inet_aton(own.host)
+          self._external_ip = own.host
+          state.dbg(state.LOG_INFO, '[dcc] Using IP from IRC user host: %s' % own.host)
+          return own.host
+        except OSError:
+          pass
+    # Fallback: local machine's LAN IP (works for LAN/same-machine transfers)
+    try:
+      s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+      s.connect(('8.8.8.8', 80))
+      ip = s.getsockname()[0]
+      s.close()
+      if ip and ip != '0.0.0.0':
+        self._external_ip = ip
+        state.dbg(state.LOG_INFO, '[dcc] Using local LAN IP: %s' % ip)
+        return ip
+    except Exception:
+      pass
+    # Final fallback: None (triggers reverse/passive DCC)
     return None
 
   # --- Port management ---
@@ -351,6 +379,8 @@ class DCCManager:
           xfer.transferred = xfer.resume_pos
 
         while True:
+          if writer.is_closing():
+            raise ConnectionError('Remote side closed connection')
           data = await asyncio.to_thread(f.read, BLOCK_SIZE)
           if not data:
             break
@@ -365,11 +395,11 @@ class DCCManager:
             try:
               ack_data = await asyncio.wait_for(reader.read(ACK_SIZE), timeout=0.01)
               if not ack_data:
-                break
+                raise ConnectionError('Remote side closed connection')
             except asyncio.TimeoutError:
               break
             except (ConnectionError, OSError):
-              break
+              raise
 
       # Wait for final ACK confirming full file received
       acked = xfer.resume_pos or 0
@@ -441,9 +471,9 @@ class DCCManager:
           i += 1
         save_path = '%s_%d%s' % (base, i, ext)
       elif on_exists == 'ask':
-        # Ask the user what to do
-        from dcc_ui import show_exists_dialog
-        choice = show_exists_dialog(xfer.filename, existing_size, xfer.filesize)
+        # Ask the user what to do — use a future to avoid blocking the event loop
+        from dcc_ui import show_exists_dialog_async
+        choice = await show_exists_dialog_async(xfer.filename, existing_size, xfer.filesize)
         if choice == 'resume' and 0 < existing_size < xfer.filesize:
           xfer.file_path = save_path
           xfer.resume_pos = existing_size

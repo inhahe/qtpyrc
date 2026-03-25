@@ -1917,9 +1917,6 @@ if __name__ == '__main__':
   _crash_log = os.path.join(os.path.dirname(os.path.abspath(state.config.path)), 'crash.log')
   _crash_fh = open(_crash_log, 'a')
   faulthandler.enable(file=_crash_fh)
-  # Dump all thread tracebacks to crash.log every 15s as a watchdog —
-  # if the process dies silently, the last dump shows what it was doing
-  faulthandler.dump_traceback_later(15, repeat=True, file=_crash_fh)
 
   # Windows: register an unhandled exception filter to catch crashes that
   # Python's faulthandler misses (e.g. C++ exceptions in Qt)
@@ -1950,11 +1947,17 @@ if __name__ == '__main__':
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     msg = '[%s] %s\n' % (ts, header)
     print(header, file=sys.stderr)
-    _crash_fh.write(msg)
+    try:
+      if not _crash_fh.closed:
+        _crash_fh.write(msg)
+        if exc_type and exc_value:
+          traceback.print_exception(exc_type, exc_value, exc_tb)
+          traceback.print_exception(exc_type, exc_value, exc_tb, file=_crash_fh)
+        _crash_fh.flush()
+    except (ValueError, OSError):
+      pass  # file already closed during shutdown
     if exc_type and exc_value:
       traceback.print_exception(exc_type, exc_value, exc_tb)
-      traceback.print_exception(exc_type, exc_value, exc_tb, file=_crash_fh)
-    _crash_fh.flush()
 
   # Catch unhandled exceptions that would otherwise silently kill the window
   def _excepthook(exc_type, exc_value, exc_tb):
@@ -1971,6 +1974,9 @@ if __name__ == '__main__':
   def _async_exception_handler(loop, context):
     exc = context.get('exception')
     msg = context.get('message', 'Unhandled async exception')
+    # Ignore harmless "task destroyed" warnings during shutdown
+    if _quitting and 'Task was destroyed' in msg:
+      return
     if exc:
       _log_exception('*** %s ***' % msg, type(exc), exc, exc.__traceback__)
     else:
