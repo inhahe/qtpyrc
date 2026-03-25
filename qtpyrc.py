@@ -44,7 +44,7 @@ from PySide6.QtGui import *
 from PySide6.QtCore import *
 
 APP_NAME = 'qtpyrc'
-APP_VERSION = '1.2.1'
+APP_VERSION = '1.2.2'
 
 import state
 from config import loadconfig, UIState
