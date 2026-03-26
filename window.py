@@ -479,6 +479,21 @@ class SearchBar(QWidget):
     if event.key() == Qt.Key.Key_Escape:
       self.close_bar()
       return
+    # Forward scrolling keys to the text widget
+    # (Home/End left for search input cursor movement)
+    key = event.key()
+    if key in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown,
+               Qt.Key.Key_Up, Qt.Key.Key_Down):
+      vs = self._text.verticalScrollBar()
+      if key == Qt.Key.Key_Up:
+        vs.setValue(vs.value() - vs.singleStep() * 3)
+      elif key == Qt.Key.Key_Down:
+        vs.setValue(vs.value() + vs.singleStep() * 3)
+      elif key == Qt.Key.Key_PageUp:
+        vs.setValue(vs.value() - vs.pageStep())
+      elif key == Qt.Key.Key_PageDown:
+        vs.setValue(vs.value() + vs.pageStep())
+      return
     super().keyPressEvent(event)
 
 
@@ -773,6 +788,11 @@ class Window(QWidget):
     self.output.setReadOnly(True)
     self.output.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
     _chatfont = QFont(state.config.fontfamily, state.config.fontheight)
+    # Fallback chain: configured font -> monochrome symbol fonts before color emoji
+    _chatfont.setFamilies([
+      state.config.fontfamily,
+      'Segoe UI Symbol',
+    ])
     self.output.setFont(_chatfont)
     # Set default document font explicitly
     self.output.document().setDefaultFont(_chatfont)
@@ -1098,7 +1118,8 @@ class Window(QWidget):
     """Set activity level if higher than current, and update tab/tree colors."""
     if self._is_active_window():
       return  # don't mark the window the user is looking at
-    if getattr(self, '_suppress_activity', False):
+    # Suppress during local DB history replay (not bouncer playback)
+    if hasattr(self, '_deferred_replay') or hasattr(self, '_bg_replay'):
       return
     if level <= self._activity:
       return  # don't downgrade

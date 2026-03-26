@@ -105,7 +105,6 @@ def _history_replay(window, network, channel, limit=None, chan_obj=None):
   rows = db.get_last(network, channel.lower(), limit)
   if not rows:
     return
-  window._suppress_activity = True
   show_prefix = state.config.show_mode_prefix_messages
   history = chan_obj.history if chan_obj else None
   for ts, etype, nick, text, prefix in rows:
@@ -152,7 +151,6 @@ def _history_replay(window, network, channel, limit=None, chan_obj=None):
         pass
       history.append(msg)
   window.add_separator(" End of saved history ")
-  window._suppress_activity = False
 
 
 class IRCClient(asyncirc.IRCClient):
@@ -506,6 +504,9 @@ class IRCClient(asyncirc.IRCClient):
     return self.window
 
   def irc_ERR_NOSUCHNICK(self, prefix, params):
+    # Suppress for bouncer targets (*status, *perform, etc.)
+    if len(params) >= 2 and params[1].startswith('*'):
+      return
     self._route_nick_error(params)
 
   def irc_ERR_NOSUCHSERVER(self, prefix, params):
@@ -1142,7 +1143,6 @@ class IRCClient(asyncirc.IRCClient):
       self.channels[chnlower] = chan
       # Defer history replay — background drip-feed, or immediate on activation
       chan.window._deferred_replay = (self.client.network, chname, chan)
-      chan.window._suppress_activity = True
       from qtpyrc import _queue_bg_replay
       _queue_bg_replay(chan.window, self.client.network, chname, chan)
     ts = self._get_server_time()
@@ -1346,7 +1346,10 @@ class IRCClient(asyncirc.IRCClient):
     self.client.users.pop(lnick, None)
 
   def nickChanged(self, nick):
+    oldname = self.nickname  # save before super() updates it
     super().nickChanged(nick)
+    # Treat own nick change like any other rename for channel display
+    self.userRenamed(oldname, nick)
     self._update_server_title()
     from qtpyrc import _update_all_titles
     _update_all_titles()

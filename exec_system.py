@@ -112,6 +112,9 @@ _ON_EVENT_MAP = {
   'numeric':    'on_numeric',
   'invite':     'invited',
   'ctcpreply':  'ctcpReply',
+  'myjoined':       'joined',
+  'myleft':         'left',
+  'kicked':         'kickedFrom',
   'notify_online':  'notify_online',
   'notify_offline': 'notify_offline',
 }
@@ -212,6 +215,18 @@ def _on_hook_vars(event, conn, args):
     v['{tag}'] = tag or ''
     v['{data}'] = data or ''
     v['{text}'] = '%s %s' % (tag or '', data or '')
+  elif event in ('myjoined', 'joined'):
+    chname = args[0] if args else ''
+    v['{channel}'] = chname or ''
+  elif event in ('myleft', 'left'):
+    channel = args[0] if args else ''
+    v['{channel}'] = channel or ''
+  elif event in ('kicked', 'kickedFrom'):
+    channel, kicker, msg = (args + (None, None, None))[:3]
+    v['{channel}'] = channel or ''
+    v['{nick}'] = kicker or ''
+    v['{kicker}'] = kicker or ''
+    v['{message}'] = msg or ''
   elif event in ('notify_online', 'notify_offline'):
     nick = args[0] if args else ''
     v['{nick}'] = nick
@@ -318,6 +333,8 @@ def _dispatch_on_hooks(internal_event, conn, args):
               import traceback; traceback.print_exc()
           elif c:
             window = hinfo.get('window')
+            if not window and conn and hasattr(conn, 'window'):
+              window = conn.window
             if not window:
               sub = state.app.mainwin.workspace.activeSubWindow()
               window = sub.widget() if sub else None
@@ -335,8 +352,11 @@ def _dispatch_on_hooks(internal_event, conn, args):
           import traceback; traceback.print_exc()
         continue
       if cmd:
-        # Find window for command execution
+        # Find window for command execution — prefer the connection's
+        # server window so the command runs in the right network context
         window = hinfo.get('window')
+        if not window and conn and hasattr(conn, 'window'):
+          window = conn.window
         if not window:
           sub = state.app.mainwin.workspace.activeSubWindow()
           window = sub.widget() if sub else None
@@ -351,8 +371,8 @@ def _dispatch_on_hooks(internal_event, conn, args):
           else:
             # Normal command — expand {variables} as strings
             bare = {k.strip('{}'): str(v) for k, v in variables.items()}
-            cmd = _expand_vars(cmd, bare)
-            _exec_command_string(window, cmd)
+            expanded = _expand_vars(cmd, bare)
+            _exec_command_string(window, expanded)
 
   return suppressed
 
