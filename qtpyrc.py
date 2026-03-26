@@ -44,7 +44,7 @@ from PySide6.QtGui import *
 from PySide6.QtCore import *
 
 APP_NAME = 'qtpyrc'
-APP_VERSION = '1.2.3'
+APP_VERSION = '1.2.4'
 
 import state
 from config import loadconfig, UIState
@@ -1639,6 +1639,8 @@ if __name__ == '__main__':
 
   # --- CLI arguments ---
   parser = argparse.ArgumentParser(description='qtpyrc IRC client')
+  parser.add_argument('-V', '--version', action='version',
+                      version='%s %s' % (APP_NAME, APP_VERSION))
   parser.add_argument('-c', '--config', default=None,
                       help='Path to YAML configuration file')
   parser.add_argument('-d', '--debug', type=int, default=None,

@@ -1118,9 +1118,6 @@ class Window(QWidget):
     """Set activity level if higher than current, and update tab/tree colors."""
     if self._is_active_window():
       return  # don't mark the window the user is looking at
-    # Suppress during local DB history replay (not bouncer playback)
-    if hasattr(self, '_deferred_replay') or hasattr(self, '_bg_replay'):
-      return
     if level <= self._activity:
       return  # don't downgrade
     self._activity = level
