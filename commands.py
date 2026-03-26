@@ -171,6 +171,8 @@ class Commands:
       conn.msg(recip, chunk)
       if existing and existing.window:
         existing.window.addline_msg(conn.nickname, chunk)
+      else:
+        window.redmessage('[-> %s] %s' % (recip, chunk))
 
   def me(window, text):
     """/me <action> — send a CTCP ACTION to the current channel or query."""
@@ -1173,16 +1175,16 @@ class Commands:
     while rest:
       if rest[0] == '-n' and len(rest) > 1:
         rest.pop(0)
-        nick_mask = rest.pop(0)
+        nick_mask = _unquote(rest.pop(0))
       elif rest[0] == '-c' and len(rest) > 1:
         rest.pop(0)
-        channel_filter = rest.pop(0)
+        channel_filter = _unquote(rest.pop(0))
       elif rest[0] == '-k' and len(rest) > 1:
         rest.pop(0)
-        network_filter = rest.pop(0)
+        network_filter = _unquote(rest.pop(0))
       elif rest[0] == '-s' and len(rest) > 1:
         rest.pop(0)
-        sound = rest.pop(0)
+        sound = _unquote(rest.pop(0))
       elif rest[0] == '-d':
         rest.pop(0)
         desktop = True
@@ -1233,7 +1235,7 @@ class Commands:
       'desktop': desktop,
       'highlight_tab': highlight_tab,
       'suppress': suppress,
-      'window': window,
+      'window': None,  # resolved at event time, not registration time
     }
     parts = [event, '"%s"' % hookname]
     if nick_mask:
@@ -1352,9 +1354,25 @@ class Commands:
   quote = raw  # /quote is a common alias
 
   def echo(window, text):
-    """Print text to a window.  /echo [-w target] text"""
+    """Print text to a window.  /echo [-w target] [-s] [-a] text
+    -s sends to the server/status window for the current network.
+    -a sends to the currently active/visible window."""
     target = window
-    if text.startswith('-w '):
+    if text.startswith('-a ') or text == '-a':
+      text = text[2:].lstrip()
+      sub = state.app.mainwin.workspace.activeSubWindow()
+      if sub and sub.widget():
+        target = sub.widget()
+    elif text.startswith('-s ') or text == '-s':
+      text = text[2:].lstrip()
+      if window and hasattr(window, 'client') and window.client:
+        target = window.client.window
+      elif state.clients:
+        for c in state.clients:
+          if c.window:
+            target = c.window
+            break
+    elif text.startswith('-w '):
       rest = text[3:].lstrip()
       parts = rest.split(None, 1)
       if parts:
@@ -1365,7 +1383,7 @@ class Commands:
         else:
           window.redmessage('[No such window: %s]' % parts[0])
           return
-    target.addline(_unquote(text), state.infofmt)
+    target.addline(_unquote(text), state.infoformat)
 
   def stdout(window, text):
     """Write text to stdout."""
@@ -2256,6 +2274,27 @@ def _tokenize(s, max_tokens=0):
   return tokens
 
 
+class TokenizedString(str):
+  """A string subclass that carries pre-parsed tokens.
+
+  Behaves exactly like a regular str, but also has a .tokens attribute
+  containing the result of _tokenize(). Plugins can use msg.tokens to
+  get quote-aware parsed parameters without re-parsing.
+  """
+  __slots__ = ('_tokens',)
+
+  def __new__(cls, s, tokens=None):
+    obj = str.__new__(cls, s)
+    obj._tokens = tokens
+    return obj
+
+  @property
+  def tokens(self):
+    if self._tokens is None:
+      self._tokens = _tokenize(self)
+    return self._tokens
+
+
 def _split_quoted(s):
   """Extract the first quoted or unquoted token from *s*.
   Returns (token, rest) where token has quotes stripped."""
@@ -2783,7 +2822,7 @@ def expand_window_title(fmt, window):
 def docommand(window, command, text=""):
   command = command.strip().lower()
   # Expand {variables} in the argument text (skip for /set which stores raw values)
-  if text and command not in ('config', 'title'):
+  if text and command not in ('config', 'title', 'on'):
     from config import _expand_vars
     variables = _window_context_vars(window)
     variables.update(state._variables)  # user vars override built-ins
@@ -2792,6 +2831,9 @@ def docommand(window, command, text=""):
   # Map keywords that can't be method names
   if command == 'exec':
     command = 'exec_'
+  # Wrap text as TokenizedString so command handlers and plugins get .tokens
+  if text and not isinstance(text, TokenizedString):
+    text = TokenizedString(text)
   if hasattr(Commands, command) and not command.startswith("_"):
     getattr(Commands, command)(window, text)
   else:

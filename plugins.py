@@ -421,9 +421,25 @@ def _dispatch_to_plugins(name, conn, args, kwargs):
     traceback.print_exc()
   return False
 
+# Events where the last positional arg is a message/text to tokenize
+_TOKENIZE_EVENTS = {
+  'chanmsg': 2,     # (user, channel, message) -> index 2
+  'privmsg': 1,     # (user, message) -> index 1
+  'noticed': 2,     # (user, channel, message) -> index 2
+  'action': 2,      # (user, channel, data) -> index 2
+}
+
 def _make_hook(name, original):
   """Wrap an IRCClient event method to dispatch to plugin hooks first."""
   def hooked(self, *args, **kwargs):
+    # Wrap message args with TokenizedString for plugin access
+    if name in _TOKENIZE_EVENTS:
+      idx = _TOKENIZE_EVENTS[name]
+      if len(args) > idx and isinstance(args[idx], str):
+        from commands import TokenizedString
+        args = list(args)
+        args[idx] = TokenizedString(args[idx])
+        args = tuple(args)
     if _dispatch_to_plugins(name, self, args, kwargs):
       return
     return original(self, *args, **kwargs)

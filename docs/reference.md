@@ -82,7 +82,7 @@ Parameters that accept arbitrary text (messages, reasons, titles) must be quoted
 | `/openurl` | `/openurl <url>` | Open a URL in the system browser |
 | `/clipboard` | `/clipboard <text>` | Copy text to the system clipboard |
 | `/quote` | `/quote <line>` | Alias for `/raw` |
-| `/echo` | `/echo [-w target] <text>` | Print text to the current window (or target window with `-w`) |
+| `/echo` | `/echo [-w target] [-s] [-a] <text>` | Print text to current window, target (`-w`), server (`-s`), or active (`-a`) window |
 | `/log` | `/log [-w target] "text"` | Write a line to the log file for the current window (or target) |
 | `/alert` | `/alert [-t "title"] "message"` | Show a popup message box (default title: "qtpyrc") |
 | `/stdout` | `/stdout <text>` | Write text to stdout |
@@ -537,6 +537,9 @@ Use `-p` to persist a hook across restarts (appends to the startup script), or a
 | `part` | A user leaves a channel | The nick |
 | `quit` | A user quits IRC | The nick |
 | `kick` | A user is kicked from a channel | The nick |
+| `kicked` | You are kicked from a channel | — |
+| `myjoined` | You join a channel | — |
+| `myleft` | You leave a channel | — |
 | `nick` | A user changes their nick | The old nick |
 | `topic` | A channel topic is changed | The nick |
 | `mode` | A channel mode is changed | The nick |
@@ -568,6 +571,9 @@ These variables are expanded in the command string. All events also provide `{ne
 | `nick` | `{oldnick}` `{newnick}` `{nick}` |
 | `topic` | `{nick}` `{channel}` `{topic}` |
 | `mode` | `{nick}` `{channel}` `{modes}` `{args}` |
+| `myjoined` | `{channel}` |
+| `myleft` | `{channel}` |
+| `kicked` | `{channel}` `{kicker}` `{nick}` `{message}` |
 | `disconnect` | `{reason}` |
 | `rawcmd` | `{prefix}` `{command}` `{params}` |
 | `numeric` | `{command}` `{prefix}` `{params}` |
@@ -725,6 +731,39 @@ Class = MyPlugin
 ```
 
 For a full working example, see the **triviabot** plugin in `plugins/triviabot/__init__.py`. It demonstrates channel message handling, config fields, timers, fuzzy matching, mIRC colors, and per-channel allow/block lists.
+
+### TokenizedString — Pre-parsed Message Parameters
+
+Message strings passed to plugin hooks (`chanmsg`, `privmsg`, `noticed`, `action`) and command handler `text` arguments are `TokenizedString` instances — a `str` subclass with a `.tokens` property that provides quote-aware tokenization.
+
+```python
+def chanmsg(self, irc, conn, user, channel, message):
+    # message is a regular string: "!play \"song name\" loud"
+    # message.tokens is a parsed list: ['!play', 'song name', 'loud']
+    tokens = message.tokens
+    if tokens and tokens[0] == '!play':
+        song = tokens[1] if len(tokens) > 1 else ''
+```
+
+Tokenization rules:
+- Whitespace separates tokens
+- `"quoted strings"` and `'single quoted'` are single tokens with quotes stripped
+- `\"` inside quotes produces a literal quote
+- `\\` produces a literal backslash
+- `.tokens` is lazy — only parsed on first access
+
+This also works with `argparse`:
+
+```python
+import argparse
+parser = argparse.ArgumentParser(prog='!cmd', exit_on_error=False)
+parser.add_argument('target')
+parser.add_argument('-v', '--verbose', action='store_true')
+try:
+    args = parser.parse_args(message.tokens[1:])
+except (SystemExit, argparse.ArgumentError):
+    return
+```
 
 ### `irc.on()` — Registering Hooks from Plugins
 

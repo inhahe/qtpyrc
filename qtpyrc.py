@@ -37,14 +37,14 @@ if sys.platform == 'win32':
   except Exception:
     pass
 
-os.environ.setdefault('QT_LOGGING_RULES', 'qt.text.font.db=false;qt.qpa.fonts=false')
+os.environ.setdefault('QT_LOGGING_RULES', 'qt.text.font.db=false;qt.qpa.fonts=false;qt.gui.imageio=false')
 
 from PySide6.QtWidgets import *
 from PySide6.QtGui import *
 from PySide6.QtCore import *
 
 APP_NAME = 'qtpyrc'
-APP_VERSION = '1.2.2'
+APP_VERSION = '1.2.3'
 
 import state
 from config import loadconfig, UIState
@@ -465,7 +465,6 @@ def _bg_replay_tick():
           del window._deferred_replay
         _bg_replay_queue.pop(0)
         continue
-      window._suppress_activity = True
       window._bg_replay = {
         'rows': rows,
         'index': 0,
@@ -534,7 +533,6 @@ def _bg_replay_tick():
       del window._bg_replay
       if hasattr(window, '_deferred_replay'):
         del window._deferred_replay
-      window._suppress_activity = False
       _bg_replay_queue.pop(0)
       _bg_replay_done += 1
       _update_replay_status()
