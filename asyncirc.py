@@ -1241,3 +1241,17 @@ class IRCClient:
                     self.versionName,
                     self.versionNum or '',
                     self.versionEnv or ''))])
+
+    def ctcp_PrivFINGER(self, user, data):
+        if self.fingerReply is not None:
+            reply = self.fingerReply
+        elif self.versionName:
+            reply = '%s %s' % (self.versionName, self.versionNum or '')
+        else:
+            reply = self.nickname
+        self.ctcpMakeReply(user.split('!')[0], [('FINGER', reply)])
+
+    def ctcp_PrivTIME(self, user, data):
+        import time as _time
+        self.ctcpMakeReply(user.split('!')[0],
+            [('TIME', _time.strftime('%a %b %d %H:%M:%S %Y'))])

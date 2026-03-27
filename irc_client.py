@@ -105,6 +105,8 @@ def _history_replay(window, network, channel, limit=None, chan_obj=None):
   rows = db.get_last(network, channel.lower(), limit)
   if not rows:
     return
+  window._replay_queue = []  # queue live messages during replay
+  window._in_replay = True
   show_prefix = state.config.show_mode_prefix_messages
   history = chan_obj.history if chan_obj else None
   for ts, etype, nick, text, prefix in rows:
@@ -150,7 +152,9 @@ def _history_replay(window, network, channel, limit=None, chan_obj=None):
       except (ValueError, TypeError):
         pass
       history.append(msg)
+  window._in_replay = False
   window.add_separator(" End of saved history ")
+  window._flush_replay_queue()
 
 
 class IRCClient(asyncirc.IRCClient):
@@ -158,6 +162,27 @@ class IRCClient(asyncirc.IRCClient):
   def __init__(self, client):
     super().__init__()
     self.client = client
+    # CTCP responses from config — expanded with normal {variables}
+    from qtpyrc import APP_NAME, APP_VERSION
+    from config import _expand_vars
+    ver = state.config.ctcp_version
+    if ver:
+      variables = {'app_version': APP_VERSION, 'me': self.nickname or '',
+                   'network': client.network_key or ''}
+      self.versionName = _expand_vars(ver, variables)
+      self.versionNum = ''
+      self.versionEnv = ''
+    else:
+      self.versionName = APP_NAME
+      self.versionNum = APP_VERSION
+      self.versionEnv = 'Python/%s PySide6' % __import__('sys').version.split()[0]
+    finger = state.config.ctcp_finger
+    if finger:
+      variables = {'app_version': APP_VERSION, 'me': self.nickname or '',
+                   'network': client.network_key or ''}
+      self.fingerReply = _expand_vars(finger, variables)
+    else:
+      self.fingerReply = None
     self.window = client.window
     self.channels = client.channels
     self.queries = client.queries
@@ -1068,10 +1093,12 @@ class IRCClient(asyncirc.IRCClient):
                               timestamp_override=ts)
     if not self._in_playback_batch() and state.notifications:
       state.notifications.fire('notice', 'Notice from %s' % nick, message)
-    # Link previews for notices
+    # Link previews for notices (defer during replay)
     if not self._in_playback_batch():
       from link_preview import check_and_preview
-      check_and_preview(target_win, message)
+      if not target_win.queue_replay_callback(
+          lambda w=target_win, m=message: check_and_preview(w, m)):
+        check_and_preview(target_win, message)
 
   def action(self, user, channel, data):
     if is_ignored(user, self.client.network_key, channel):
@@ -1142,6 +1169,8 @@ class IRCClient(asyncirc.IRCClient):
         chan.key = pending_key
       self.channels[chnlower] = chan
       # Defer history replay — background drip-feed, or immediate on activation
+      # Queue live messages until replay finishes
+      chan.window._replay_queue = []
       chan.window._deferred_replay = (self.client.network, chname, chan)
       from qtpyrc import _queue_bg_replay
       _queue_bg_replay(chan.window, self.client.network, chname, chan)
@@ -1283,10 +1312,12 @@ class IRCClient(asyncirc.IRCClient):
             state.notifications.fire('highlight', '%s in %s' % (nick, channel), message)
       else:
         chan.window.set_activity(Window.ACTIVITY_MESSAGE)
-      # Link previews (skip during playback)
+      # Link previews (skip during playback; defer during replay)
       if not self._in_playback_batch():
         from link_preview import check_and_preview
-        check_and_preview(chan.window, message)
+        if not chan.window.queue_replay_callback(
+            lambda w=chan.window, m=message: check_and_preview(w, m)):
+          check_and_preview(chan.window, message)
 
   def userJoined(self, nickidhost, channel):
     uobj, nick, ident, host = self._parse_user(nickidhost)

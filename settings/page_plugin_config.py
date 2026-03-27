@@ -49,7 +49,15 @@ class SinglePluginConfigPage(QWidget):
                 choices = field[4] if len(field) > 4 else None
                 value = plugin_data.get(key, default)
                 widget = self._make_widget(typ, value, desc, choices)
-                self._form.addRow(desc + ':', widget)
+                if '\n' in desc:
+                    from PySide6.QtWidgets import QLabel
+                    from PySide6.QtCore import Qt
+                    label = QLabel(desc + ':')
+                    label.setWordWrap(True)
+                    label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                    self._form.addRow(label, widget)
+                else:
+                    self._form.addRow(desc + ':', widget)
                 self._widgets[key] = (widget, typ, choices)
         else:
             # No schema — show raw key/value pairs
