@@ -44,7 +44,7 @@ from PySide6.QtGui import *
 from PySide6.QtCore import *
 
 APP_NAME = 'qtpyrc'
-APP_VERSION = '1.2.4'
+APP_VERSION = '1.2.4'  # fallback; overridden by config app_version if set
 
 import state
 from config import loadconfig, UIState
@@ -465,6 +465,7 @@ def _bg_replay_tick():
           del window._deferred_replay
         _bg_replay_queue.pop(0)
         continue
+      window._replay_queue = []  # queue live messages during replay
       window._bg_replay = {
         'rows': rows,
         'index': 0,
@@ -480,6 +481,7 @@ def _bg_replay_tick():
     history = bg['chan_obj'].history if bg['chan_obj'] else None
 
     # Batch all insertions to suppress per-line document relayout
+    window._in_replay = True
     window.cur.beginEditBlock()
     try:
       for i in range(idx, end):
@@ -523,6 +525,7 @@ def _bg_replay_tick():
             t = datetime.now()
           history.append(HistoryMessage(None, nick, text, etype, prefix=prefix, time=t))
     finally:
+      window._in_replay = False
       window.cur.endEditBlock()
 
     bg['index'] = end
@@ -533,6 +536,8 @@ def _bg_replay_tick():
       del window._bg_replay
       if hasattr(window, '_deferred_replay'):
         del window._deferred_replay
+      # Flush any live messages that arrived during replay
+      window._flush_replay_queue()
       _bg_replay_queue.pop(0)
       _bg_replay_done += 1
       _update_replay_status()
@@ -591,9 +596,54 @@ def _on_subwindow_activated(subwindow):
     # Cancel any in-progress background replay
     bg = getattr(widget, '_bg_replay', None)
     if bg:
+      # Background replay was partial — finish it immediately
+      # Continue from where background left off
+      rows = bg['rows']
+      idx = bg['index']
+      remaining = rows[idx:]
       del widget._bg_replay
-    _history_replay(widget, network, chname, chan_obj=chan)
-    widget.add_separator(' End of saved history ')
+      if remaining:
+        widget._in_replay = True
+        show_prefix = state.config.show_mode_prefix_messages
+        history = bg['chan_obj'].history if bg['chan_obj'] else None
+        for ts, etype, nick, text, prefix in remaining:
+          ts_short = ts[11:16]
+          pn = (prefix + nick) if (show_prefix and prefix and nick) else nick
+          if etype == 'message':
+            widget.addline_msg(pn, text, timestamp_override=ts_short)
+          elif etype == 'action':
+            widget.addline_nick(["* ", (pn,), " %s" % text], state.actionformat,
+                                timestamp_override=ts_short)
+          elif etype == 'notice':
+            widget.addline_nick(["-", (pn,), "- %s" % text], state.noticeformat,
+                                timestamp_override=ts_short)
+          elif etype == 'join':
+            widget.addline_nick(["* ", (pn,), " has joined %s" % (text or chname)],
+                                state.infoformat, timestamp_override=ts_short)
+          elif etype == 'part':
+            widget.addline_nick(["* ", (pn,), " has left %s" % (text or chname)],
+                                state.infoformat, timestamp_override=ts_short)
+          elif etype == 'quit':
+            widget.addline_nick(["* ", (pn,), " has quit (%s)" % (text or "")],
+                                state.infoformat, timestamp_override=ts_short)
+          elif etype == 'kick':
+            widget.addline(text or '', state.infoformat, timestamp_override=ts_short)
+          elif etype == 'nick':
+            widget.addline_nick(["* ", (pn,), " is now known as ", (text or '?',)],
+                                state.infoformat, timestamp_override=ts_short)
+          elif etype == 'topic':
+            widget.addline_nick(["* ", (pn,), " changed the topic to: %s" % (text or '')],
+                                state.infoformat, timestamp_override=ts_short)
+          elif etype == 'mode':
+            widget.addline_nick(["* ", (pn,), " %s" % text], state.infoformat,
+                                timestamp_override=ts_short)
+        widget._in_replay = False
+      widget.add_separator(' End of saved history ')
+      widget._flush_replay_queue()
+    else:
+      # No background replay was started — do full replay
+      # _history_replay adds the separator and flushes the queue
+      _history_replay(widget, network, chname, chan_obj=chan)
   # Clear activity highlight on the now-active window
   if hasattr(widget, 'clear_activity'):
     widget.clear_activity()
@@ -1122,11 +1172,49 @@ def makeapp(args):
   app.mainwin._titlebar_timer = QTimer()
   app.mainwin._titlebar_timer.timeout.connect(_update_all_titles)
   app.mainwin._titlebar_timer.start(state.config.titlebar_interval * 1000)
-  app.mainwin.resize(1024, 768)
-  if state.config.window_mode == 'maximized':
-    app.mainwin.showMaximized()
+  # Restore window geometry
+  mode = state.config.window_mode
+  geo = state.ui_state.window_geometry if state.ui_state else None
+  was_max = state.ui_state.window_maximized if state.ui_state else False
+  was_min = state.ui_state.window_minimized if state.ui_state else False
+  will_maximize = (mode == 'maximized') or (mode == 'remember' and was_max)
+  will_minimize = (mode == 'minimized') or (mode == 'remember' and was_min)
+
+  if not will_maximize:
+    if geo:
+      x, y, w, h = geo
+      # Clamp to available screen geometry
+      from PySide6.QtGui import QGuiApplication
+      screen = QGuiApplication.primaryScreen()
+      if screen:
+        avail = screen.availableGeometry()
+        if w > avail.width():
+          w = avail.width()
+        if h > avail.height():
+          h = avail.height()
+        if x + w < avail.x() + 50:
+          x = avail.x()
+        if y + h < avail.y() + 50:
+          y = avail.y()
+        if x > avail.x() + avail.width() - 50:
+          x = avail.x() + avail.width() - w
+        if y > avail.y() + avail.height() - 50:
+          y = avail.y() + avail.height() - h
+        x = max(x, avail.x())
+        y = max(y, avail.y())
+      app.mainwin.setGeometry(x, y, w, h)
+    else:
+      app.mainwin.resize(1024, 768)
+    if will_minimize:
+      app.mainwin.showMinimized()
+    else:
+      app.mainwin.show()
   else:
-    app.mainwin.show()
+    if will_minimize:
+      app.mainwin.showMaximized()
+      app.mainwin.showMinimized()
+    else:
+      app.mainwin.showMaximized()
   app.mainwin.raise_()
   app.mainwin.activateWindow()
   app.lastWindowClosed.connect(quit)
@@ -1243,7 +1331,14 @@ def quit():
   _quitting = True
   if state.dcc_manager:
     state.dcc_manager.cleanup()
-  if state.ui_state:
+  # Save window geometry before closing
+  if state.ui_state and hasattr(state.app, 'mainwin'):
+    mw = state.app.mainwin
+    state.ui_state.window_maximized = mw.isMaximized()
+    state.ui_state.window_minimized = mw.isMinimized()
+    if not mw.isMaximized() and not mw.isMinimized():
+      g = mw.geometry()
+      state.ui_state.window_geometry = [g.x(), g.y(), g.width(), g.height()]
     state.ui_state.save()
   # Cancel all async tasks first so IRC handlers stop processing
   loop = asyncio.get_event_loop()
@@ -1707,6 +1802,11 @@ if __name__ == '__main__':
           % os.path.dirname(os.path.abspath(configpath)))
     _init_config(mypath, configpath, cli_args.set_opts)
   state.config = loadconfig(configpath)
+
+  # Update APP_VERSION from config if set
+  if state.config.app_version:
+    import sys
+    sys.modules[__name__].APP_VERSION = state.config.app_version
 
   # Apply --set overrides
   if cli_args.set_opts:

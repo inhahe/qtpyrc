@@ -25,6 +25,7 @@ import time
 from PySide6.QtCore import QTimer
 
 import plugin
+import state
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +222,7 @@ class TriviaBot(plugin.Callbacks):
         key = self._game_key(conn, channel)
         if key in self._games:
             self._msg(conn, channel, '%s Trivia is already running! Use %s stop to end it.' % (
-                _bold('[!]'), self._cfg('command_prefix', '!trivia')))
+                _bold('[!]'), (state.config.plugin_prefix + 'trivia') if state.config.plugin_prefix else self._cfg('command_prefix', '!trivia')))
             return
         questions = self._get_questions(topic)
         if not questions:
@@ -245,7 +246,7 @@ class TriviaBot(plugin.Callbacks):
         }
         self._games[key] = game
         topic_str = ' (%s)' % _c(self._cfg('color_question', 3), topic) if topic else ''
-        prefix = self._cfg('command_prefix', '!trivia')
+        prefix = (state.config.plugin_prefix + 'trivia') if state.config.plugin_prefix else self._cfg('command_prefix', '!trivia')
         self._msg(conn, channel, '%s Trivia started%s! %d questions loaded. Type your answers!' % (
             _bold('[TRIVIA]'), topic_str, len(questions)))
         self._msg(conn, channel, '  Commands: %s start [topic], %s stop, %s next, '
@@ -368,7 +369,7 @@ class TriviaBot(plugin.Callbacks):
     def chanmsg(self, irc, conn, user, channel, message):
         nick = user.split('!', 1)[0]
         msg = message.strip()
-        prefix = self._cfg('command_prefix', '!trivia')
+        prefix = (state.config.plugin_prefix + 'trivia') if state.config.plugin_prefix else self._cfg('command_prefix', '!trivia')
         if prefix and msg.lower().startswith(prefix.lower()):
             args = msg[len(prefix):].strip().split(None, 1)
             cmd = args[0].lower() if args else ''

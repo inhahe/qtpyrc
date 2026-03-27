@@ -533,6 +533,8 @@ class AppConfig:
     self.data = ConfigNode(data)  # read-only chained access: config.data.font.family
 
     # --- top-level scalars (with defaults) ---
+    self.app_version = data.get('app_version', '')
+
     self.input_lines = max(1, min(10, int(data.get('input_lines', 1))))
     # Legacy compat: multiline_input: true -> input_lines: 3 (if not explicitly set)
     if 'input_lines' not in data and data.get('multiline_input', False):
@@ -541,6 +543,7 @@ class AppConfig:
     # Tab completion: max age in seconds for prioritizing nicks (0 = no limit)
     self.tab_complete_age = data.get('tab_complete_age', 0)
     self.cmdprefix = data.get('command_prefix', '/')
+    self.plugin_prefix = data.get('plugin_prefix', '!')
     self.popups_file = data.get('popups_file', '')
     self.variables_file = data.get('variables_file', '')
     self.external_editor = data.get('external_editor', '')
@@ -553,7 +556,7 @@ class AppConfig:
     self._legacy_toolbar_font_size = data.get('toolbar_font_size', None)
     self._legacy_toolbar_separator_color = data.get('toolbar_separator_color', None)
     self._legacy_toolbar_foreground_color = data.get('toolbar_foreground_color', None)
-    self.window_mode = _choice(data.get('window_mode'), {'maximized', 'normal'}, 'maximized')
+    self.window_mode = _choice(data.get('window_mode'), {'maximized', 'normal', 'minimized', 'remember'}, 'remember')
     self.titlebar_format = data.get('titlebar_format', '')
     self.titlebar_interval = max(float(data.get('titlebar_interval', 1)), 0.1)
 
@@ -706,6 +709,11 @@ class AppConfig:
     self.user = data.get('user', self.nick)
     self.realname = data.get('realname', self.nick)
     self.nickname = data.get('nickname', self.nick)    # display / compat
+
+    # CTCP responses
+    ctcp = data.get('ctcp') or {}
+    self.ctcp_version = ctcp.get('version', '')
+    self.ctcp_finger = ctcp.get('finger', '')
 
     self.auto_connect = data.get('auto_connect', False)
     self.persist_autojoins = data.get('persist_autojoins', False)
@@ -1155,6 +1163,33 @@ class UIState:
   @input_history.setter
   def input_history(self, history):
     self._data['input_history'] = list(history)
+
+  # -- window geometry --
+
+  @property
+  def window_geometry(self):
+    """Return [x, y, width, height] or None."""
+    return self._data.get('window_geometry')
+
+  @window_geometry.setter
+  def window_geometry(self, rect):
+    self._data['window_geometry'] = list(rect) if rect else None
+
+  @property
+  def window_maximized(self):
+    return bool(self._data.get('window_maximized', False))
+
+  @window_maximized.setter
+  def window_maximized(self, val):
+    self._data['window_maximized'] = bool(val)
+
+  @property
+  def window_minimized(self):
+    return bool(self._data.get('window_minimized', False))
+
+  @window_minimized.setter
+  def window_minimized(self, val):
+    self._data['window_minimized'] = bool(val)
 
   def save(self):
     _atomic_yaml_save(self._yaml, self._data, self.path)

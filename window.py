@@ -788,10 +788,13 @@ class Window(QWidget):
     self.output.setReadOnly(True)
     self.output.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
     _chatfont = QFont(state.config.fontfamily, state.config.fontheight)
-    # Fallback chain: configured font -> monochrome symbol fonts before color emoji
+    # Insert Segoe UI Symbol early in the fallback chain so monochrome
+    # symbols are preferred over oversized color emoji.  Qt continues
+    # searching all system fonts after this list is exhausted.
     _chatfont.setFamilies([
       state.config.fontfamily,
       'Segoe UI Symbol',
+      'Segoe UI',
     ])
     self.output.setFont(_chatfont)
     # Set default document font explicitly
@@ -819,6 +822,9 @@ class Window(QWidget):
     self._search_bar.setVisible(False)
 
     self._build_layout()
+
+    self._replay_queue = None  # list of (method_name, args, kwargs) during replay
+    self._in_replay = False    # True while replay is actively inserting lines
 
     self.inputhistory = list(state.ui_state.input_history) if state.ui_state else []
     self._history_index = -1
@@ -915,8 +921,40 @@ class Window(QWidget):
     line = '\u2500' * side + ' ' + label + ' ' + '\u2500' * side
     self.cur.insertText(line, sep_fmt)
 
+  def _queue_if_replaying(self, method_name, args, kwargs):
+    """If replay is in progress, queue this call for after replay finishes.
+    Returns True if queued, False if should proceed normally."""
+    if self._replay_queue is not None and not self._in_replay:
+      self._replay_queue.append((method_name, args, kwargs))
+      return True
+    return False
+
+  def queue_replay_callback(self, callback):
+    """Queue an arbitrary callback to run after replay finishes.
+    Used by IRC handlers to defer side effects (link previews, etc.).
+    Returns True if queued, False if no replay in progress."""
+    if self._replay_queue is not None and not self._in_replay:
+      self._replay_queue.append(('_run_callback', (callback,), {}))
+      return True
+    return False
+
+  def _run_callback(self, callback):
+    """Execute a queued callback."""
+    callback()
+
+  def _flush_replay_queue(self):
+    """Flush queued live messages after replay finishes."""
+    if self._replay_queue is None:
+      return
+    queue = self._replay_queue
+    self._replay_queue = None
+    for method_name, args, kwargs in queue:
+      getattr(self, method_name)(*args, **kwargs)
+
   def addline(self, line, fmt=None, timestamp_override=None):
     if not self._widget_alive(): return
+    if self._queue_if_replaying('addline', (line,), {'fmt': fmt, 'timestamp_override': timestamp_override}):
+      return
     if self.cur.position():
       self.cur.insertText('\n')
     if timestamp_override:
@@ -937,6 +975,8 @@ class Window(QWidget):
     *fmt* is an optional QTextCharFormat for the base text color.
     """
     if not self._widget_alive(): return
+    if self._queue_if_replaying('addline_nick', (parts,), {'fmt': fmt, 'timestamp_override': timestamp_override}):
+      return
     cur = self.cur
     if cur.position():
       cur.insertText('\n')
@@ -976,6 +1016,8 @@ class Window(QWidget):
   def addline_msg(self, nick, message, timestamp_override=None):
     """Add a <nick> message line with the nick as a right-clickable anchor."""
     if not self._widget_alive(): return
+    if self._queue_if_replaying('addline_msg', (nick, message), {'timestamp_override': timestamp_override}):
+      return
     cur = self.cur
     if cur.position():
       cur.insertText('\n')
@@ -1091,6 +1133,8 @@ class Window(QWidget):
 
   def redmessage(self, text):
     if not self._widget_alive(): return
+    if self._queue_if_replaying('redmessage', (text,), {}):
+      return
     if self.cur.position():
       self.cur.insertText('\n')
     self._insert_timestamp()

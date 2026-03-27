@@ -430,6 +430,16 @@ class Commands:
       return
     window.client.conn.do_whois(target, window)
 
+  def whowas(window, text):
+    target = text.strip()
+    if not target:
+      window.redmessage("[Error: /whowas requires a nick]")
+      return
+    if not window.client.conn:
+      window.redmessage("[Error: not connected]")
+      return
+    window.client.conn.sendLine("WHOWAS %s" % target)
+
   def invite(window, text):
     """/invite <nick> [#channel]
     If no channel given, uses the current channel."""
@@ -2808,6 +2818,8 @@ def _window_context_vars(window):
   v['window_type'] = getattr(window, 'type', '')
   v['networks'] = str(sum(1 for c in (state.clients or []) if c.hostname))
   v['channels'] = str(sum(len(c.channels) for c in (state.clients or [])))
+  from qtpyrc import APP_VERSION
+  v['app_version'] = APP_VERSION
   return v
 
 
