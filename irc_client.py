@@ -159,6 +159,23 @@ def _history_replay(window, network, channel, limit=None, chan_obj=None):
 
 class IRCClient(asyncirc.IRCClient):
 
+  # /on hooks (and plugins) can populate this for the duration of one
+  # event dispatch via plugins._make_hook. See _hook_notify / _hook_activity.
+  _suppress_flags = frozenset()
+
+  def _hook_notify(self, *args, **kwargs):
+    """Fire a notification unless the active /on hook suppressed it."""
+    if 'notify' in self._suppress_flags:
+      return
+    if state.notifications:
+      state.notifications.fire(*args, **kwargs)
+
+  def _hook_activity(self, window, level):
+    """Set window activity unless the active /on hook suppressed it."""
+    if 'activity' in self._suppress_flags:
+      return
+    window.set_activity(level)
+
   def __init__(self, client):
     super().__init__()
     self.client = client
@@ -528,6 +545,35 @@ class IRCClient(asyncirc.IRCClient):
     self.window.addline(text)
     return self.window
 
+  def _route_chan_error(self, params):
+    """Route a channel-targeted numeric error to the channel's window,
+    falling back to the server window. Expects params shaped like
+    [my_nick, #channel, ...message]."""
+    text = ' '.join(p for p in params[1:] if p)
+    if len(params) >= 2:
+      chnlower = self.irclower(params[1])
+      chan = self.client.channels.get(chnlower)
+      if chan and chan.window:
+        chan.window.redmessage(text)
+        return chan.window
+    self.window.redmessage(text)
+    return self.window
+
+  def irc_ERR_CANNOTSENDTOCHAN(self, prefix, params):
+    # 404: [me, #channel, "Cannot send to channel ..."]
+    self._route_chan_error(params)
+
+  def irc_ERR_NOCHANMODES(self, prefix, params):
+    # 477 — modern IRCds reuse this as ERR_NEEDREGGEDNICK
+    # ("You need to be identified to a registered nickname")
+    self._route_chan_error(params)
+
+  def irc_ERR_NOTONCHANNEL(self, prefix, params):     self._route_chan_error(params)  # 442
+  def irc_ERR_CHANNELISFULL(self, prefix, params):    self._route_chan_error(params)  # 471
+  def irc_ERR_INVITEONLYCHAN(self, prefix, params):   self._route_chan_error(params)  # 473
+  def irc_ERR_BANNEDFROMCHAN(self, prefix, params):   self._route_chan_error(params)  # 474
+  def irc_ERR_BADCHANNELKEY(self, prefix, params):    self._route_chan_error(params)  # 475
+
   def irc_ERR_NOSUCHNICK(self, prefix, params):
     # Suppress for bouncer targets (*status, *perform, etc.)
     if len(params) >= 2 and params[1].startswith('*'):
@@ -549,7 +595,9 @@ class IRCClient(asyncirc.IRCClient):
     self._route_nick_error(params)
 
   def irc_unknown(self, prefix, command, params):
-    self.window.addline(' '.join(params[1:]))
+    text = ' '.join(p for p in params[1:] if p)
+    if text.strip():
+      self.window.addline(text)
 
   def invited(self, nick, channel):
     self.window.addline("[%s invited you to %s]" % (nick, channel))
@@ -797,7 +845,20 @@ class IRCClient(asyncirc.IRCClient):
     w = self._whois_window(params)
     nick = params[1] if len(params) > 1 else '?'
     channels = params[2] if len(params) > 2 else ''
-    w.addline("[%s] channels: %s" % (nick, channels))
+    parts = ["[%s] channels: " % nick]
+    first = True
+    for tok in channels.split():
+      if not first:
+        parts.append(' ')
+      first = False
+      # Strip leading mode-prefix symbols (@%+~&) for the join target,
+      # but display the original token so ops/voice marks remain visible.
+      bare = tok.lstrip('~&@%+')
+      if bare.startswith(('#', '&', '!', '+')):
+        parts.append((tok, 'chan:' + bare))
+      else:
+        parts.append(tok)
+    w.addline_nick(parts)
 
   def irc_RPL_ENDOFWHOIS(self, prefix, params):
     # params: [me, nick, "End of /WHOIS list"]
@@ -926,8 +987,7 @@ class IRCClient(asyncirc.IRCClient):
       if dlg:
         dlg.update_access_denied(channel)
         return
-    # Default: show in server window
-    self.window.addline(' '.join(params[1:]))
+    self._route_chan_error(params)
 
   # --- Channel list numerics ---
 
@@ -1053,7 +1113,9 @@ class IRCClient(asyncirc.IRCClient):
                    'RPL_ADMINME', 'RPL_ADMINLOC', 'RPL_STANTSONLINE', 'RPL_TRYAGAIN', 'ERROR', '265', '266',
                    'RPL_MOTD', 'RPL_ENDOFMOTD', 'RPL_LUSEROP', 'RPL_LUSERCHANNELS', 'RPL_MOTDSTART',
                    'RPL_ISUPPORT'):
-      text = ' '.join(params[1:])
+      text = ' '.join(p for p in params[1:] if p)
+      if not text.strip():
+        return  # don't show empty timestamp-only lines
       self.window.addline(text)
       state.irclogger.log_server(self.client.network or getattr(self.client, 'hostname', '') or '', text)
       if not self._in_playback_batch():
@@ -1076,7 +1138,7 @@ class IRCClient(asyncirc.IRCClient):
       target_win = chan.window
       target_win.addline_nick(["-", (pn,), "- %s" % message], state.noticeformat,
                               timestamp_override=ts)
-      target_win.set_activity(Window.ACTIVITY_MESSAGE)
+      self._hook_activity(target_win, Window.ACTIVITY_MESSAGE)
       if not self._in_playback_batch():
         _history_save(self.client.network, channel, 'notice', nick, message,
                       prefix=self._nick_prefix(nick, channel))
@@ -1091,8 +1153,8 @@ class IRCClient(asyncirc.IRCClient):
           target_win = aw
       target_win.addline_nick(["-", (nick,), "- %s" % message], state.noticeformat,
                               timestamp_override=ts)
-    if not self._in_playback_batch() and state.notifications:
-      state.notifications.fire('notice', 'Notice from %s' % nick, message)
+    if not self._in_playback_batch():
+      self._hook_notify('notice', 'Notice from %s' % nick, message)
     # Link previews for notices (defer during replay)
     if not self._in_playback_batch():
       from link_preview import check_and_preview
@@ -1124,18 +1186,18 @@ class IRCClient(asyncirc.IRCClient):
                    nick, '%s@%s' % (ident, host), data)
       nk = self.client.network_key
       if is_highlight(data, self.nickname, nk, channel):
-        chan.window.set_activity(Window.ACTIVITY_HIGHLIGHT)
-        if not playback and state.notifications:
+        self._hook_activity(chan.window, Window.ACTIVITY_HIGHLIGHT)
+        if not playback:
           if get_highlight_notify(nk, channel):
-            state.notifications.fire('highlight', '%s in %s' % (nick, channel), data)
+            self._hook_notify('highlight', '%s in %s' % (nick, channel), data)
       else:
-        chan.window.set_activity(Window.ACTIVITY_MESSAGE)
+        self._hook_activity(chan.window, Window.ACTIVITY_MESSAGE)
     else:
       # Private action
       q, _ = _find_or_create_query(self, nick, ident, host)
       q.window.addline_nick(["* ", (nick,), " %s" % data], state.actionformat,
                                                     timestamp_override=ts)
-      self.queries[ident, host].window.set_activity(Window.ACTIVITY_HIGHLIGHT)
+      self._hook_activity(self.queries[ident, host].window, Window.ACTIVITY_HIGHLIGHT)
       if not playback:
         _history_save(self.client.network, _query_history_key(nick, ident), 'action', nick, data)
         _save_urls(self.client.network, _query_history_key(nick, ident),
@@ -1267,16 +1329,15 @@ class IRCClient(asyncirc.IRCClient):
     q, new_query = _find_or_create_query(self, nick, ident, host)
     qwin = q.window
     qwin.addline_msg(nick, message, timestamp_override=ts)
-    qwin.set_activity(Window.ACTIVITY_HIGHLIGHT)
+    self._hook_activity(qwin, Window.ACTIVITY_HIGHLIGHT)
     if hasattr(qwin, '_typing_timer') and qwin._typing_timer is not None:
       qwin.set_nick_typing(nick, False)
     if not self._in_playback_batch():
       _history_save(self.client.network, _query_history_key(nick, ident), 'message', nick, message)
       _save_urls(self.client.network, _query_history_key(nick, ident),
                  nick, '%s@%s' % (ident, host), message)
-      if state.notifications:
-        if new_query:
-          state.notifications.fire('new_query', 'Message from %s' % nick, message)
+      if new_query:
+        self._hook_notify('new_query', 'Message from %s' % nick, message)
       if new_query and state.config.whois_on_query:
         self.do_whois(nick, qwin)
       from link_preview import check_and_preview
@@ -1306,12 +1367,12 @@ class IRCClient(asyncirc.IRCClient):
       # Activity: highlight if our nick or custom patterns match
       nk = self.client.network_key
       if is_highlight(message, self.nickname, nk, channel):
-        chan.window.set_activity(Window.ACTIVITY_HIGHLIGHT)
-        if not self._in_playback_batch() and state.notifications:
+        self._hook_activity(chan.window, Window.ACTIVITY_HIGHLIGHT)
+        if not self._in_playback_batch():
           if get_highlight_notify(nk, channel):
-            state.notifications.fire('highlight', '%s in %s' % (nick, channel), message)
+            self._hook_notify('highlight', '%s in %s' % (nick, channel), message)
       else:
-        chan.window.set_activity(Window.ACTIVITY_MESSAGE)
+        self._hook_activity(chan.window, Window.ACTIVITY_MESSAGE)
       # Link previews (skip during playback; defer during replay)
       if not self._in_playback_batch():
         from link_preview import check_and_preview

@@ -44,7 +44,7 @@ from PySide6.QtGui import *
 from PySide6.QtCore import *
 
 APP_NAME = 'qtpyrc'
-APP_VERSION = '1.2.4'  # fallback; overridden by config app_version if set
+APP_VERSION = '1.2.5'  # fallback; overridden by config app_version if set
 
 import state
 from config import loadconfig, UIState
@@ -932,6 +932,19 @@ def makeapp(args):
   app.mainwin._tree_splitter.setSizes([app.mainwin._tree_target_tw, 600])
   app.mainwin._tree_splitter.splitterMoved.connect(_on_treeview_splitter_moved)
   app.mainwin.setCentralWidget(app.mainwin._tree_splitter)
+
+  # Find-in-all-windows dock (Ctrl+Shift+F). Hidden by default.
+  from find_in_all import FindInAllDock
+  app.mainwin._find_in_all = FindInAllDock(app.mainwin)
+  app.mainwin.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea,
+                            app.mainwin._find_in_all)
+  app.mainwin._find_in_all.hide()
+  from PySide6.QtGui import QShortcut, QKeySequence
+  app.mainwin._find_in_all_sc = QShortcut(
+    QKeySequence("Ctrl+Shift+F"), app.mainwin)
+  app.mainwin._find_in_all_sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+  app.mainwin._find_in_all_sc.activated.connect(app.mainwin._find_in_all.toggle)
+
   _refresh_navigation(app.mainwin)
 
   app.mainwin.workspace.subWindowActivated.connect(_on_subwindow_activated)
@@ -1119,6 +1132,10 @@ def makeapp(args):
   _a.triggered.connect(lambda: __import__('dialogs').show_color_picker())
   _ui['menu.tools.colorpicker'] = _a
   _desc['menu.tools.colorpicker'] = _d('Tools', 'Color Picker')
+  _a = mnutools.addAction('&Find in all windows...\tCtrl+Shift+F')
+  _a.triggered.connect(lambda: app.mainwin._find_in_all.toggle())
+  _ui['menu.tools.findinall'] = _a
+  _desc['menu.tools.findinall'] = _d('Tools', 'Find in all windows')
   _a = mnutools.addAction('&DCC Transfers')
   _a.triggered.connect(lambda: __import__('dcc_ui').DCCTransfersWindow.show_instance())
   _ui['menu.tools.dcctransfers'] = _a
@@ -2076,6 +2093,13 @@ if __name__ == '__main__':
     msg = context.get('message', 'Unhandled async exception')
     # Ignore harmless "task destroyed" warnings during shutdown
     if _quitting and 'Task was destroyed' in msg:
+      return
+    # Ignore harmless socket-shutdown races on Windows: when the remote end
+    # has already closed the connection, the proactor's _call_connection_lost
+    # raises ConnectionResetError from socket.shutdown(). There's nothing to
+    # clean up — the socket is already gone.
+    if isinstance(exc, (ConnectionResetError, ConnectionAbortedError)) and \
+       '_call_connection_lost' in msg:
       return
     if exc:
       _log_exception('*** %s ***' % msg, type(exc), exc, exc.__traceback__)

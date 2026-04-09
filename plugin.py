@@ -334,7 +334,8 @@ class _Irc:
 
     def on(self, event, name, pattern, command='', *, channel=None, network=None,
            nick_mask=None, sound=None, desktop=False, highlight_tab=False,
-           suppress=False, window=None):
+           suppress=False, suppress_notify=False, suppress_activity=False,
+           window=None):
         """Register an /on hook.
 
         Args:
@@ -391,6 +392,8 @@ class _Irc:
             'desktop': desktop,
             'highlight_tab': highlight_tab,
             'suppress': suppress,
+            'suppress_notify': suppress_notify,
+            'suppress_activity': suppress_activity,
             'window': window,    # None → resolved at fire-time
         }
         self._owned_hooks.append((event, name))

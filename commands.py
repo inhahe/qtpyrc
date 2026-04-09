@@ -87,7 +87,10 @@ class Commands:
       window.redmessage('[Error: /hop only works in a channel window]')
 
   def say(window, text):
-    text = _unquote(text)
+    # Don't _unquote here — plain messages typed in the input field route
+    # through `say`, and stripping surrounding quotes mangles things like
+    # `"hello"` into `hello`. Quoting only matters for commands that take
+    # named arguments.
     if window.type == "server":
       window.redmessage("[Error: Can't talk in a server window]")
     elif window.type == "channel":
@@ -1091,9 +1094,11 @@ class Commands:
     """/on <event> <name> [options] [pattern] [command]
     /on -r <event> <name>
     /on -l [event]
-    Options: -n nick/mask  -c #channel  -k network  -s sound  -d  -h  -p  -x
+    Options: -n nick/mask  -c #channel  -k network  -s sound  -d  -h  -p  -x  -N  -A
     -p persists the hook by appending it to the startup script.
     -x suppresses the default handler (event won't appear in window).
+    -N suppresses notifications (sound/desktop/highlight) for this event.
+    -A suppresses tab activity coloring for this event.
     Events: chanmsg privmsg action noticed join part quit kick nick topic
             mode connect disconnect signon motd invite rawcmd numeric ctcpreply"""
     from exec_system import _ON_EVENT_MAP
@@ -1127,6 +1132,10 @@ class Commands:
             filters.append('-h')
           if hinfo.get('suppress'):
             filters.append('-x')
+          if hinfo.get('suppress_notify'):
+            filters.append('-N')
+          if hinfo.get('suppress_activity'):
+            filters.append('-A')
           pat = hinfo.get('pattern', '*')
           fstr = (' %s' % ' '.join(filters)) if filters else ''
           cmd = hinfo.get('command', '')
@@ -1181,6 +1190,8 @@ class Commands:
     highlight_tab = False
     persist = False
     suppress = False
+    suppress_notify = False
+    suppress_activity = False
 
     while rest:
       if rest[0] == '-n' and len(rest) > 1:
@@ -1207,6 +1218,12 @@ class Commands:
       elif rest[0] == '-x':
         rest.pop(0)
         suppress = True
+      elif rest[0] == '-N':
+        rest.pop(0)
+        suppress_notify = True
+      elif rest[0] == '-A':
+        rest.pop(0)
+        suppress_activity = True
       else:
         break
 
@@ -1245,6 +1262,8 @@ class Commands:
       'desktop': desktop,
       'highlight_tab': highlight_tab,
       'suppress': suppress,
+      'suppress_notify': suppress_notify,
+      'suppress_activity': suppress_activity,
       'window': None,  # resolved at event time, not registration time
     }
     parts = [event, '"%s"' % hookname]
@@ -1262,6 +1281,10 @@ class Commands:
       parts.append('-h')
     if suppress:
       parts.append('-x')
+    if suppress_notify:
+      parts.append('-N')
+    if suppress_activity:
+      parts.append('-A')
     if pattern != '*':
       parts.append(pattern)
     if command:
@@ -2205,6 +2228,48 @@ class Commands:
       return
     from notify import show_sound_browser
     show_sound_browser()
+
+  def playsound(window, text):
+    """Play a sound by name or file path.  /playsound <name|path>
+    Accepts a system sound name (see /sounds), a relative path, or
+    an absolute path to a .wav/.ogg/.mp3/etc file."""
+    text = _unquote(text.strip())
+    if not text:
+      window.redmessage('[Usage: /playsound <name|path>]')
+      return
+    if not state.notifications:
+      window.redmessage('[Notifications not initialized]')
+      return
+    from notify import resolve_sound_name
+    path = resolve_sound_name(text)
+    if not path:
+      window.redmessage('[Sound not found: %s]' % text)
+      return
+    state.notifications._play_sound(text)
+
+  def notif(window, text):
+    """Send a desktop notification.  /notif [-t "title"] <body>
+    Shows a system tray notification (toast). On Windows it will
+    appear in the Action Center until dismissed. Default title: "qtpyrc"."""
+    tokens = _tokenize(text)
+    title = 'qtpyrc'
+    i = 0
+    while i < len(tokens):
+      if tokens[i] == '-t' and i + 1 < len(tokens):
+        title = tokens[i + 1]
+        i += 2
+      else:
+        break
+    body = ' '.join(tokens[i:])
+    if not body:
+      window.redmessage('[Usage: /notif [-t "title"] <body>]')
+      return
+    if state.tray_icon:
+      from PySide6.QtWidgets import QSystemTrayIcon
+      state.tray_icon.showMessage(title, body,
+                                  QSystemTrayIcon.MessageIcon.Information, 5000)
+    else:
+      window.redmessage('[Notifications: no system tray available]')
 
   def urls(window, text):
     """Open the URL catcher dialog.  /urls"""

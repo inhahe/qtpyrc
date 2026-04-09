@@ -379,9 +379,16 @@ _SCRIPT_HOOKS = frozenset({
   'networkChanged', 'invited', 'ctcpReply',
 })
 
+_PLUGIN_FULL_SUPPRESS = frozenset({'default', 'notify', 'activity'})
+
 def _dispatch_to_plugins(name, conn, args, kwargs):
-  """Call plugin hooks for event *name*.  Returns True if any suppressed."""
+  """Call plugin hooks for event *name*.
+
+  Returns a set of suppression flags (see _dispatch_on_hooks). Plugins that
+  return truthy from a handler are treated as full suppression (default +
+  notify + activity), matching legacy behavior."""
   from exec_system import _dispatch_on_hooks
+  flags = set()
   for sname, loaded in state.activescripts.items():
     if isinstance(loaded, LoadedPlugin):
       handler = getattr(loaded.instance, name, None)
@@ -391,7 +398,7 @@ def _dispatch_to_plugins(name, conn, args, kwargs):
         if handler.__func__ is not (base_method if base_method else None):
           try:
             if handler(loaded.instance.irc, conn, *args, **kwargs):
-              return True
+              return set(_PLUGIN_FULL_SUPPRESS)
           except Exception:
             traceback.print_exc()
       # Also try on_numeric for irc_* events not in the named set
@@ -401,7 +408,7 @@ def _dispatch_to_plugins(name, conn, args, kwargs):
         if on_num and on_num.__func__ is not base_on_num:
           try:
             if on_num(loaded.instance.irc, conn, name, *args, **kwargs):
-              return True
+              return set(_PLUGIN_FULL_SUPPRESS)
           except Exception:
             traceback.print_exc()
     elif isinstance(loaded, Script):
@@ -410,16 +417,17 @@ def _dispatch_to_plugins(name, conn, args, kwargs):
       if handler:
         try:
           if handler(conn, *args, **kwargs):
-            return True
+            return set(_PLUGIN_FULL_SUPPRESS)
         except Exception:
           traceback.print_exc()
   # Dispatch /on hooks
   try:
-    if _dispatch_on_hooks(name, conn, args):
-      return True
+    on_flags = _dispatch_on_hooks(name, conn, args)
+    if on_flags:
+      flags |= on_flags
   except Exception:
     traceback.print_exc()
-  return False
+  return flags
 
 # Events where the last positional arg is a message/text to tokenize
 _TOKENIZE_EVENTS = {
@@ -440,9 +448,15 @@ def _make_hook(name, original):
         args = list(args)
         args[idx] = TokenizedString(args[idx])
         args = tuple(args)
-    if _dispatch_to_plugins(name, self, args, kwargs):
+    flags = _dispatch_to_plugins(name, self, args, kwargs)
+    if 'default' in flags:
       return
-    return original(self, *args, **kwargs)
+    prev = getattr(self, '_suppress_flags', frozenset())
+    self._suppress_flags = flags
+    try:
+      return original(self, *args, **kwargs)
+    finally:
+      self._suppress_flags = prev
   hooked.__name__ = name
   return hooked
 

@@ -85,6 +85,7 @@ Parameters that accept arbitrary text (messages, reasons, titles) must be quoted
 | `/echo` | `/echo [-w target] [-s] [-a] <text>` | Print text to current window, target (`-w`), server (`-s`), or active (`-a`) window |
 | `/log` | `/log [-w target] "text"` | Write a line to the log file for the current window (or target) |
 | `/alert` | `/alert [-t "title"] "message"` | Show a popup message box (default title: "qtpyrc") |
+| `/notif` | `/notif [-t "title"] <body>` | Show a desktop notification (pinned to Action Center on Windows) |
 | `/stdout` | `/stdout <text>` | Write text to stdout |
 | `/stderr` | `/stderr <text>` | Write text to stderr |
 
@@ -293,6 +294,7 @@ n1=%other value
 | `/settings` | `/settings [page]` | Open the settings dialog. Pages: `general`, `identity`, `font` (or `colors`), `ident_server` (or `ident`), `logging`, `notifications`, `scripts`, `editor`, or `networks.<name>[.server\|sasl\|auto_join]` |
 | `/ui` | `/ui [path]` | Trigger any menu action, settings page, or toolbar button by dot-path. With no argument, lists all paths. Prefixes: `menu.*` for menu items (e.g. `menu.tools.colorpicker`, `menu.file.edit.startup`), `settings.*` for settings pages (e.g. `settings.general`, `settings.fonts.chat`, `settings.networks.libera.sasl`), `toolbar.*` for toolbar buttons (derived from tooltip text). Any prefix lists matching paths. Disabled menu actions show a warning |
 | `/sounds` | `/sounds [name]` | Browse system sounds, or play one by name |
+| `/playsound` | `/playsound <name\|path>` | Play a sound by name or arbitrary file path |
 | `/urls` | `/urls` | Open the URL catcher (browse captured URLs with filters) |
 | `/urlcatcher` | `/urlcatcher` | Alias for `/urls` |
 | `/toolbar` | `/toolbar` | Reload the toolbar from `toolbar.ini` |
@@ -429,6 +431,19 @@ When you run `/exec <code>`, the following names are available:
 
 ---
 
+## Find in all windows
+
+`Ctrl+Shift+F` (or **Tools → Find in all windows**) opens a dockable panel that searches across every open window — server, channel, and query — and, optionally, the SQLite history database.
+
+- Type a query and press **Enter** (or click **Find**).
+- **Case** — case-sensitive matching.
+- **Regex** — interpret the query as a regular expression. The doc search uses Qt's `QRegularExpression`; the history-DB search uses Python `re`.
+- **History DB** — also search the persistent message history. Useful for finding lines that have scrolled out of the live buffer or are from past sessions. Results from the history DB are tagged `(history)`; if no live window is open for that channel, the entry is marked `[no open window]`.
+
+Results group by window. Double-click a match to activate the target window and highlight the matching line. For history-DB matches, qtpyrc tries to find the corresponding line in the live buffer; if it isn't there (older than the buffer), only the window is activated.
+
+The dock can be dragged to the top or bottom of the main window, or floated as a separate window.
+
 ## Popup Menus
 
 Right-click context menus are defined in `popups.ini` (mIRC-compatible format — you can copy your `popups.ini` directly from mIRC). The file has four sections:
@@ -503,6 +518,10 @@ Use `/popups` to reload the file after editing.
 | `-h` | Highlight the channel tab |
 | `-p` | Persist by appending to the startup script |
 | `-x` | Suppress the default handler (event won't appear in window) |
+| `-N` | Suppress notifications (sound/desktop/highlight popups) for this event, but still show it |
+| `-A` | Suppress tab activity coloring for this event, but still show it |
+
+`-N` and `-A` are independent and can be combined (e.g. `-N -A` to show the event silently with no tab coloring). `-x` already implies both, since the default handler never runs.
 
 - **pattern** — matched against the event's primary text. Supports wildcards (`*`, `?`) or `/regex/` with optional flags: `i` (case-insensitive), `m` (multiline), `s` (dotall). Example: `/regex/i`, `/regex/ims`. Default `*` (match everything).
 - **command** — a command string to execute. Optional if action flags (`-s`, `-d`, `-h`) are used. Multiple commands can be separated with ` | ` (space-pipe-space), e.g. `/mode # +b nick!*@* | /kick # nick`. `{variables}` are expanded before execution (`\{` / `\}` for literal braces, `\\` for literal backslash, so a literal `\{` requires `\\{`). If the command starts with `/exec`, variables are available as Python names instead (see below).
@@ -770,7 +789,8 @@ except (SystemExit, argparse.ArgumentError):
 ```python
 irc.on(event, name, pattern, command='', *, channel=None, network=None,
        nick_mask=None, sound=None, desktop=False, highlight_tab=False,
-       suppress=False, window=None)
+       suppress=False, suppress_notify=False, suppress_activity=False,
+       window=None)
 ```
 
 The `command` argument can be:
@@ -800,7 +820,7 @@ The `command` argument can be:
   ])
   ```
 
-Set `suppress=True` to always suppress the event when the hook matches (regardless of command return value).
+Set `suppress=True` to always suppress the event when the hook matches (regardless of command return value). Use `suppress_notify=True` to skip only notifications (sound/desktop/highlight popups) while still showing the event, or `suppress_activity=True` to skip only the tab activity coloring.
 
 ---
 
