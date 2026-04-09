@@ -257,16 +257,24 @@ def _on_pattern_match(pattern, text):
 
 
 def _dispatch_on_hooks(internal_event, conn, args):
-  """Fire /on hooks for *internal_event*.  Returns True if any hook suppressed the event."""
+  """Fire /on hooks for *internal_event*.
+
+  Returns a set of suppression flags. Possible members:
+    'default'  — skip the default handler entirely (mIRC /halt)
+    'notify'   — let the default handler run but skip notifications
+    'activity' — let the default handler run but skip tab activity coloring
+  An empty set means no suppression. The returned object is truthy iff
+  any suppression applies, so legacy `if _dispatch_on_hooks(...)` checks
+  still behave as "fully halt the event"."""
   # Find which /on event names map to this internal event
   matched_events = []
   for on_name, internal_name in _ON_EVENT_MAP.items():
     if internal_name == internal_event:
       matched_events.append(on_name)
   if not matched_events:
-    return False
+    return set()
 
-  suppressed = False
+  suppressed = set()
   for on_name in matched_events:
     hooks = state._on_hooks.get(on_name)
     if not hooks:
@@ -318,7 +326,11 @@ def _dispatch_on_hooks(internal_event, conn, args):
 
       # Suppress the default handler (like mIRC's /halt)
       if hinfo.get('suppress'):
-        suppressed = True
+        suppressed.add('default')
+      if hinfo.get('suppress_notify'):
+        suppressed.add('notify')
+      if hinfo.get('suppress_activity'):
+        suppressed.add('activity')
 
       # Command execution — callable, list of callables/strings, or string
       cmd = hinfo.get('command', '')
@@ -328,7 +340,7 @@ def _dispatch_on_hooks(internal_event, conn, args):
           if callable(c):
             try:
               if c(bare, conn):
-                suppressed = True
+                suppressed.add('default')
             except Exception:
               import traceback; traceback.print_exc()
           elif c:
@@ -347,7 +359,7 @@ def _dispatch_on_hooks(internal_event, conn, args):
           bare = {k.strip('{}'): str(v) for k, v in variables.items()}
           result = cmd(bare, conn)
           if result:
-            suppressed = True
+            suppressed.add('default')
         except Exception:
           import traceback; traceback.print_exc()
         continue
@@ -488,7 +500,8 @@ def _exec_set_timer(window, name, reps, secs, cmd):
   t.start()
 
 def _exec_set_on(window, event, name, pattern, cmd='', channel=None, network=None,
-                 nick_mask=None, sound=None, desktop=False, highlight_tab=False):
+                 nick_mask=None, sound=None, desktop=False, highlight_tab=False,
+                 suppress=False, suppress_notify=False, suppress_activity=False):
   """Create an /on hook from /exec.
 
   Example: on('chanmsg', 'greet', '*hello*', '/say hi there')
@@ -508,6 +521,9 @@ def _exec_set_on(window, event, name, pattern, cmd='', channel=None, network=Non
     'sound': sound,
     'desktop': desktop,
     'highlight_tab': highlight_tab,
+    'suppress': suppress,
+    'suppress_notify': suppress_notify,
+    'suppress_activity': suppress_activity,
     'window': window,
   }
 

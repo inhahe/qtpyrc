@@ -144,6 +144,19 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.resize(700, 500)
+        # Center on parent window (or screen) so it doesn't end up off-screen
+        if parent:
+            pgeom = parent.geometry()
+            x = pgeom.x() + (pgeom.width() - 700) // 2
+            y = pgeom.y() + (pgeom.height() - 500) // 2
+            # Clamp to available screen area
+            from PySide6.QtGui import QGuiApplication
+            screen = QGuiApplication.screenAt(pgeom.center()) or QGuiApplication.primaryScreen()
+            if screen:
+                avail = screen.availableGeometry()
+                x = max(avail.x(), min(x, avail.x() + avail.width() - 700))
+                y = max(avail.y(), min(y, avail.y() + avail.height() - 500))
+            self.move(x, y)
         QShortcut(QKeySequence("Ctrl+F4"), self, self.reject)
         QShortcut(QKeySequence("Ctrl+W"), self, self.reject)
         self.config = config
@@ -922,6 +935,19 @@ class SettingsDialog(QDialog):
         # Refresh live client connection settings from updated config
         for client in state.clients:
             client.refresh_server_config()
+
+        # Auto-connect to any newly-added networks with auto_connect enabled
+        if self.config.networks:
+            existing_keys = {c.network_key for c in state.clients if c.network_key}
+            import asyncio
+            from models import Client
+            for netkey in self.config.networks:
+                if netkey in existing_keys:
+                    continue
+                if self.config.resolve(netkey, 'auto_connect'):
+                    client = Client(network_key=netkey)
+                    state.clients.add(client)
+                    asyncio.ensure_future(client.connect_to_server())
 
     def _on_apply(self):
         """Apply changes to the running UI without saving to disk."""

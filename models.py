@@ -166,11 +166,14 @@ class Channel:
       tree.add_channel(client, self)
 
   def addnick(self, nick, user=None):
+    already_present = nick in self.nicks
     self.nicks.add(nick)
     if user:
       lnick = nick.lower()
       self.users[lnick] = user
       user.channels.add(self.name)
+    if already_present:
+      return  # don't add a duplicate row to the listwidget
     try:
       from window import NickItem
       conn = self.client.conn if self.client else None
@@ -423,6 +426,12 @@ class Client:
     self._intentional_disconnect = True
     if self.conn:
       self.conn.disconnect()
+    # Cancel any in-flight connect_to_server() loop from a previous call —
+    # otherwise its reconnect-on-drop logic races with the new task and we
+    # end up with two simultaneous IRC connections to the same network.
+    prev_task = getattr(self, '_connect_task', None)
+    if prev_task and not prev_task.done():
+      prev_task.cancel()
     self._connect_task = asyncio.ensure_future(self.connect_to_server())
 
   def _window_alive(self):

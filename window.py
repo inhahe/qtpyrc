@@ -201,7 +201,8 @@ class ChatOutput(QTextEdit):
 
   def mouseMoveEvent(self, event):
     anchor = self.anchorAt(event.pos())
-    if anchor and (anchor.startswith('http') or anchor.startswith('nick:')):
+    if anchor and (anchor.startswith('http') or anchor.startswith('nick:')
+                   or anchor.startswith('chan:')):
       self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
     else:
       self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
@@ -235,6 +236,13 @@ class ChatOutput(QTextEdit):
       if client:
         _open_query(client, nick)
         return
+    if anchor and anchor.startswith("chan:"):
+      chan = anchor[5:]
+      client = getattr(self._parent_window, 'client', None)
+      conn = client.conn if client else None
+      if conn and chan:
+        conn.join(chan)
+      return
     super().mouseDoubleClickEvent(event)
     if self.textCursor().hasSelection():
       self._refocus_input()
@@ -413,67 +421,75 @@ class SearchBar(QWidget):
       self._search_cursor = QTextCursor()
 
   def _plain_find(self, doc, query, case_sensitive, forward):
-    text = doc.toPlainText()
+    # Use QTextDocument.find() — it operates on document positions, which
+    # correctly handles tables (link previews) and embedded images.
+    flags = QTextDocument.FindFlag(0)
     if case_sensitive:
-      search_text, search_query = text, query
-    else:
-      search_text, search_query = text.casefold(), query.casefold()
+      flags |= QTextDocument.FindFlag.FindCaseSensitively
+    if not forward:
+      flags |= QTextDocument.FindFlag.FindBackward
 
     if self._search_cursor.hasSelection():
+      start_cursor = QTextCursor(self._search_cursor)
       if forward:
-        start = self._search_cursor.selectionEnd()
+        start_cursor.setPosition(self._search_cursor.selectionEnd())
       else:
-        start = self._search_cursor.selectionStart() - 1
+        start_cursor.setPosition(self._search_cursor.selectionStart())
     else:
-      start = len(search_text) if not forward else 0
+      start_cursor = QTextCursor(doc)
+      if not forward:
+        start_cursor.movePosition(QTextCursor.MoveOperation.End)
 
-    if forward:
-      idx = search_text.find(search_query, start)
-      if idx < 0:
-        idx = search_text.find(search_query, 0)
-    else:
-      idx = search_text.rfind(search_query, 0, max(start + 1, 0))
-      if idx < 0:
-        idx = search_text.rfind(search_query)
-
-    if idx < 0:
-      return QTextCursor()
-    cursor = QTextCursor(doc)
-    cursor.setPosition(idx)
-    cursor.setPosition(idx + len(search_query), QTextCursor.MoveMode.KeepAnchor)
-    return cursor
+    found = doc.find(query, start_cursor, flags)
+    if found.isNull() or not found.hasSelection():
+      # Wrap around
+      wrap_cursor = QTextCursor(doc)
+      if not forward:
+        wrap_cursor.movePosition(QTextCursor.MoveOperation.End)
+      found = doc.find(query, wrap_cursor, flags)
+      if found.isNull() or not found.hasSelection():
+        return QTextCursor()
+    return found
 
   def _regex_find(self, doc, pat, forward):
-    text = doc.toPlainText()
-    if self._search_cursor.hasSelection():
-      if forward:
-        start = self._search_cursor.selectionEnd()
-      else:
-        start = self._search_cursor.selectionStart()
-    else:
-      start = len(text) if not forward else 0
-
-    if forward:
-      m = pat.search(text, start)
-      if not m:
-        m = pat.search(text, 0)
-    else:
-      m = None
-      for candidate in pat.finditer(text, 0):
-        if candidate.start() < start:
-          m = candidate
-        else:
-          break
-      if not m:
-        for candidate in pat.finditer(text, 0):
-          m = candidate
-
-    if not m:
+    # Use Qt's QRegularExpression find which operates on document positions.
+    from PySide6.QtCore import QRegularExpression
+    options = QRegularExpression.PatternOption.NoPatternOption
+    if pat.flags & re.IGNORECASE:
+      options |= QRegularExpression.PatternOption.CaseInsensitiveOption
+    if pat.flags & re.MULTILINE:
+      options |= QRegularExpression.PatternOption.MultilineOption
+    if pat.flags & re.DOTALL:
+      options |= QRegularExpression.PatternOption.DotMatchesEverythingOption
+    qre = QRegularExpression(pat.pattern, options)
+    if not qre.isValid():
       return QTextCursor()
-    cursor = QTextCursor(doc)
-    cursor.setPosition(m.start())
-    cursor.setPosition(m.end(), QTextCursor.MoveMode.KeepAnchor)
-    return cursor
+
+    flags = QTextDocument.FindFlag(0)
+    if not forward:
+      flags |= QTextDocument.FindFlag.FindBackward
+
+    if self._search_cursor.hasSelection():
+      start_cursor = QTextCursor(self._search_cursor)
+      if forward:
+        start_cursor.setPosition(self._search_cursor.selectionEnd())
+      else:
+        start_cursor.setPosition(self._search_cursor.selectionStart())
+    else:
+      start_cursor = QTextCursor(doc)
+      if not forward:
+        start_cursor.movePosition(QTextCursor.MoveOperation.End)
+
+    found = doc.find(qre, start_cursor, flags)
+    if found.isNull() or not found.hasSelection():
+      # Wrap around
+      wrap_cursor = QTextCursor(doc)
+      if not forward:
+        wrap_cursor.movePosition(QTextCursor.MoveOperation.End)
+      found = doc.find(qre, wrap_cursor, flags)
+      if found.isNull() or not found.hasSelection():
+        return QTextCursor()
+    return found
 
   def keyPressEvent(self, event):
     if event.key() == Qt.Key.Key_Escape:
@@ -712,9 +728,18 @@ class Window(QWidget):
         super().focusOutEvent(event)
         window._close_comp_popup()
 
+    # Parent to the main window so the popup is destroyed if the main
+    # window goes away — prevents crashes on window switch / shutdown.
+    parent_for_popup = state.app.mainwin if state.app else None
     popup = _CompPopup(nicks)
+    if parent_for_popup is not None:
+      popup.setParent(parent_for_popup)
     popup.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
                          | Qt.WindowType.WindowStaysOnTopHint)
+    # Don't steal focus from the input — keys are handled by the input's
+    # event filter while the popup is visible.
+    popup.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+    popup.setFocusPolicy(Qt.FocusPolicy.NoFocus)
     popup.setFont(self.input.font())
     for nick in nicks:
       popup.addItem(nick)
@@ -728,7 +753,6 @@ class Window(QWidget):
     input_pos = self.input.mapToGlobal(QPoint(0, 0))
     popup.move(input_pos.x(), input_pos.y() - popup.height())
     popup.show()
-    popup.setFocus()
     popup.itemClicked.connect(lambda item: self._apply_completion(item.text()))
     self._comp_popup = popup
 
@@ -788,13 +812,22 @@ class Window(QWidget):
     self.output.setReadOnly(True)
     self.output.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
     _chatfont = QFont(state.config.fontfamily, state.config.fontheight)
-    # Insert Segoe UI Symbol early in the fallback chain so monochrome
-    # symbols are preferred over oversized color emoji.  Qt continues
-    # searching all system fonts after this list is exhausted.
+    # Per-glyph font fallback chain. Order matters:
+    #   1. user's chosen font (covers Latin etc.)
+    #   2. Segoe UI       — full Unicode punctuation: curly quotes (U+2019),
+    #                       em dashes, ellipsis, etc.  Must come before
+    #                       Segoe UI Symbol or Qt will mis-pick the symbol
+    #                       font for typographic punctuation and render it
+    #                       as missing glyphs.
+    #   3. Segoe UI Symbol — monochrome dingbats / BMP symbol ranges
+    #                       (U+2600-27BF), kept here so they don't fall
+    #                       through to oversized color emoji.
+    # Qt then continues searching all system fonts after this list is
+    # exhausted (where actual color emoji like U+1F600+ get picked up).
     _chatfont.setFamilies([
       state.config.fontfamily,
-      'Segoe UI Symbol',
       'Segoe UI',
+      'Segoe UI Symbol',
     ])
     self.output.setFont(_chatfont)
     # Set default document font explicitly
@@ -834,6 +867,7 @@ class Window(QWidget):
     self._comp_prefix = ''     # the text fragment being completed
     self._comp_start = 0       # cursor position where the fragment starts
     self.input.installEventFilter(self)
+    self.output.installEventFilter(self)
     self.subwindow = state.app.mainwin.workspace.addSubWindow(self)
     self.show()
 
@@ -968,10 +1002,13 @@ class Window(QWidget):
     self._updateBottomAlign()
 
   def addline_nick(self, parts, fmt=None, timestamp_override=None):
-    """Add a timestamped line with clickable nick anchors.
+    """Add a timestamped line with clickable anchors.
 
-    *parts* is a list where plain strings are rendered as text and
-    single-element tuples ``(nick,)`` are rendered as clickable anchors.
+    *parts* is a list where plain strings are rendered as text. Tuples are
+    rendered as clickable anchors:
+      ``(nick,)``         — nick anchor (href ``nick:<clean>``)
+      ``(text, href)``    — arbitrary anchor with the given href
+                            (e.g. ``('#foo', 'chan:#foo')``).
     *fmt* is an optional QTextCharFormat for the base text color.
     """
     if not self._widget_alive(): return
@@ -987,14 +1024,23 @@ class Window(QWidget):
     base = fmt or state.defaultformat
     for part in parts:
       if isinstance(part, tuple):
-        nick = part[0]
-        # Strip mode prefix from anchor href so popups get the clean nick
-        clean = nick.lstrip('~&@%+') if nick else nick
-        anchor_fmt = QTextCharFormat(base)
-        anchor_fmt.setAnchor(True)
-        anchor_fmt.setAnchorHref("nick:" + clean)
-        anchor_fmt.setFontUnderline(False)
-        cur.insertText(nick, anchor_fmt)
+        if len(part) == 2:
+          # (display_text, href) — arbitrary anchor
+          text, href = part
+          anchor_fmt = QTextCharFormat(base)
+          anchor_fmt.setAnchor(True)
+          anchor_fmt.setAnchorHref(href)
+          anchor_fmt.setFontUnderline(False)
+          cur.insertText(text, anchor_fmt)
+        else:
+          nick = part[0]
+          # Strip mode prefix from anchor href so popups get the clean nick
+          clean = nick.lstrip('~&@%+') if nick else nick
+          anchor_fmt = QTextCharFormat(base)
+          anchor_fmt.setAnchor(True)
+          anchor_fmt.setAnchorHref("nick:" + clean)
+          anchor_fmt.setFontUnderline(False)
+          cur.insertText(nick, anchor_fmt)
       else:
         self._render_text(part, base_format=base)
     cur.movePosition(QTextCursor.MoveOperation.End)
@@ -1162,6 +1208,10 @@ class Window(QWidget):
     """Set activity level if higher than current, and update tab/tree colors."""
     if self._is_active_window():
       return  # don't mark the window the user is looking at
+    # Suppress during local DB history replay (replayed content shouldn't
+    # mark tabs as unread)
+    if hasattr(self, '_deferred_replay') or hasattr(self, '_bg_replay'):
+      return
     if level <= self._activity:
       return  # don't downgrade
     self._activity = level
@@ -1312,11 +1362,26 @@ class Window(QWidget):
       if self._splitter_dirty:
         self._splitter_dirty = False
         self._propagate_nicklist_width()
+    # Close the nick-completion popup when the input loses focus
+    # (clicking another window, switching tabs, etc.)
+    if (obj is getattr(self, 'input', None)
+        and event.type() == QEvent.Type.FocusOut
+        and getattr(self, '_comp_popup', None)):
+      self._close_comp_popup()
     # Claim Tab so QTextEdit doesn't consume it for indentation
     if (event.type() == QEvent.Type.ShortcutOverride
         and event.key() == Qt.Key.Key_Tab
         and not event.modifiers()
         and obj is self.input):
+      event.accept()
+      return True
+    # Claim Ctrl+Home / Ctrl+End so QTextEdit doesn't consume them as
+    # default cursor-navigation shortcuts in ShortcutOverride phase before
+    # our KeyPress handler below gets a chance to scroll the chat output.
+    if (event.type() == QEvent.Type.ShortcutOverride
+        and event.key() in (Qt.Key.Key_Home, Qt.Key.Key_End)
+        and (event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        and obj in (self.input, self.output)):
       event.accept()
       return True
     if event.type() == QEvent.Type.KeyPress:
@@ -1344,7 +1409,54 @@ class Window(QWidget):
           ws.skip_current()
           return True
 
-      # --- Input widget keys below ---
+      # --- Input widget keys below — only when input has focus ---
+      if obj is not self.input:
+        return False
+
+      # Nick-completion popup is open: nav keys drive the popup, everything
+      # else closes it AND falls through to normal input handling so the key
+      # the user pressed reaches the input field.
+      if self._comp_popup:
+        popup = self._comp_popup
+        if key == Qt.Key.Key_Down:
+          row = popup.currentRow()
+          if row < popup.count() - 1:
+            popup.setCurrentRow(row + 1)
+          return True
+        if key == Qt.Key.Key_Up:
+          row = popup.currentRow()
+          if row > 0:
+            popup.setCurrentRow(row - 1)
+          return True
+        if key == Qt.Key.Key_PageDown:
+          row = popup.currentRow()
+          popup.setCurrentRow(min(popup.count() - 1, row + 10))
+          return True
+        if key == Qt.Key.Key_PageUp:
+          row = popup.currentRow()
+          popup.setCurrentRow(max(0, row - 10))
+          return True
+        if key == Qt.Key.Key_Home:
+          if popup.count():
+            popup.setCurrentRow(0)
+          return True
+        if key == Qt.Key.Key_End:
+          if popup.count():
+            popup.setCurrentRow(popup.count() - 1)
+          return True
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Tab):
+          item = popup.currentItem()
+          if item:
+            self._apply_completion(item.text())
+          else:
+            self._close_comp_popup()
+          return True
+        if key == Qt.Key.Key_Escape:
+          self._close_comp_popup()
+          return True
+        # Any other key — dismiss popup and let the key be processed normally.
+        self._close_comp_popup()
+        # fall through
 
       # Close color picker on any keypress
       if state._colorcodewindow:
@@ -1673,10 +1785,27 @@ class Channelwindow(Window):
 
     self.splitter = QSplitter(self)
     self.splitter.addWidget(left)
+    # Right side: nick-count label + nicks list stacked vertically
+    right = QWidget(self)
+    right_layout = QVBoxLayout(right)
+    right_layout.setContentsMargins(0, 0, 0, 0)
+    right_layout.setSpacing(0)
+    self._nick_count_label = QLabel(right)
+    self._nick_count_label.setStyleSheet(
+      "QLabel { color: gray; padding: 2px 4px; }")
+    self._nick_count_label.setText('0 users')
+    right_layout.addWidget(self._nick_count_label, 0)
     self.nickslist = NicksList(self)
-    self.splitter.addWidget(self.nickslist)
+    right_layout.addWidget(self.nickslist, 1)
+    self.splitter.addWidget(right)
+    # Keep the count label in sync with the listwidget contents.
+    nl_model = self.nickslist.model()
+    nl_model.rowsInserted.connect(lambda *_: self._update_nick_count())
+    nl_model.rowsRemoved.connect(lambda *_: self._update_nick_count())
+    nl_model.modelReset.connect(self._update_nick_count)
     # Allow both sides to be resized smaller than their default sizeHint
     left.setMinimumWidth(50)
+    right.setMinimumWidth(20)
     self.nickslist.setMinimumWidth(20)
     self.splitter.setCollapsible(0, False)
     self.splitter.setCollapsible(1, False)
@@ -1795,6 +1924,14 @@ class Channelwindow(Window):
       if item and item._nick == nick:
         item.set_typing(typing)
         break
+
+  def _update_nick_count(self):
+    """Refresh the 'N users' label above the nicks list."""
+    try:
+      n = self.nickslist.count()
+    except RuntimeError:
+      return  # widget destroyed during shutdown
+    self._nick_count_label.setText('%d user%s' % (n, '' if n == 1 else 's'))
 
   def _update_typing_bar(self):
     """Update the typing bar label."""

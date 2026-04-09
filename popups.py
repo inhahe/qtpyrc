@@ -369,35 +369,40 @@ def show_popup(section, window, pos, extra_vars=None, copy_action=False,
       menu.removeAction(copy_act)
       menu.insertAction(sep, copy_act)
 
-  action = menu.exec(pos)
-  if action is copy_act:
-    from PySide6.QtWidgets import QApplication
-    output = getattr(window, 'output', None)
-    if output:
-      output.copy()
+  try:
+    action = menu.exec(pos)
+    if action is copy_act:
+      output = getattr(window, 'output', None)
+      if output:
+        output.copy()
+      return True
+    if not action or action not in action_map:
+      return True  # menu was shown, just nothing selected
+
+    command = action_map[action]
+
+    # Expand mIRC variables
+    expanded = _expand_mirc_vars(command, variables, window)
+    if expanded is None:
+      return True  # user cancelled a required input
+
+    # Also run {variable} expansion
+    from config import _expand_vars
+    expanded = _expand_vars(expanded, variables)
+
+    # Execute — support pipe-separated multiple commands
+    for part in expanded.split(' | '):
+      part = part.strip()
+      if not part:
+        continue
+      _exec_popup_command(window, part)
+
     return True
-  if not action or action not in action_map:
-    return True  # menu was shown, just nothing selected
-
-  command = action_map[action]
-
-  # Expand mIRC variables
-  expanded = _expand_mirc_vars(command, variables, window)
-  if expanded is None:
-    return True  # user cancelled a required input
-
-  # Also run {variable} expansion
-  from config import _expand_vars
-  expanded = _expand_vars(expanded, variables)
-
-  # Execute — support pipe-separated multiple commands
-  for part in expanded.split(' | '):
-    part = part.strip()
-    if not part:
-      continue
-    _exec_popup_command(window, part)
-
-  return True
+  finally:
+    # Clean up the menu (and all its submenus) so they don't accumulate
+    # as children of the parent window. Without this, every right-click
+    # leaks a QMenu instance which eventually crashes Qt.
+    menu.deleteLater()
 
 
 def append_section_to_menu(menu, section, window, extra_vars=None):
