@@ -331,6 +331,28 @@ class SearchBar(QWidget):
     self._close_focus = on_close_focus
     self._set_cursor = set_cursor
     self._search_cursor = QTextCursor()
+    self._open = False
+
+    # Explicit styling so the bar stays visible on both light and dark themes
+    # and doesn't disappear when it loses focus.
+    cfg = state.config
+    fg = cfg.fgcolor.name()
+    bg = cfg.bgcolor.name()
+    # Derive a slightly contrasting bar background
+    lum = cfg.bgcolor.lightness()
+    if lum > 128:
+      bar_bg = cfg.bgcolor.darker(110).name()
+      border = cfg.bgcolor.darker(140).name()
+    else:
+      bar_bg = cfg.bgcolor.lighter(140).name()
+      border = cfg.bgcolor.lighter(180).name()
+    self.setStyleSheet(
+      "SearchBar { background-color: %s; border-top: 1px solid %s; }"
+      " SearchBar QLineEdit { background-color: %s; color: %s;"
+      "   border: 1px solid %s; padding: 1px 3px; }"
+      " SearchBar QCheckBox { color: %s; }"
+      " SearchBar QPushButton { color: %s; }"
+      % (bar_bg, border, bg, fg, border, fg, fg))
 
     lay = QHBoxLayout(self)
     lay.setContentsMargins(2, 2, 2, 2)
@@ -339,6 +361,7 @@ class SearchBar(QWidget):
     self._input.setPlaceholderText("Search\u2026")
     self._input.returnPressed.connect(lambda: self.find(forward=False))
     self._input.textChanged.connect(self._reset)
+    self._input.installEventFilter(self)
     lay.addWidget(self._input, 1)
 
     self._case_cb = QCheckBox("Case sensitive")
@@ -367,11 +390,15 @@ class SearchBar(QWidget):
     lay.addWidget(btn_close)
 
   def open_bar(self):
+    self._open = True
+    self.setMinimumHeight(self.sizeHint().height())
     self.setVisible(True)
     self._input.setFocus()
     self._input.selectAll()
 
   def close_bar(self):
+    self._open = False
+    self.setMinimumHeight(0)
     self.setVisible(False)
     self._search_cursor = QTextCursor()
     self._text.setExtraSelections([])
@@ -491,26 +518,31 @@ class SearchBar(QWidget):
         return QTextCursor()
     return found
 
-  def keyPressEvent(self, event):
-    if event.key() == Qt.Key.Key_Escape:
-      self.close_bar()
-      return
-    # Forward scrolling keys to the text widget
-    # (Home/End left for search input cursor movement)
-    key = event.key()
-    if key in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown,
-               Qt.Key.Key_Up, Qt.Key.Key_Down):
-      vs = self._text.verticalScrollBar()
-      if key == Qt.Key.Key_Up:
-        vs.setValue(vs.value() - vs.singleStep() * 3)
-      elif key == Qt.Key.Key_Down:
-        vs.setValue(vs.value() + vs.singleStep() * 3)
-      elif key == Qt.Key.Key_PageUp:
-        vs.setValue(vs.value() - vs.pageStep())
-      elif key == Qt.Key.Key_PageDown:
-        vs.setValue(vs.value() + vs.pageStep())
-      return
-    super().keyPressEvent(event)
+  def eventFilter(self, obj, event):
+    """Intercept keys on the QLineEdit before it consumes them."""
+    if obj is self._input and event.type() == QEvent.Type.KeyPress:
+      key = event.key()
+      if key == Qt.Key.Key_Escape:
+        self.close_bar()
+        return True
+      if key in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown,
+                 Qt.Key.Key_Up, Qt.Key.Key_Down,
+                 Qt.Key.Key_Home, Qt.Key.Key_End):
+        vs = self._text.verticalScrollBar()
+        if key == Qt.Key.Key_Up:
+          vs.setValue(vs.value() - vs.singleStep() * 3)
+        elif key == Qt.Key.Key_Down:
+          vs.setValue(vs.value() + vs.singleStep() * 3)
+        elif key == Qt.Key.Key_PageUp:
+          vs.setValue(vs.value() - vs.pageStep())
+        elif key == Qt.Key.Key_PageDown:
+          vs.setValue(vs.value() + vs.pageStep())
+        elif key == Qt.Key.Key_Home:
+          vs.setValue(vs.minimum())
+        elif key == Qt.Key.Key_End:
+          vs.setValue(vs.maximum())
+        return True
+    return super().eventFilter(obj, event)
 
 
 class Window(QWidget):
@@ -851,7 +883,7 @@ class Window(QWidget):
       Qt.ScrollBarPolicy.ScrollBarAlwaysOff if lines <= 1
       else Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
-    self._search_bar = SearchBar(self.output, on_close_focus=None, parent=self)
+    self._search_bar = SearchBar(self.output, on_close_focus=self.input, parent=self)
     self._search_bar.setVisible(False)
 
     self._build_layout()
@@ -1402,8 +1434,11 @@ class Window(QWidget):
         return True
 
 
-      # Escape — skip this tab and activate next
+      # Escape — close search bar if open, otherwise skip this tab
       if key == Qt.Key.Key_Escape:
+        if self._search_bar.isVisible():
+          self._search_close()
+          return True
         ws = state.app.mainwin.workspace
         if hasattr(ws, 'skip_current'):
           ws.skip_current()

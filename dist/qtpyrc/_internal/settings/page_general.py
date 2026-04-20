@@ -33,6 +33,10 @@ class GeneralPage(QWidget):
         self.command_prefix = _ck(QLineEdit(), 'command_prefix')
         layout.addRow("Command prefix:", self.command_prefix)
 
+        self.plugin_prefix = _ck(QLineEdit(), 'plugin_prefix')
+        self.plugin_prefix.setToolTip("Prefix for plugin channel commands (e.g. !trivia, !chess)")
+        layout.addRow("Plugin prefix:", self.plugin_prefix)
+
         self.timestamp_display = _ck(QLineEdit(), 'timestamps.display')
         layout.addRow("Display timestamp:", self.timestamp_display)
 
@@ -121,6 +125,7 @@ class GeneralPage(QWidget):
     def load_from_data(self, data):
         self.input_lines.setValue(max(1, min(10, int(data.get('input_lines', 1)))))
         self.command_prefix.setText(str(data.get('command_prefix', '/')))
+        self.plugin_prefix.setText(str(data.get('plugin_prefix', '!')))
         ts = data.get('timestamps') or {}
         self.timestamp_display.setText(str(ts.get('display', 'HH:mm')))
         self.close_on_kick.setChecked(bool(data.get('close_on_kick', False)))
@@ -169,6 +174,7 @@ class GeneralPage(QWidget):
         if 'multiline_input' in data:
             del data['multiline_input']
         data['command_prefix'] = self.command_prefix.text()
+        data['plugin_prefix'] = self.plugin_prefix.text()
         ts = data.get('timestamps')
         if ts is None:
             ts = CommentedMap()
@@ -232,7 +238,12 @@ class InterfacePage(QWidget):
         layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
         self.window_mode = _ck(QComboBox(), 'window_mode')
-        self.window_mode.addItems(["Maximized", "Normal"])
+        self.window_mode.addItems(["Maximized", "Normal", "Minimized", "Remember"])
+        self.window_mode.setToolTip(
+            "Maximized: always start maximized\n"
+            "Normal: always start non-maximized (at last saved size/position)\n"
+            "Minimized: always start minimized to taskbar\n"
+            "Remember: start in whatever state it was last closed in")
         layout.addRow("Window mode:", self.window_mode)
 
         self.navigation = _ck(QComboBox(), 'navigation')
@@ -262,7 +273,7 @@ class InterfacePage(QWidget):
             combo.setCurrentIndex(idx)
 
     def load_from_data(self, data):
-        self._load_combo(self.window_mode, data.get('window_mode', 'maximized'))
+        self._load_combo(self.window_mode, data.get('window_mode', 'remember'))
         nav = data.get('navigation')
         if not nav:
             nav = 'both' if data.get('treeview', False) else 'tabs'

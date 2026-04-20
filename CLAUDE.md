@@ -1,5 +1,9 @@
 # qtpyrc - PySide6 IRC Client
 
+## Code Quality
+
+- **Always do the proper fix.** Never put off a correct fix in favor of a quick hack "for now." Quick fixes accumulate as tech debt and create bugs that are harder to diagnose later. If a fix requires a large refactor, do the refactor.
+
 Entrypoint: `qtpyrc.py`
 
 **Do not edit `todo.txt`** — that file is for the user's own use only.
