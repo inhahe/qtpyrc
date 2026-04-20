@@ -144,19 +144,6 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.resize(700, 500)
-        # Center on parent window (or screen) so it doesn't end up off-screen
-        if parent:
-            pgeom = parent.geometry()
-            x = pgeom.x() + (pgeom.width() - 700) // 2
-            y = pgeom.y() + (pgeom.height() - 500) // 2
-            # Clamp to available screen area
-            from PySide6.QtGui import QGuiApplication
-            screen = QGuiApplication.screenAt(pgeom.center()) or QGuiApplication.primaryScreen()
-            if screen:
-                avail = screen.availableGeometry()
-                x = max(avail.x(), min(x, avail.x() + avail.width() - 700))
-                y = max(avail.y(), min(y, avail.y() + avail.height() - 500))
-            self.move(x, y)
         QShortcut(QKeySequence("Ctrl+F4"), self, self.reject)
         QShortcut(QKeySequence("Ctrl+W"), self, self.reject)
         self.config = config
@@ -195,7 +182,7 @@ class SettingsDialog(QDialog):
         right.addWidget(self.page_title)
 
         self.stack = QStackedWidget()
-        right.addWidget(self.stack)
+        right.addWidget(self.stack, 1)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok |
@@ -221,13 +208,14 @@ class SettingsDialog(QDialog):
         splitter.addWidget(right_widget)
         splitter.setCollapsible(0, False)
         splitter.setCollapsible(1, False)
-        main_layout.addWidget(splitter)
+        main_layout.addWidget(splitter, 1)
         self._splitter = splitter
 
         # --- pages ---
         self._pages = {}        # page_id -> widget (actual page for save/load)
         self._stack_widgets = {} # page_id -> widget in the stack (may be a scroll area)
         self._net_pages = {}    # (net_key, sub) -> widget   sub in ('net','server','sasl','autojoin')
+        self._net_stack = {}    # (net_key, sub) -> scroll-area wrapper in the stack
 
         from dialogs import install_input_focus_handler
         install_input_focus_handler(self)
@@ -482,17 +470,26 @@ class SettingsDialog(QDialog):
 
     # ----- global pages -----
 
+    @staticmethod
+    def _wrap_in_scroll(widget):
+        """Wrap a page widget in a QScrollArea so tall pages scroll
+        instead of forcing the dialog to grow beyond the screen."""
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.addWidget(widget)
+        container_layout.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(container)
+        from PySide6.QtWidgets import QSizePolicy
+        scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        return scroll
+
     def _add_page(self, page_id, label, widget, stack_widget=None):
         self._pages[page_id] = widget
-        if stack_widget:
-            sw = stack_widget
-        else:
-            # Wrap in a top-aligned container to prevent vertical stretching
-            sw = QWidget()
-            wrapper = QVBoxLayout(sw)
-            wrapper.setContentsMargins(0, 0, 0, 0)
-            wrapper.addWidget(widget)
-            wrapper.addStretch(1)
+        sw = stack_widget if stack_widget else self._wrap_in_scroll(widget)
         self._stack_widgets[page_id] = sw
         self.stack.addWidget(sw)
         return widget
@@ -623,31 +620,22 @@ class SettingsDialog(QDialog):
             child.setData(0, ROLE_PAGE, sub_id)
             child.setData(0, ROLE_NETKEY, netkey)
 
-        # Create page widgets
-        net_page = NetworkPage()
-        net_page.load_from_data(net_data, global_data=self._data)
-        self._net_pages[(netkey, 'net')] = net_page
-        self.stack.addWidget(net_page)
-
-        srv_page = ServerPage()
-        srv_page.load_from_data(net_data)
-        self._net_pages[(netkey, 'server')] = srv_page
-        self.stack.addWidget(srv_page)
-
-        sasl_page = SASLPage()
-        sasl_page.load_from_data(net_data)
-        self._net_pages[(netkey, 'sasl')] = sasl_page
-        self.stack.addWidget(sasl_page)
-
-        aj_page = AutoJoinPage()
-        aj_page.load_from_data(net_data)
-        self._net_pages[(netkey, 'autojoin')] = aj_page
-        self.stack.addWidget(aj_page)
-
-        lists_page = ListsPage(level='network')
-        lists_page.load_from_data(net_data)
-        self._net_pages[(netkey, 'lists')] = lists_page
-        self.stack.addWidget(lists_page)
+        # Create page widgets (each wrapped in a scroll area)
+        for sub, page in [
+            ('net',      NetworkPage()),
+            ('server',   ServerPage()),
+            ('sasl',     SASLPage()),
+            ('autojoin', AutoJoinPage()),
+            ('lists',    ListsPage(level='network')),
+        ]:
+            if sub == 'net':
+                page.load_from_data(net_data, global_data=self._data)
+            else:
+                page.load_from_data(net_data)
+            self._net_pages[(netkey, sub)] = page
+            sw = self._wrap_in_scroll(page)
+            self._net_stack[(netkey, sub)] = sw
+            self.stack.addWidget(sw)
 
         return node
 
@@ -745,11 +733,11 @@ class SettingsDialog(QDialog):
         if page_id in self._stack_widgets:
             self.stack.setCurrentWidget(self._stack_widgets[page_id])
         elif page_id == 'network' and netkey:
-            w = self._net_pages.get((netkey, 'net'))
+            w = self._net_stack.get((netkey, 'net'))
             if w:
                 self.stack.setCurrentWidget(w)
         elif page_id in ('server', 'sasl', 'autojoin', 'lists') and netkey:
-            w = self._net_pages.get((netkey, page_id))
+            w = self._net_stack.get((netkey, page_id))
             if w:
                 self.stack.setCurrentWidget(w)
         elif page_id == '__networks_root__':
@@ -830,6 +818,9 @@ class SettingsDialog(QDialog):
             w = self._net_pages.pop((old_key, sub), None)
             if w:
                 self._net_pages[(new_key, sub)] = w
+            sw = self._net_stack.pop((old_key, sub), None)
+            if sw:
+                self._net_stack[(new_key, sub)] = sw
 
     def _delete_network(self, item, netkey):
         r = QMessageBox.question(self, "Delete Network",
@@ -840,12 +831,13 @@ class SettingsDialog(QDialog):
         nets = self._data['networks']
         if netkey in nets:
             del nets[netkey]
-        # Remove page widgets
+        # Remove page widgets (scroll wrappers are in the stack)
         for sub in ('net', 'server', 'sasl', 'autojoin', 'lists'):
-            w = self._net_pages.pop((netkey, sub), None)
-            if w:
-                self.stack.removeWidget(w)
-                w.deleteLater()
+            self._net_pages.pop((netkey, sub), None)
+            sw = self._net_stack.pop((netkey, sub), None)
+            if sw:
+                self.stack.removeWidget(sw)
+                sw.deleteLater()
         # Remove tree node
         parent = item.parent()
         if parent:
@@ -1009,6 +1001,7 @@ class SettingsDialog(QDialog):
                 page.resize_color_rows()
         self._autosize_tree()
 
+
     def _initial_sizing(self):
         """Deferred sizing after the dialog font is applied."""
         font_settings = self._pages.get('font_settings')
@@ -1017,6 +1010,50 @@ class SettingsDialog(QDialog):
         if font_settings and hasattr(font_settings, 'resize_color_rows'):
             font_settings.resize_color_rows()
         self._autosize_tree()
+        self._autosize_height()
+
+    def _autosize_height(self):
+        """Resize the dialog to fit the tallest page, clamped to the screen.
+        Then reposition so the dialog stays fully on-screen."""
+        # Find the tallest page sizeHint (from raw pages, not scroll wrappers)
+        max_page_h = 0
+        for page in list(self._pages.values()) + list(self._net_pages.values()):
+            h = page.sizeHint().height()
+            if h > max_page_h:
+                max_page_h = h
+        # The overhead is everything except the stacked widget:
+        # dialog height - stack height = overhead (title, buttons, hint, margins)
+        overhead = self.height() - self.stack.height()
+        ideal_h = max_page_h + overhead
+        # Clamp to available screen
+        from PySide6.QtGui import QGuiApplication
+        screen = None
+        if self.parent():
+            screen = QGuiApplication.screenAt(self.parent().geometry().center())
+        if not screen:
+            screen = QGuiApplication.screenAt(self.geometry().center())
+        if not screen:
+            screen = QGuiApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else None
+        if avail:
+            ideal_h = max(500, min(ideal_h, avail.height()))
+        else:
+            ideal_h = max(500, ideal_h)
+        w = self.width()
+        h = ideal_h
+        self.resize(w, h)
+        # Reposition: center on parent, clamp to screen
+        if avail:
+            if self.parent():
+                pg = self.parent().geometry()
+                x = pg.x() + (pg.width() - w) // 2
+                y = pg.y() + (pg.height() - h) // 2
+            else:
+                x = avail.x() + (avail.width() - w) // 2
+                y = avail.y() + (avail.height() - h) // 2
+            x = max(avail.x(), min(x, avail.x() + avail.width() - w))
+            y = max(avail.y(), min(y, avail.y() + avail.height() - h))
+            self.move(x, y)
 
     def _autosize_tree(self):
         """Resize the tree panel to fit its content."""

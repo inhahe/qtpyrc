@@ -42,6 +42,14 @@ def install_input_focus_handler(dialog):
   dialog._input_filter_obj = _Filter(dialog)
   dialog.installEventFilter(dialog._input_filter_obj)
   app.focusChanged.connect(_on_focus_changed)
+  # Disconnect when the dialog is destroyed so the callback doesn't
+  # try to access the deleted C++ QDialog object.
+  def _cleanup():
+    try:
+      app.focusChanged.disconnect(_on_focus_changed)
+    except (RuntimeError, TypeError):
+      pass
+  dialog.destroyed.connect(_cleanup)
 from state import dbg, LOG_INFO, LOG_WARN
 from config import _qt_colors, _parse_color, _color_to_config
 

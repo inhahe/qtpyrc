@@ -23,6 +23,8 @@
 #    script <- the script module's running Script() instance
 
 import sys, os, asyncio, argparse, signal
+import faulthandler
+faulthandler.enable()
 
 # Attach to parent console if one exists (e.g. launched from cmd.exe).
 # This allows print/debug output when run from a terminal, without

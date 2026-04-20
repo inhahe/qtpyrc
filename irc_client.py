@@ -1153,7 +1153,7 @@ class IRCClient(asyncirc.IRCClient):
           target_win = aw
       target_win.addline_nick(["-", (nick,), "- %s" % message], state.noticeformat,
                               timestamp_override=ts)
-    if not self._in_playback_batch():
+    if not self._in_playback_batch() and not target_win._is_active_window():
       self._hook_notify('notice', 'Notice from %s' % nick, message)
     # Link previews for notices (defer during replay)
     if not self._in_playback_batch():
@@ -1187,12 +1187,12 @@ class IRCClient(asyncirc.IRCClient):
       nk = self.client.network_key
       if is_highlight(data, self.nickname, nk, channel):
         self._hook_activity(chan.window, Window.ACTIVITY_HIGHLIGHT)
-        if not playback:
+        if not playback and not chan.window._is_active_window():
           if get_highlight_notify(nk, channel):
             self._hook_notify('highlight', '%s in %s' % (nick, channel), data)
       else:
         self._hook_activity(chan.window, Window.ACTIVITY_MESSAGE)
-    else:
+    elif chnlower == self.irclower(self.nickname):
       # Private action
       q, _ = _find_or_create_query(self, nick, ident, host)
       q.window.addline_nick(["* ", (nick,), " %s" % data], state.actionformat,
@@ -1336,7 +1336,7 @@ class IRCClient(asyncirc.IRCClient):
       _history_save(self.client.network, _query_history_key(nick, ident), 'message', nick, message)
       _save_urls(self.client.network, _query_history_key(nick, ident),
                  nick, '%s@%s' % (ident, host), message)
-      if new_query:
+      if new_query and not qwin._is_active_window():
         self._hook_notify('new_query', 'Message from %s' % nick, message)
       if new_query and state.config.whois_on_query:
         self.do_whois(nick, qwin)
@@ -1368,7 +1368,7 @@ class IRCClient(asyncirc.IRCClient):
       nk = self.client.network_key
       if is_highlight(message, self.nickname, nk, channel):
         self._hook_activity(chan.window, Window.ACTIVITY_HIGHLIGHT)
-        if not self._in_playback_batch():
+        if not self._in_playback_batch() and not chan.window._is_active_window():
           if get_highlight_notify(nk, channel):
             self._hook_notify('highlight', '%s in %s' % (nick, channel), message)
       else:

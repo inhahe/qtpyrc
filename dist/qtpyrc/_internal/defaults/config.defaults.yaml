@@ -10,6 +10,9 @@
 # General
 # ---------------------------------------------------------------------------
 
+# Application version. Available as {app_version} in variables, CTCP responses, etc.
+app_version: "1.2.4"
+
 # Number of visible lines in the input field (1-10, default 1).
 # Values > 1 enable multiline input; Ctrl+Enter inserts a newline.
 input_lines: 1
@@ -21,6 +24,10 @@ tab_complete_age: 0
 
 # Prefix character for slash commands.
 command_prefix: "/"
+
+# Prefix for plugin channel commands (e.g. !trivia, !chess).
+# Plugins use this for consistency. Change to e.g. "." or "~" if you prefer.
+plugin_prefix: "!"
 
 # Right-click popup menus file (mIRC-compatible .ini format).
 # Remove or set to "" to disable.  Not loaded unless specified.
@@ -54,8 +61,12 @@ external_editor: ""
 # UI state file (splitter sizes, recent sounds, etc.).  Default: ui.yaml.
 ui_state_file: ui.yaml
 
-# Main window state on launch: "maximized" or "normal".
-window_mode: maximized
+# Main window state on launch:
+#   "remember" — restore last window state (maximized/normal/minimized) and position
+#   "maximized" — always start maximized
+#   "normal" — always start non-maximized (at last saved size/position)
+#   "minimized" — always start minimized to taskbar
+window_mode: remember
 
 # Main window title format.  Leave empty for the default
 # ("qtpyrc - net1 (nick1), net2 (nick2)").
@@ -323,6 +334,12 @@ alt_nicks:                # [N] fallback nicks tried in order on collision
 user: myuser              # [N] username (ident)
 realname: "qtpyrc user"   # [N] real name / GECOS field
 
+# CTCP response strings. Use {app_version} to include the version number.
+# Leave empty for the built-in default (app name + version + platform).
+ctcp:
+  version: "qtpyrc {app_version} by inhahe - https://github.com/inhahe/qtpyrc"
+  #~ finger: ""
+
 
 # ---------------------------------------------------------------------------
 # Connection defaults
@@ -567,6 +584,9 @@ logging:
 plugins:
   dir: plugins             # directory for Python plugins (relative to config file)
   auto_load:               # Python plugins to load automatically on startup
+    - rotate               # /secret command — text rotation cipher
+    - chess                # !chess — IRC chess (set allowed_channels in Plugin Config)
+    - triviabot            # !trivia — trivia game (set allowed_channels in Plugin Config)
     # - myplugin           # plain name or wildcard pattern (*, ?, [abc])
     # - "*"                # load all .py plugins in the plugins dir
 

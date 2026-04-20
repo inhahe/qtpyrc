@@ -377,39 +377,52 @@ class NotificationManager:
         current[nick_lower] = False
         self.notify_signoff(conn, nick_lower)
 
+  @staticmethod
+  def _notify_window():
+    """Return the active window, or None."""
+    active_sub = state.app.mainwin.workspace.activeSubWindow()
+    if active_sub:
+      return active_sub.widget()
+    return None
+
   def notify_signon(self, conn, nick):
     """Called when a /notify nick is detected as online.
 
-    Fires config-based notifications, /on hooks, and prints to the server window.
-    Called from ISON polling and (future) server-side MONITOR/WATCH."""
+    Fires config-based notifications, /on hooks, and prints to the
+    active window.
+    Called from ISON polling and server-side MONITOR."""
     from exec_system import _dispatch_on_hooks
     nk = conn.client.network_key
+    net = conn.client.network or nk
     self.fire('notify_online', 'Signon',
-              '%s is now online (%s)' % (nick, conn.client.network or nk))
+              '%s is now online (%s)' % (nick, net))
     _dispatch_on_hooks('notify_online', conn, (nick,))
-    if conn.client.window:
-      conn.client.window.addline(
-        '[Notify] %s is now online' % nick, state.infoformat)
+    win = self._notify_window() or conn.client.window
+    if win:
+      win.addline('[Notify] %s is now online (%s)' % (nick, net), state.infoformat)
 
   def notify_signoff(self, conn, nick):
     """Called when a /notify nick is detected as offline.
 
-    Fires config-based notifications, /on hooks, and prints to the server window.
-    Called from ISON polling and (future) server-side MONITOR/WATCH."""
+    Fires config-based notifications, /on hooks, and prints to the
+    active window.
+    Called from ISON polling and server-side MONITOR."""
     from exec_system import _dispatch_on_hooks
     nk = conn.client.network_key
+    net = conn.client.network or nk
     self.fire('notify_offline', 'Signoff',
-              '%s is now offline (%s)' % (nick, conn.client.network or nk))
+              '%s is now offline (%s)' % (nick, net))
     _dispatch_on_hooks('notify_offline', conn, (nick,))
-    if conn.client.window:
-      conn.client.window.addline(
-        '[Notify] %s is now offline' % nick, state.infoformat)
+    win = self._notify_window() or conn.client.window
+    if win:
+      win.addline('[Notify] %s is now offline (%s)' % (nick, net), state.infoformat)
 
   def notify_already_online(self, conn, nick):
     """Called when a newly added /notify nick is already online."""
-    if conn.client.window:
-      conn.client.window.addline(
-        '[Notify] %s is already online' % nick, state.infoformat)
+    net = conn.client.network or conn.client.network_key
+    win = self._notify_window() or conn.client.window
+    if win:
+      win.addline('[Notify] %s is already online (%s)' % (nick, net), state.infoformat)
 
   def handle_ison_reply(self, conn, online_nicks):
     """Process an ISON reply. Compare with previous state, fire notifications."""
