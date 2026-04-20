@@ -46,7 +46,7 @@ from PySide6.QtGui import *
 from PySide6.QtCore import *
 
 APP_NAME = 'qtpyrc'
-APP_VERSION = '1.2.5'  # fallback; overridden by config app_version if set
+APP_VERSION = '1.2.6'  # fallback; overridden by config app_version if set
 
 import state
 from config import loadconfig, UIState
