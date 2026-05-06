@@ -214,7 +214,7 @@ class Channel:
     pfx = conn._nick_prefix(my_nick, self.name) if hasattr(conn, '_nick_prefix') else ''
     self.history.append(HistoryMessage(my_user, my_nick, message, 'message', prefix=pfx))
     self.window.addline_msg(my_nick, message)
-    state.irclogger.log_channel(self.client.network, self.name,
+    state.irclogger.log_channel(conn._log_network, self.name,
                           "<%s> %s" % (my_nick, message))
 
   def update_title(self):
@@ -416,6 +416,11 @@ class Client:
   def reconnect(self, hostname=None, port=None, password=None, **overrides):
     if hostname is not None:
       self.hostname = hostname
+      # New hostname without explicit port: reset to default rather than
+      # reusing whatever port the previous connection happened to use.
+      if port is None:
+        tls = overrides.get('tls', self.tls)
+        self.port = 6697 if tls else 6667
     if port is not None:
       self.port = port
     if password is not None:
@@ -432,7 +437,7 @@ class Client:
     prev_task = getattr(self, '_connect_task', None)
     if prev_task and not prev_task.done():
       prev_task.cancel()
-    self._connect_task = asyncio.ensure_future(self.connect_to_server())
+    self._connect_task = asyncio.ensure_future(self.connect_to_server(first_attempt=True))
 
   def _window_alive(self):
     """Return True if the server window's underlying C++ object still exists."""
@@ -442,7 +447,7 @@ class Client:
     except RuntimeError:
       return False
 
-  async def connect_to_server(self):
+  async def connect_to_server(self, first_attempt=False):
     if not self.hostname:
       return
     self._intentional_disconnect = False
@@ -467,6 +472,7 @@ class Client:
                            starttls=ov.get('starttls', False),
                            family=family)
         connected = True
+        first_attempt = False
       except Exception as e:
         if self._window_alive():
           self.window.redmessage('[Connection failed: %s]' % str(e))
@@ -474,6 +480,20 @@ class Client:
         return
       if not self._window_alive():
         return
+      # On the first attempt from /server, retry immediately with the next
+      # server (or after a short delay for a single server) instead of the
+      # full 30-second reconnect wait.
+      if first_attempt:
+        first_attempt = False
+        if len(self._server_list) > 1:
+          self._next_server()
+          self.window.redmessage('[Trying %s:%s...]' % (self.hostname, self.port))
+        else:
+          self.window.redmessage('[Retrying in 5 seconds...]')
+          await asyncio.sleep(5)
+          if self._intentional_disconnect:
+            return
+        continue
       # Reconnect: cycle servers on failure, use longer delay if we were connected
       if connected:
         if len(self._server_list) > 1:

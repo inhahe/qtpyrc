@@ -224,9 +224,9 @@ class _Irc:
             chan.window.addline_msg(conn.nickname, message)
             # Save to history
             if state.historydb:
-                state.historydb.add(conn.client.network, chnlower,
+                state.historydb.add(conn._log_network, chnlower,
                                     'message', conn.nickname, message)
-            state.irclogger.log_channel(conn.client.network, target,
+            state.irclogger.log_channel(conn._log_network, target,
                                         '<%s> %s' % (conn.nickname, message))
         else:
             # Check queries

@@ -102,10 +102,10 @@ class Commands:
       for chunk in chunks:
         conn.say(target, chunk)
         window.addline_msg(pnick, chunk)
-        state.irclogger.log_channel(window.client.network, target,
+        state.irclogger.log_channel(conn._log_network, target,
                               "<%s> %s" % (conn.nickname, chunk))
         if state.historydb:
-          state.historydb.add(window.client.network, target.lower(),
+          state.historydb.add(conn._log_network, target.lower(),
                               'message', conn.nickname, chunk, prefix=pfx)
       from link_preview import check_and_preview
       check_and_preview(window, text)
@@ -124,9 +124,11 @@ class Commands:
         conn.msg(target, chunk)
         conn._msg_windows[conn.irclower(target)] = window
         window.addline_msg(conn.nickname, chunk)
+        state.irclogger.log(conn._log_network, target,
+                            "<%s> %s" % (conn.nickname, chunk))
         if state.historydb and window.query:
           from irc_client import _query_history_key
-          state.historydb.add(window.client.network,
+          state.historydb.add(conn._log_network,
                               _query_history_key(window.query.nick, window.query.ident),
                               'message', conn.nickname, chunk)
       from link_preview import check_and_preview
@@ -149,10 +151,10 @@ class Commands:
       for chunk in chunks:
         conn.say(chan.name, chunk)
         chan.window.addline_msg(pnick, chunk)
-        state.irclogger.log_channel(window.client.network, chan.name,
+        state.irclogger.log_channel(conn._log_network, chan.name,
                               "<%s> %s" % (conn.nickname, chunk))
         if state.historydb:
-          state.historydb.add(window.client.network, chan.name.lower(),
+          state.historydb.add(conn._log_network, chan.name.lower(),
                               'message', conn.nickname, chunk, prefix=pfx)
 
   def msg(window, text):
@@ -196,10 +198,10 @@ class Commands:
       for chunk in chunks:
         conn.me(target, chunk)
         window.addline_nick(["* ", (pnick,), " %s" % chunk], state.actionformat)
-        state.irclogger.log_channel(window.client.network, target,
+        state.irclogger.log_channel(conn._log_network, target,
                               "* %s %s" % (conn.nickname, chunk))
         if state.historydb:
-          state.historydb.add(window.client.network, target.lower(),
+          state.historydb.add(conn._log_network, target.lower(),
                               'action', conn.nickname, chunk, prefix=pfx)
     elif window.type == "query":
       target = window.remotenick
@@ -207,9 +209,11 @@ class Commands:
       for chunk in chunks:
         conn.me(target, chunk)
         window.addline_nick(["* ", (conn.nickname,), " %s" % chunk], state.actionformat)
+        state.irclogger.log(conn._log_network, target,
+                            "* %s %s" % (conn.nickname, chunk))
         if state.historydb and window.query:
           from irc_client import _query_history_key
-          state.historydb.add(window.client.network,
+          state.historydb.add(conn._log_network,
                               _query_history_key(window.query.nick, window.query.ident),
                               'action', conn.nickname, chunk)
     else:
@@ -296,6 +300,14 @@ class Commands:
       for key in networks:
         if key.lower() == host.lower():
           opts['network_key'] = key
+          # If there's already a client for this network, use it instead of
+          # repurposing the current client (which would create a hidden
+          # duplicate connection).
+          if 'm' not in flags and 'n' not in flags:
+            for c in (state.clients or []):
+              if c.network_key and c.network_key.lower() == key.lower():
+                client = c
+                break
           client.net.key = key
           client._server_list = state.config.get_servers(key)
           if client._server_list:
@@ -441,7 +453,7 @@ class Commands:
     if not window.client.conn:
       window.redmessage("[Error: not connected]")
       return
-    window.client.conn.sendLine("WHOWAS %s" % target)
+    window.client.conn.do_whowas(target, window)
 
   def invite(window, text):
     """/invite <nick> [#channel]
@@ -1490,7 +1502,8 @@ class Commands:
           return
     line = _unquote(text)
     client = target.client
-    network = client.network if client else ''
+    conn = client.conn if client else None
+    network = conn._log_network if conn else (client.network or client.network_key or client.hostname or '')
     if target.type == 'channel' and target.channel:
       state.irclogger.log_channel(network, target.channel.name, line)
     elif target.type == 'query' and hasattr(target, 'remotenick'):
