@@ -648,10 +648,8 @@ class IRCClient:
     def quit(self, message=''):
         self.sendLine("QUIT :%s" % message)
 
-    def me(self, channel, action):
-        if channel[0] not in CHANNEL_PREFIXES:
-            channel = '#' + channel
-        self.ctcpMakeQuery(channel, [('ACTION', action)])
+    def me(self, target, action):
+        self.ctcpMakeQuery(target, [('ACTION', action)])
 
     def ctcpMakeQuery(self, user, messages):
         self.sendLine("PRIVMSG %s :%s" % (user, ctcpStringify(messages)))

@@ -39,6 +39,8 @@ pyinstaller ^
     --hidden-import ruamel.yaml ^
     --hidden-import ruamel.yaml.clib ^
     --collect-submodules ruamel.yaml ^
+    --exclude PyQt6 ^
+    --exclude PyQt5 ^
     qtpyrc.py
 
 if errorlevel 1 (

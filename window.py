@@ -401,21 +401,33 @@ class SearchBar(QWidget):
     self.setMinimumHeight(0)
     self.setVisible(False)
     self._search_cursor = QTextCursor()
-    self._text.setExtraSelections([])
+    try:
+      self._text.setExtraSelections([])
+    except RuntimeError:
+      pass  # C++ object deleted
     if self._close_focus:
-      self._close_focus.setFocus()
+      try:
+        self._close_focus.setFocus()
+      except RuntimeError:
+        pass
 
   def _reset(self):
     self._search_cursor = QTextCursor()
-    self._text.setExtraSelections([])
+    try:
+      self._text.setExtraSelections([])
+    except RuntimeError:
+      pass
 
   def find(self, forward=False):
     query = self._input.text()
     if not query:
       return
+    try:
+      doc = self._text.document()
+    except RuntimeError:
+      return  # C++ object deleted
     case_sensitive = self._case_cb.isChecked()
     use_regex = self._regex_cb.isChecked()
-    doc = self._text.document()
 
     if use_regex:
       try:
@@ -427,24 +439,27 @@ class SearchBar(QWidget):
     else:
       found = self._plain_find(doc, query, case_sensitive, forward)
 
-    if found and not found.isNull() and found.hasSelection():
-      self._search_cursor = found
-      sel = QTextEdit.ExtraSelection()
-      sel.cursor = found
-      fmt = QTextCharFormat()
-      fmt.setBackground(state.config.color_search_bg)
-      fmt.setForeground(state.config.color_search_fg)
-      sel.format = fmt
-      self._text.setExtraSelections([sel])
-      view_cursor = QTextCursor(found)
-      if self._set_cursor:
-        self._text.setTextCursor(found)
+    try:
+      if found and not found.isNull() and found.hasSelection():
+        self._search_cursor = found
+        sel = QTextEdit.ExtraSelection()
+        sel.cursor = found
+        fmt = QTextCharFormat()
+        fmt.setBackground(state.config.color_search_bg)
+        fmt.setForeground(state.config.color_search_fg)
+        sel.format = fmt
+        self._text.setExtraSelections([sel])
+        view_cursor = QTextCursor(found)
+        if self._set_cursor:
+          self._text.setTextCursor(found)
+        else:
+          view_cursor.clearSelection()
+          self._text.setTextCursor(view_cursor)
+        self._text.ensureCursorVisible()
       else:
-        view_cursor.clearSelection()
-        self._text.setTextCursor(view_cursor)
-      self._text.ensureCursorVisible()
-    else:
-      self._text.setExtraSelections([])
+        self._text.setExtraSelections([])
+        self._search_cursor = QTextCursor()
+    except RuntimeError:
       self._search_cursor = QTextCursor()
 
   def _plain_find(self, doc, query, case_sensitive, forward):
@@ -528,7 +543,10 @@ class SearchBar(QWidget):
       if key in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown,
                  Qt.Key.Key_Up, Qt.Key.Key_Down,
                  Qt.Key.Key_Home, Qt.Key.Key_End):
-        vs = self._text.verticalScrollBar()
+        try:
+          vs = self._text.verticalScrollBar()
+        except RuntimeError:
+          return True
         if key == Qt.Key.Key_Up:
           vs.setValue(vs.value() - vs.singleStep() * 3)
         elif key == Qt.Key.Key_Down:
@@ -1161,6 +1179,11 @@ class Window(QWidget):
 
   def _render_text(self, line, base_format=None):
     """Render mIRC-formatted text at current cursor position."""
+    # Strip line-breaking characters — IRC messages are single-line by
+    # protocol, but relay bots or Unicode text may embed paragraph/line
+    # separators that QTextEdit would render as extra blank lines.
+    line = line.replace('\r', '').replace('\n', ' ')
+    line = line.replace('\u2028', ' ').replace('\u2029', ' ')
     bold = underline = italics = False
     base_fg = base_format.foreground().color() if base_format else state.config.fgcolor
     if base_format:

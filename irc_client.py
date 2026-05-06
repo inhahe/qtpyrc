@@ -466,11 +466,18 @@ class IRCClient(asyncirc.IRCClient):
     super().connectionMade()
     self.client.conn = self
     self.window.redmessage('[Connected to %s]' % self.client.hostname)
-    state.irclogger.log_server(self.client.network or self.client.hostname,
+    state.irclogger.log_server(self._log_network,
                          'Connected to %s' % self.client.hostname)
     if state.notifications and not self._skip_on_connect:
       state.notifications.fire('connect', 'Connected',
                                'Connected to %s' % self.client.hostname)
+
+  @property
+  def _log_network(self):
+    """Network name for log file paths.  Prefers the server-reported name
+    (keeps existing log filenames stable) but falls back to the config key
+    or hostname so logs never land in 'unknown'."""
+    return self.client.network or self.client.network_key or self.client.hostname or 'unknown'
 
   def _net_label(self):
     """Return the display label for this network, using the same fallback
@@ -500,7 +507,7 @@ class IRCClient(asyncirc.IRCClient):
     from commands import expand_window_title
     self.window.setWindowTitle(
       expand_window_title(state.config.title_server_disconnected, self.window))
-    state.irclogger.log_server(self.client.network or self.client.hostname,
+    state.irclogger.log_server(self._log_network,
                          'Connection lost: %s' % reason)
     if state.notifications:
       state.notifications.fire('disconnect', 'Disconnected',
@@ -593,6 +600,31 @@ class IRCClient(asyncirc.IRCClient):
         w.addline("[%s] is away: %s" % (params[1], params[2] if len(params) > 2 else ''))
         return
     self._route_nick_error(params)
+
+  def irc_CHGHOST(self, prefix, params):
+    """IRCv3 CHGHOST — a user's ident or host changed (e.g. cloak set).
+    :nick!ident@oldhost CHGHOST newident newhost"""
+    m = asyncirc.usersplit(prefix) if prefix else None
+    if not m:
+      return
+    nick = m.group(1)
+    new_ident = params[0] if len(params) > 0 else None
+    new_host = params[1] if len(params) > 1 else None
+    self._get_user(nick, new_ident, new_host)
+
+  def irc_SETNAME(self, prefix, params):
+    """IRCv3 SETNAME — a user changed their realname.  Silently ignore."""
+    pass
+
+  def irc_ACCOUNT(self, prefix, params):
+    """IRCv3 ACCOUNT — a user logged in/out of services.  Update user record."""
+    m = asyncirc.usersplit(prefix) if prefix else None
+    if not m:
+      return
+    nick = m.group(1)
+    account = params[0] if params else '*'
+    user = self._get_user(nick)
+    user.account = account if account != '*' else None
 
   def irc_unknown(self, prefix, command, params):
     text = ' '.join(p for p in params[1:] if p)
@@ -874,6 +906,38 @@ class IRCClient(asyncirc.IRCClient):
   # are common non-standard WHOIS numerics — they arrive as irc_unknown
   # since they're not in the symbolic map, so we intercept in handleCommand.
 
+  # --- WHOWAS routing ---
+
+  def do_whowas(self, nick, from_window):
+    """Initiate a WHOWAS and remember which window to show results in."""
+    self._whois_windows[self.irclower(nick)] = from_window
+    self.sendLine("WHOWAS %s" % nick)
+
+  def irc_RPL_WHOWASUSER(self, prefix, params):
+    # params: [me, nick, user, host, *, realname]
+    w = self._whois_window(params)
+    nick = params[1] if len(params) > 1 else '?'
+    ident = params[2] if len(params) > 2 else ''
+    host = params[3] if len(params) > 3 else ''
+    realname = params[5] if len(params) > 5 else ''
+    w.addline("[%s] was (%s@%s): %s" % (nick, ident, host, realname))
+
+  def irc_RPL_ENDOFWHOWAS(self, prefix, params):
+    # params: [me, nick, "End of WHOWAS"]
+    w = self._whois_window(params)
+    nick = params[1] if len(params) > 1 else '?'
+    w.addline("[%s] End of WHOWAS" % nick)
+    lnick = self.irclower(nick)
+    QTimer.singleShot(2000, lambda: self._whois_windows.pop(lnick, None))
+
+  def irc_ERR_WASNOSUCHNICK(self, prefix, params):
+    # params: [me, nick, "There was no such nickname"]
+    w = self._whois_window(params)
+    nick = params[1] if len(params) > 1 else '?'
+    msg = params[2] if len(params) > 2 else 'There was no such nickname'
+    w.addline("[%s] %s" % (nick, msg))
+    self._whois_windows.pop(self.irclower(nick), None)
+
   # --- Channel details numerics ---
 
   def irc_RPL_CHANNELMODEIS(self, prefix, params):
@@ -1084,6 +1148,7 @@ class IRCClient(asyncirc.IRCClient):
   _WHOIS_NUMERICS = frozenset({
     'RPL_WHOISUSER', 'RPL_WHOISSERVER', 'RPL_WHOISOPERATOR',
     'RPL_WHOISIDLE', 'RPL_ENDOFWHOIS', 'RPL_WHOISCHANNELS',
+    'RPL_WHOWASUSER', 'RPL_ENDOFWHOWAS', 'ERR_WASNOSUCHNICK',
   })
   # Non-standard WHOIS numerics that aren't in the symbolic map and arrive
   # as raw number strings:  330 = logged-in-as, 338 = actually-using-host,
@@ -1106,7 +1171,8 @@ class IRCClient(asyncirc.IRCClient):
     if command in self._WHOIS_NUMERICS or command in self._SASL_NUMERICS:
       return
     if command in ('CAP', 'BATCH', 'AUTHENTICATE', 'TAGMSG', 'RPL_ISON',
-                   '730', '731', '732', '733', '734'):
+                   '730', '731', '732', '733', '734',
+                   'CHGHOST', 'SETNAME', 'ACCOUNT'):
       return
     if command in ('RPL_WELCOME', 'RPL_YOURHOST', 'RPL_CREATED', 'RPL_MYINFO',
                    'RPL_USERHOST', 'RPL_LUSERCLIENT', 'RPL_LUSERUNKNOWN', 'RPL_LUSERME',
@@ -1117,7 +1183,7 @@ class IRCClient(asyncirc.IRCClient):
       if not text.strip():
         return  # don't show empty timestamp-only lines
       self.window.addline(text)
-      state.irclogger.log_server(self.client.network or getattr(self.client, 'hostname', '') or '', text)
+      state.irclogger.log_server(self._log_network, text)
       if not self._in_playback_batch():
         from link_preview import check_and_preview
         check_and_preview(self.window, text)
@@ -1140,9 +1206,9 @@ class IRCClient(asyncirc.IRCClient):
                               timestamp_override=ts)
       self._hook_activity(target_win, Window.ACTIVITY_MESSAGE)
       if not self._in_playback_batch():
-        _history_save(self.client.network, channel, 'notice', nick, message,
+        _history_save(self._log_network, channel, 'notice', nick, message,
                       prefix=self._nick_prefix(nick, channel))
-        _save_urls(self.client.network, channel, nick, notice_host, message)
+        _save_urls(self._log_network, channel, nick, notice_host, message)
     else:
       # Show in active window if it belongs to this network, else server window
       target_win = self.window
@@ -1177,12 +1243,12 @@ class IRCClient(asyncirc.IRCClient):
       chan.history.append(HistoryMessage(uobj, nick, data, 'action', prefix=pfx))
       chan.window.addline_nick(["* ", (self._pnick(nick, channel),), " %s" % data], state.actionformat,
                               timestamp_override=ts)
-      state.irclogger.log_channel(self.client.network, channel,
+      state.irclogger.log_channel(self._log_network, channel,
                             "* %s %s" % (nick, data))
       if not playback:
-        _history_save(self.client.network, channel, 'action', nick, data,
+        _history_save(self._log_network, channel, 'action', nick, data,
                       prefix=pfx)
-        _save_urls(self.client.network, channel,
+        _save_urls(self._log_network, channel,
                    nick, '%s@%s' % (ident, host), data)
       nk = self.client.network_key
       if is_highlight(data, self.nickname, nk, channel):
@@ -1197,10 +1263,12 @@ class IRCClient(asyncirc.IRCClient):
       q, _ = _find_or_create_query(self, nick, ident, host)
       q.window.addline_nick(["* ", (nick,), " %s" % data], state.actionformat,
                                                     timestamp_override=ts)
+      state.irclogger.log(self._log_network, nick,
+                          "* %s %s" % (nick, data))
       self._hook_activity(self.queries[ident, host].window, Window.ACTIVITY_HIGHLIGHT)
       if not playback:
-        _history_save(self.client.network, _query_history_key(nick, ident), 'action', nick, data)
-        _save_urls(self.client.network, _query_history_key(nick, ident),
+        _history_save(self._log_network, _query_history_key(nick, ident), 'action', nick, data)
+        _save_urls(self._log_network, _query_history_key(nick, ident),
                    nick, '%s@%s' % (ident, host), data)
 
   def join(self, channel, key=None):
@@ -1233,14 +1301,14 @@ class IRCClient(asyncirc.IRCClient):
       # Defer history replay — background drip-feed, or immediate on activation
       # Queue live messages until replay finishes
       chan.window._replay_queue = []
-      chan.window._deferred_replay = (self.client.network, chname, chan)
+      chan.window._deferred_replay = (self._log_network, chname, chan)
       from qtpyrc import _queue_bg_replay
-      _queue_bg_replay(chan.window, self.client.network, chname, chan)
+      _queue_bg_replay(chan.window, self._log_network, chname, chan)
     ts = self._get_server_time()
     chan.window.addline_nick(["* ", (self.nickname,), " has joined %s" % chname], state.infoformat,
                             timestamp_override=ts)
     if not self._in_playback_batch():
-      _history_save(self.client.network, chname, 'join', self.nickname, chname,
+      _history_save(self._log_network, chname, 'join', self.nickname, chname,
                     prefix=self._nick_prefix(self.nickname, chname))
     # persist autojoin only for user-initiated /join (not bouncer/server joins)
     if chnlower in self._user_joins:
@@ -1278,7 +1346,7 @@ class IRCClient(asyncirc.IRCClient):
     chan.window.addline_nick(["* ", (self.nickname,), " has left %s" % channel], state.infoformat,
                             timestamp_override=ts)
     if not self._in_playback_batch():
-      _history_save(self.client.network, channel, 'part', self.nickname, channel,
+      _history_save(self._log_network, channel, 'part', self.nickname, channel,
                     prefix=self._nick_prefix(self.nickname, channel))
     if chnlower in self._hopping:
       self._deactivate_channel(chnlower)
@@ -1295,10 +1363,10 @@ class IRCClient(asyncirc.IRCClient):
     chan = self.channels.get(chnlower)
     if chan:
       chan.window.redmessage('[Kicked from %s by %s (%s)]' % (channel, self._pnick(kicker, channel), message))
-      state.irclogger.log_channel(self.client.network or '', channel,
+      state.irclogger.log_channel(self._log_network, channel,
                             'Kicked by %s (%s)' % (kicker, message))
       if not self._in_playback_batch():
-        _history_save(self.client.network, channel, 'kick', kicker,
+        _history_save(self._log_network, channel, 'kick', kicker,
                       'Kicked from %s by %s (%s)' % (channel, kicker, message),
                       prefix=self._nick_prefix(kicker, channel))
     if state.config.close_on_kick:
@@ -1332,11 +1400,16 @@ class IRCClient(asyncirc.IRCClient):
     self._hook_activity(qwin, Window.ACTIVITY_HIGHLIGHT)
     if hasattr(qwin, '_typing_timer') and qwin._typing_timer is not None:
       qwin.set_nick_typing(nick, False)
+    state.irclogger.log(self._log_network, nick,
+                        "<%s> %s" % (nick, message))
     if not self._in_playback_batch():
-      _history_save(self.client.network, _query_history_key(nick, ident), 'message', nick, message)
-      _save_urls(self.client.network, _query_history_key(nick, ident),
+      _history_save(self._log_network, _query_history_key(nick, ident), 'message', nick, message)
+      _save_urls(self._log_network, _query_history_key(nick, ident),
                  nick, '%s@%s' % (ident, host), message)
-      if new_query and not qwin._is_active_window():
+      # Notify for all private messages unless the app is focused and the
+      # query is the active window (same behavior as channel highlights).
+      app_focused = state.app and state.app.mainwin.isActiveWindow()
+      if not app_focused or not qwin._is_active_window():
         self._hook_notify('new_query', 'Message from %s' % nick, message)
       if new_query and state.config.whois_on_query:
         self.do_whois(nick, qwin)
@@ -1357,12 +1430,12 @@ class IRCClient(asyncirc.IRCClient):
       pfx = self._nick_prefix(nick, channel)
       chan.history.append(HistoryMessage(uobj, nick, message, 'message', prefix=pfx))
       chan.window.addline_msg(self._pnick(nick, channel), message, timestamp_override=ts)
-      state.irclogger.log_channel(self.client.network, channel,
+      state.irclogger.log_channel(self._log_network, channel,
                             "<%s> %s" % (nick, message))
       if not self._in_playback_batch():
-        _history_save(self.client.network, channel, 'message', nick, message,
+        _history_save(self._log_network, channel, 'message', nick, message,
                       prefix=pfx)
-        _save_urls(self.client.network, channel,
+        _save_urls(self._log_network, channel,
                    nick, '%s@%s' % (ident, host), message)
       # Activity: highlight if our nick or custom patterns match
       nk = self.client.network_key
@@ -1392,7 +1465,7 @@ class IRCClient(asyncirc.IRCClient):
       chan.window.addline_nick(["* ", (nick,), " has joined %s" % channel], state.infoformat,
                               timestamp_override=ts)
       if not self._in_playback_batch():
-        _history_save(self.client.network, channel, 'join', nick, channel,
+        _history_save(self._log_network, channel, 'join', nick, channel,
                       prefix=pfx)
     # Auto-op check
     if is_auto_op(nickidhost, self.client.network_key, channel):
@@ -1414,7 +1487,7 @@ class IRCClient(asyncirc.IRCClient):
       chan.window.addline_nick(["* ", (pn,), " has left %s" % channel], state.infoformat,
                               timestamp_override=ts)
       if not self._in_playback_batch():
-        _history_save(self.client.network, channel, 'part', nick, channel, prefix=pfx)
+        _history_save(self._log_network, channel, 'part', nick, channel, prefix=pfx)
 
   def userQuit(self, usermask, quitMessage):
     uobj, nick, ident, host = self._parse_user(usermask)
@@ -1433,7 +1506,7 @@ class IRCClient(asyncirc.IRCClient):
         chan.window.addline_nick(["* ", (pn,), " has quit (%s)" % (quitMessage or "")], state.infoformat,
                                 timestamp_override=ts)
         if not playback:
-          _history_save(self.client.network, chnlower, 'quit', nick, quitMessage or '', prefix=pfx)
+          _history_save(self._log_network, chnlower, 'quit', nick, quitMessage or '', prefix=pfx)
     # Remove from network-wide user list
     self.client.users.pop(lnick, None)
 
@@ -1477,12 +1550,17 @@ class IRCClient(asyncirc.IRCClient):
         chan.window.addline_nick(["* ", (self._pnick(oldname, chan.name),), " is now known as ", (newname,)], state.infoformat,
                                 timestamp_override=ts)
         if not playback:
-          _history_save(self.client.network, chnlower, 'nick', oldname, newname,
+          _history_save(self._log_network, chnlower, 'nick', oldname, newname,
                         prefix=self._nick_prefix(oldname, chan.name))
-    # Update queries
-    if (self.client.network, loldname) in self.client.queries:
-      self.client.queries[self.client.network, lnewname] = self.client.queries.pop((self.client.network, loldname))
-      self.client.queries[self.client.network, lnewname].nick = newname
+    # Update queries — keys are (ident, host), so just update the nick field
+    for q in self.client.queries.values():
+      if q.nick and self.irclower(q.nick) == loldname:
+        q.nick = newname
+        q.update_title()
+        if q.window:
+          q.window.addline_nick(
+            ["* ", (oldname,), " is now known as ", (newname,)],
+            state.infoformat, timestamp_override=ts)
 
   def modeChanged(self, usermask, channel, set_, modes, args):
     nick = usermask.split('!', 1)[0]
@@ -1532,7 +1610,7 @@ class IRCClient(asyncirc.IRCClient):
       chan.window.addline_nick(["* ", (self._pnick(nick, channel),), " sets mode %s%s%s" % (sign, modes, arg_str)], state.infoformat,
                               timestamp_override=ts)
       if not self._in_playback_batch():
-        _history_save(self.client.network, channel, 'mode', nick,
+        _history_save(self._log_network, channel, 'mode', nick,
                       "sets mode %s%s%s" % (sign, modes, arg_str),
                       prefix=self._nick_prefix(nick, channel))
 
@@ -1551,5 +1629,5 @@ class IRCClient(asyncirc.IRCClient):
       chan.window.addline_nick(["* ", (self._pnick(nick, channel),), " changed the topic to: %s" % newTopic], state.infoformat,
                               timestamp_override=ts)
       if not self._in_playback_batch():
-        _history_save(self.client.network, channel, 'topic', nick, newTopic,
+        _history_save(self._log_network, channel, 'topic', nick, newTopic,
                       prefix=self._nick_prefix(nick, channel))
