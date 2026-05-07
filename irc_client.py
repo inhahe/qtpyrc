@@ -628,8 +628,32 @@ class IRCClient(asyncirc.IRCClient):
 
   def irc_unknown(self, prefix, command, params):
     text = ' '.join(p for p in params[1:] if p)
-    if text.strip():
-      self.window.addline(text)
+    if not text.strip():
+      return
+    # Try to route to the relevant window based on params[1].
+    # Most IRC error/reply numerics use the shape [my_nick, target, ...].
+    # If target is a channel we're in, show the error there rather than
+    # burying it in the server window where it's easy to miss.
+    if len(params) >= 2:
+      target = params[1]
+      if target and target[0] in '#&!+':
+        chnlower = self.irclower(target)
+        chan = self.client.channels.get(chnlower)
+        if chan and chan.window:
+          chan.window.redmessage(text)
+          return
+      # If target is a nick with an open query, route there
+      lnick = self.irclower(target)
+      w = self._msg_windows.pop(lnick, None)
+      if w:
+        w.redmessage(text)
+        return
+      from commands import _find_query
+      _, q = _find_query(self.client, target)
+      if q and q.window:
+        q.window.redmessage(text)
+        return
+    self.window.addline(text)
 
   def invited(self, nick, channel):
     self.window.addline("[%s invited you to %s]" % (nick, channel))

@@ -89,6 +89,8 @@ class StubWindow:
         self.subwindow = _NullWidget()
         # Cursor stub
         self.cur = _NullWidget()
+        # Scrollbar stub (used by Client._window_alive() to test for C++ deletion)
+        self.vs = type('StubScrollBar', (), {'value': lambda self: 0})()
         # Deferred replay
         self._deferred_replay = None
 
@@ -133,6 +135,16 @@ class StubWindow:
 
     def _widget_alive(self):
         return True
+
+    def _is_active_window(self):
+        return False
+
+    def queue_replay_callback(self, cb):
+        """In headless mode, callbacks always run immediately (no replay queue)."""
+        return False
+
+    def isActiveWindow(self):
+        return False
 
     def _updateBottomAlign(self):
         pass

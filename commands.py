@@ -1433,7 +1433,7 @@ class Commands:
   def stdout(window, text):
     """Write text to stdout."""
     import sys
-    print(_unquote(text), file=sys.stdout)
+    print(_unquote(text), file=sys.stdout, flush=True)
 
   def stderr(window, text):
     """Write text to stderr."""
