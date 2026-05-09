@@ -49,6 +49,8 @@ class Commands:
         return
       # Mark as user-initiated so persist_autojoins only fires for /join
       conn._user_joins.add(chnlower)
+      if not no_activate:
+        conn._activate_on_join.add(chnlower)
       if key:
         conn.join(chan_name, key)
       else:

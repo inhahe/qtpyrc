@@ -229,6 +229,7 @@ class IRCClient(asyncirc.IRCClient):
     self._pending_keys = {}   # irclower(channel) -> key used in JOIN
     self._user_joins = set()  # irclower(channel) names from explicit /join
     self._user_parts = set()  # irclower(channel) names from explicit /part
+    self._activate_on_join = set()  # irclower(channel) names to activate when joined
     self._hopping = set()     # irclower(channel) names currently being /hopped
 
     rl = state.config.resolve(nk, 'rate_limit')
@@ -1334,6 +1335,10 @@ class IRCClient(asyncirc.IRCClient):
     if not self._in_playback_batch():
       _history_save(self._log_network, chname, 'join', self.nickname, chname,
                     prefix=self._nick_prefix(self.nickname, chname))
+    # Activate the window for user-initiated /join (not bouncer/server joins)
+    if chnlower in self._activate_on_join:
+      self._activate_on_join.discard(chnlower)
+      state.app.mainwin.workspace.setActiveSubWindow(chan.window.subwindow)
     # persist autojoin only for user-initiated /join (not bouncer/server joins)
     if chnlower in self._user_joins:
       self._user_joins.discard(chnlower)
