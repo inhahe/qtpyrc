@@ -774,19 +774,29 @@ def _close_window(widget, force=False):
 
   elif widget.type == 'server':
     has_children = bool(client.channels or client.queries)
-    if not force and (conn or has_children):
+    has_connect_task = (hasattr(client, '_connect_task') and client._connect_task
+                        and not client._connect_task.done())
+    if not force and (conn or has_children or has_connect_task):
       label = client.network_key or client.network or getattr(client, 'hostname', '') or 'server'
       if conn and has_children:
         msg = 'Disconnect from %s and close all its windows?' % label
       elif conn:
         msg = 'Disconnect from %s?' % label
-      else:
+      elif has_children:
         msg = 'Close %s and all its windows?' % label
+      else:
+        msg = 'Close %s?' % label
       reply = QMessageBox.question(
         state.app.mainwin, 'Close Server', msg,
         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
       if reply != QMessageBox.StandardButton.Yes:
         return
+    # Stop the reconnect loop BEFORE disconnecting so it doesn't
+    # reconnect and create orphaned channel tabs with no server window.
+    client._intentional_disconnect = True
+    connect_task = getattr(client, '_connect_task', None)
+    if connect_task and not connect_task.done():
+      connect_task.cancel()
     if conn:
       conn.quit('Closing')
     for chan in list(client.channels.values()):
