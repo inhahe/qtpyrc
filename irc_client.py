@@ -224,6 +224,7 @@ class IRCClient(asyncirc.IRCClient):
     self._login_password = ov.get('login_password')
     self._alt_nick_idx = 0
     self._whois_windows = {}  # lowercased nick -> Window to display results in
+    self._who_windows = {}    # irclower(target) -> Window that sent /who
     self._ctcp_windows = {}   # lowercased nick -> Window that sent CTCP request
     self._msg_windows = {}    # lowercased nick -> Window that last sent a PRIVMSG
     self._pending_keys = {}   # irclower(channel) -> key used in JOIN
@@ -963,6 +964,38 @@ class IRCClient(asyncirc.IRCClient):
     w.addline("[%s] %s" % (nick, msg))
     self._whois_windows.pop(self.irclower(nick), None)
 
+  # --- WHO routing ---
+  # WHO replies (352, 315) are silently consumed unless the user explicitly
+  # typed /who, in which case they're displayed in the requesting window.
+  # Bouncers and servers often auto-WHO channels on join; those should not
+  # produce visible output.
+
+  def do_who(self, target, from_window):
+    """Initiate a WHO and remember which window to show results in."""
+    self._who_windows[self.irclower(target)] = from_window
+    self.sendLine("WHO %s" % target)
+
+  def irc_RPL_WHOREPLY(self, prefix, params):
+    # 352: [me, channel, user, host, server, nick, flags, :hopcount realname]
+    if len(params) < 2:
+      return
+    target = params[1]
+    w = self._who_windows.get(self.irclower(target))
+    if w:
+      text = ' '.join(params[1:])
+      w.addline(text)
+
+  def irc_RPL_ENDOFWHO(self, prefix, params):
+    # 315: [me, target, "End of /WHO list."]
+    if len(params) < 2:
+      return
+    target = params[1]
+    ltarget = self.irclower(target)
+    w = self._who_windows.pop(ltarget, None)
+    if w:
+      msg = params[2] if len(params) > 2 else 'End of /WHO list.'
+      w.addline(msg)
+
   # --- Channel details numerics ---
 
   def irc_RPL_CHANNELMODEIS(self, prefix, params):
@@ -1180,7 +1213,21 @@ class IRCClient(asyncirc.IRCClient):
   # 671 = is using a secure connection
   _WHOIS_RAW_NUMERICS = frozenset({'275', '330', '338', '671'})
 
+  # Raw numerics not in the symbolic map that should be silently consumed.
+  # 329 = RPL_CREATIONTIME (channel creation timestamp, sent after MODE on join)
+  # 354 = RPL_WHOSPCRPL (WHOX extended WHO reply, used by Undernet and others)
+  _SILENT_RAW_NUMERICS = frozenset({'329', '354'})
+
   def handleCommand(self, command, prefix, params):
+    # Silently consume raw numerics that have no useful display
+    # (329 = channel creation time, 354 = WHOX extended WHO reply)
+    if command in self._SILENT_RAW_NUMERICS:
+      # 354 (WHOX): route to requesting window if user-initiated /who
+      if command == '354' and len(params) >= 2:
+        w = self._who_windows.get(self.irclower(params[1]))
+        if w:
+          w.addline(' '.join(params[1:]))
+      return
     # Route non-standard WHOIS numerics to the requesting window
     if command in self._WHOIS_RAW_NUMERICS and len(params) > 1:
       w = self._whois_window(params)
@@ -1194,6 +1241,8 @@ class IRCClient(asyncirc.IRCClient):
     # Don't echo WHOIS replies to the server window — the irc_RPL_WHOIS*
     # handlers already route them to the correct window.
     if command in self._WHOIS_NUMERICS or command in self._SASL_NUMERICS:
+      return
+    if command in ('RPL_WHOREPLY', 'RPL_ENDOFWHO'):
       return
     if command in ('CAP', 'BATCH', 'AUTHENTICATE', 'TAGMSG', 'RPL_ISON',
                    '730', '731', '732', '733', '734',

@@ -130,6 +130,7 @@ Not all servers support all ELIST parameters. The `>N` filter is the most widely
 | Command | Syntax | Description |
 |---------|--------|-------------|
 | `/whois` | `/whois <nick>` | Query information about a user |
+| `/who` | `/who [channel\|mask]` | Show WHO list. Defaults to current channel if omitted |
 
 ### Ignore & Auto-Op
 

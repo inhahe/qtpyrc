@@ -457,6 +457,19 @@ class Commands:
       return
     window.client.conn.do_whowas(target, window)
 
+  def who(window, text):
+    target = text.strip()
+    if not target:
+      if window.type == 'channel' and window.channel:
+        target = window.channel.name
+      else:
+        window.redmessage("[Usage: /who <channel|mask>]")
+        return
+    if not window.client.conn:
+      window.redmessage("[Error: not connected]")
+      return
+    window.client.conn.do_who(target, window)
+
   def invite(window, text):
     """/invite <nick> [#channel]
     If no channel given, uses the current channel."""
