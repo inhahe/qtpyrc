@@ -1808,11 +1808,11 @@ def _open_query(client, nick):
   # Find existing query by nick
   for key, q in client.queries.items():
     if conn.irclower(q.nick) == lnick:
-      q.window.subwindow.setFocus()
+      state.app.mainwin.workspace.setActiveSubWindow(q.window.subwindow)
       return q
   q = Query(client, nick)
   client.queries[lnick] = q
-  q.window.subwindow.setFocus()
+  state.app.mainwin.workspace.setActiveSubWindow(q.window.subwindow)
   return q
 
 
