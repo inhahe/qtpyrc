@@ -232,6 +232,8 @@ class IRCClient(asyncirc.IRCClient):
     self._user_parts = set()  # irclower(channel) names from explicit /part
     self._activate_on_join = set()  # irclower(channel) names to activate when joined
     self._hopping = set()     # irclower(channel) names currently being /hopped
+    self._own_messages = []   # dedup: [(irclower(target), text)] for own msgs awaiting echo
+    self._own_actions = []    # dedup: [(irclower(target), text)] for own actions awaiting echo
 
     rl = state.config.resolve(nk, 'rate_limit')
     self.lineRate = rl if rl and rl > 0 else None
@@ -1311,6 +1313,12 @@ class IRCClient(asyncirc.IRCClient):
     chnlower = self.irclower(channel)
     if chnlower in self.client.channels:
       chan = self.client.channels[chnlower]
+      # Bouncer echo dedup for actions (same as chanmsg)
+      if self.irclower(nick) == self.irclower(self.nickname):
+        dedup_key = (chnlower, data)
+        if dedup_key in self._own_actions:
+          self._own_actions.remove(dedup_key)
+          return
       if nick in chan.window._typing_nicks:
         chan.window.set_nick_typing(nick, False)
       pfx = self._nick_prefix(nick, channel)
@@ -1502,6 +1510,13 @@ class IRCClient(asyncirc.IRCClient):
     chnlower = self.irclower(channel)
     if chnlower in self.client.channels:
       chan = self.client.channels[chnlower]
+      # Bouncer echo dedup: if this is our own nick echoing back a message
+      # we already displayed and saved in Commands.say, suppress the echo.
+      if self.irclower(nick) == self.irclower(self.nickname):
+        dedup_key = (chnlower, message)
+        if dedup_key in self._own_messages:
+          self._own_messages.remove(dedup_key)
+          return
       # Clear typing indicator when they send a message
       if nick in chan.window._typing_nicks:
         chan.window.set_nick_typing(nick, False)

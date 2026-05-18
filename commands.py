@@ -100,9 +100,12 @@ class Commands:
       target = window.channel.name
       pnick = conn._pnick(conn.nickname, target)
       pfx = conn._nick_prefix(conn.nickname, target)
+      chnlower = conn.irclower(target)
       chunks = conn.split_message(target, text)
       for chunk in chunks:
         conn.say(target, chunk)
+        # Mark for dedup so the bouncer echo doesn't double-display/save
+        conn._own_messages.append((chnlower, chunk))
         window.addline_msg(pnick, chunk)
         state.irclogger.log_channel(conn._log_network, target,
                               "<%s> %s" % (conn.nickname, chunk))
@@ -195,10 +198,12 @@ class Commands:
       target = window.channel.name
       pnick = conn._pnick(conn.nickname, target)
       pfx = conn._nick_prefix(conn.nickname, target)
+      chnlower = conn.irclower(target)
       # ACTION has extra overhead: \x01ACTION ...\x01 = 9 bytes
       chunks = conn.split_message(target, text, extra_overhead=9)
       for chunk in chunks:
         conn.me(target, chunk)
+        conn._own_actions.append((chnlower, chunk))
         window.addline_nick(["* ", (pnick,), " %s" % chunk], state.actionformat)
         state.irclogger.log_channel(conn._log_network, target,
                               "* %s %s" % (conn.nickname, chunk))
@@ -428,6 +433,13 @@ class Commands:
     # Route reply back to this window
     conn.do_ctcp(target, tag, data, window)
     window.addline('[CTCP %s to %s%s]' % (tag, target, (': ' + data) if data else ''))
+
+  def ping(window, text):
+    target = text.strip()
+    if not target:
+      window.redmessage('[Usage: /ping <nick>]')
+      return
+    Commands.ctcp(window, '%s PING' % target)
 
   def nick(window, text):
     n = text.strip()

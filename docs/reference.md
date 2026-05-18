@@ -131,6 +131,7 @@ Not all servers support all ELIST parameters. The `>N` filter is the most widely
 |---------|--------|-------------|
 | `/whois` | `/whois <nick>` | Query information about a user |
 | `/who` | `/who [channel\|mask]` | Show WHO list. Defaults to current channel if omitted |
+| `/ping` | `/ping <nick>` | CTCP PING a user (measures round-trip time) |
 
 ### Ignore & Auto-Op
 
