@@ -758,6 +758,7 @@ class IRCClient:
 
     def nickChanged(self, nick):
         self.nickname = nick
+        self._pending_nick = None
 
     def userRenamed(self, oldname, newname):
         pass
@@ -1016,10 +1017,29 @@ class IRCClient:
 
     def irc_NICK(self, prefix, params):
         nick = prefix.split('!', 1)[0]
-        if self.irclower(nick) == self.irclower(self.nickname):
-            self.nickChanged(params[0])
+        new_nick = params[0]
+        # Check if this is our own nick change.  The obvious case is the
+        # prefix matching self.nickname, but bouncers can silently change
+        # our nick on the network side without relaying the NICK message,
+        # leaving self.nickname stale.  In that case the prefix won't match
+        # self.nickname, but the new nick will match our _pending_nick from
+        # a /nick we sent.  Recognise that as our own change too so
+        # self.nickname stays in sync.
+        is_self = (self.irclower(nick) == self.irclower(self.nickname))
+        if not is_self:
+            pending = getattr(self, '_pending_nick', None)
+            if pending and self.irclower(new_nick) == self.irclower(pending):
+                is_self = True
+                # The bouncer changed our nick behind our back.  Sync
+                # self.nickname to the actual prefix nick so that
+                # nickChanged -> userRenamed finds the correct entry in
+                # channel nick lists (which track the real nick, not our
+                # stale self.nickname).
+                self.nickname = nick
+        if is_self:
+            self.nickChanged(new_nick)
         else:
-            self.userRenamed(nick, params[0])
+            self.userRenamed(nick, new_nick)
 
     def irc_KICK(self, prefix, params):
         kicker = prefix.split('!')[0]
