@@ -107,52 +107,63 @@ def _history_replay(window, network, channel, limit=None, chan_obj=None):
     return
   window._replay_queue = []  # queue live messages during replay
   window._in_replay = True
+  saved_auto_scroll = window._auto_scroll
+  window._auto_scroll = False
+  window.output.setUpdatesEnabled(False)
+  window.cur.beginEditBlock()
   show_prefix = state.config.show_mode_prefix_messages
   history = chan_obj.history if chan_obj else None
-  for ts, etype, nick, text, prefix in rows:
-    # Show timestamp from DB instead of current time
-    ts_short = ts[11:16]  # HH:MM from "YYYY-MM-DD HH:MM:SS"
-    pn = (prefix + nick) if (show_prefix and prefix and nick) else nick
-    if etype == 'message':
-      window.addline_msg(pn, text, timestamp_override=ts_short)
-    elif etype == 'action':
-      window.addline_nick(["* ", (pn,), " %s" % text], state.actionformat,
-                          timestamp_override=ts_short)
-    elif etype == 'notice':
-      window.addline_nick(["-", (pn,), "- %s" % text], state.noticeformat,
-                          timestamp_override=ts_short)
-    elif etype == 'join':
-      window.addline_nick(["* ", (pn,), " has joined %s" % (text or channel)],
-                          state.infoformat, timestamp_override=ts_short)
-    elif etype == 'part':
-      window.addline_nick(["* ", (pn,), " has left %s" % (text or channel)],
-                          state.infoformat, timestamp_override=ts_short)
-    elif etype == 'quit':
-      window.addline_nick(["* ", (pn,), " has quit (%s)" % (text or "")],
-                          state.infoformat, timestamp_override=ts_short)
-    elif etype == 'kick':
-      window.addline(text or '', state.infoformat, timestamp_override=ts_short)
-    elif etype == 'nick':
-      old, new = (nick, text) if text else (nick, '?')
-      pold = (prefix + old) if (show_prefix and prefix) else old
-      window.addline_nick(["* ", (pold,), " is now known as ", (new,)],
-                          state.infoformat, timestamp_override=ts_short)
-    elif etype == 'mode':
-      window.addline_nick(["* ", (pn,), " %s" % (text or '')],
-                          state.infoformat, timestamp_override=ts_short)
-    elif etype == 'topic':
-      window.addline_nick(["* ", (pn,), " changed the topic to: %s" % (text or '')],
-                          state.infoformat, timestamp_override=ts_short)
-    # Populate channel history buffer from DB rows
-    if history is not None and nick and etype in (
-        'message', 'action', 'notice', 'join', 'part', 'quit', 'kick'):
-      msg = HistoryMessage(None, nick, text, etype, prefix=prefix or '')
-      try:
-        msg.time = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
-      except (ValueError, TypeError):
-        pass
-      history.append(msg)
-  window._in_replay = False
+  try:
+    for ts, etype, nick, text, prefix in rows:
+      # Show timestamp from DB instead of current time
+      ts_short = ts[11:16]  # HH:MM from "YYYY-MM-DD HH:MM:SS"
+      pn = (prefix + nick) if (show_prefix and prefix and nick) else nick
+      if etype == 'message':
+        window.addline_msg(pn, text, timestamp_override=ts_short)
+      elif etype == 'action':
+        window.addline_nick(["* ", (pn,), " %s" % text], state.actionformat,
+                            timestamp_override=ts_short)
+      elif etype == 'notice':
+        window.addline_nick(["-", (pn,), "- %s" % text], state.noticeformat,
+                            timestamp_override=ts_short)
+      elif etype == 'join':
+        window.addline_nick(["* ", (pn,), " has joined %s" % (text or channel)],
+                            state.infoformat, timestamp_override=ts_short)
+      elif etype == 'part':
+        window.addline_nick(["* ", (pn,), " has left %s" % (text or channel)],
+                            state.infoformat, timestamp_override=ts_short)
+      elif etype == 'quit':
+        window.addline_nick(["* ", (pn,), " has quit (%s)" % (text or "")],
+                            state.infoformat, timestamp_override=ts_short)
+      elif etype == 'kick':
+        window.addline(text or '', state.infoformat, timestamp_override=ts_short)
+      elif etype == 'nick':
+        old, new = (nick, text) if text else (nick, '?')
+        pold = (prefix + old) if (show_prefix and prefix) else old
+        window.addline_nick(["* ", (pold,), " is now known as ", (new,)],
+                            state.infoformat, timestamp_override=ts_short)
+      elif etype == 'mode':
+        window.addline_nick(["* ", (pn,), " %s" % (text or '')],
+                            state.infoformat, timestamp_override=ts_short)
+      elif etype == 'topic':
+        window.addline_nick(["* ", (pn,), " changed the topic to: %s" % (text or '')],
+                            state.infoformat, timestamp_override=ts_short)
+      # Populate channel history buffer from DB rows
+      if history is not None and nick and etype in (
+          'message', 'action', 'notice', 'join', 'part', 'quit', 'kick'):
+        msg = HistoryMessage(None, nick, text, etype, prefix=prefix or '')
+        try:
+          msg.time = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
+        except (ValueError, TypeError):
+          pass
+        history.append(msg)
+  finally:
+    window._in_replay = False
+    window.cur.endEditBlock()
+    window.output.setUpdatesEnabled(True)
+    window._auto_scroll = saved_auto_scroll
+    if saved_auto_scroll:
+      window._scroll_to_bottom()
   window.add_separator(" End of saved history ")
   window._flush_replay_queue()
 
@@ -1684,18 +1695,32 @@ class IRCClient(asyncirc.IRCClient):
           if target_user:
             sym_idx = self._prefix_modes.index(c)
             sym = self._prefix_symbols[sym_idx] if sym_idx < len(self._prefix_symbols) else ''
+            # Accumulate/remove prefix symbols (don't overwrite)
+            current = target_user.prefix.get(chnlower, '')
             if set_:
-              target_user.prefix[chnlower] = sym
+              if sym not in current:
+                current += sym
+                # Sort by server's prefix order (highest first)
+                target_user.prefix[chnlower] = ''.join(
+                    sorted(current, key=lambda s: (
+                        self._prefix_symbols.index(s) if s in self._prefix_symbols else 999
+                    ))
+                )
             else:
-              target_user.prefix.pop(chnlower, None)
+              current = current.replace(sym, '')
+              if current:
+                target_user.prefix[chnlower] = current
+              else:
+                target_user.prefix.pop(chnlower, None)
             # Refresh nick list display for the affected user
             if chan:
               nl = chan.window.nickslist
               for i in range(nl.count()):
                 item = nl.item(i)
-                if item and item._nick == param:
+                if item and self.irclower(item._nick) == lnick:
                   item.refresh_prefix()
                   break
+              nl.sortItems()
     # Display the mode change
     sign = '+' if set_ else '-'
     arg_str = ' ' + ' '.join(args) if args else ''

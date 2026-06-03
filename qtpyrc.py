@@ -482,7 +482,11 @@ def _bg_replay_tick():
     show_prefix = state.config.show_mode_prefix_messages
     history = bg['chan_obj'].history if bg['chan_obj'] else None
 
-    # Batch all insertions to suppress per-line document relayout
+    # Batch all insertions to suppress per-line document relayout.
+    # Suppress auto-scroll during the batch — we'll scroll once at the end.
+    saved_auto_scroll = window._auto_scroll
+    window._auto_scroll = False
+    window.output.setUpdatesEnabled(False)
     window._in_replay = True
     window.cur.beginEditBlock()
     try:
@@ -529,6 +533,11 @@ def _bg_replay_tick():
     finally:
       window._in_replay = False
       window.cur.endEditBlock()
+      window.output.setUpdatesEnabled(True)
+      # Restore auto-scroll and scroll to bottom once for the whole chunk
+      window._auto_scroll = saved_auto_scroll
+      if saved_auto_scroll:
+        window._scroll_to_bottom()
 
     bg['index'] = end
 
@@ -606,40 +615,51 @@ def _on_subwindow_activated(subwindow):
       del widget._bg_replay
       if remaining:
         widget._in_replay = True
+        saved_auto_scroll = widget._auto_scroll
+        widget._auto_scroll = False
+        widget.output.setUpdatesEnabled(False)
+        widget.cur.beginEditBlock()
         show_prefix = state.config.show_mode_prefix_messages
         history = bg['chan_obj'].history if bg['chan_obj'] else None
-        for ts, etype, nick, text, prefix in remaining:
-          ts_short = ts[11:16]
-          pn = (prefix + nick) if (show_prefix and prefix and nick) else nick
-          if etype == 'message':
-            widget.addline_msg(pn, text, timestamp_override=ts_short)
-          elif etype == 'action':
-            widget.addline_nick(["* ", (pn,), " %s" % text], state.actionformat,
-                                timestamp_override=ts_short)
-          elif etype == 'notice':
-            widget.addline_nick(["-", (pn,), "- %s" % text], state.noticeformat,
-                                timestamp_override=ts_short)
-          elif etype == 'join':
-            widget.addline_nick(["* ", (pn,), " has joined %s" % (text or chname)],
-                                state.infoformat, timestamp_override=ts_short)
-          elif etype == 'part':
-            widget.addline_nick(["* ", (pn,), " has left %s" % (text or chname)],
-                                state.infoformat, timestamp_override=ts_short)
-          elif etype == 'quit':
-            widget.addline_nick(["* ", (pn,), " has quit (%s)" % (text or "")],
-                                state.infoformat, timestamp_override=ts_short)
-          elif etype == 'kick':
-            widget.addline(text or '', state.infoformat, timestamp_override=ts_short)
-          elif etype == 'nick':
-            widget.addline_nick(["* ", (pn,), " is now known as ", (text or '?',)],
-                                state.infoformat, timestamp_override=ts_short)
-          elif etype == 'topic':
-            widget.addline_nick(["* ", (pn,), " changed the topic to: %s" % (text or '')],
-                                state.infoformat, timestamp_override=ts_short)
-          elif etype == 'mode':
-            widget.addline_nick(["* ", (pn,), " %s" % text], state.infoformat,
-                                timestamp_override=ts_short)
-        widget._in_replay = False
+        try:
+          for ts, etype, nick, text, prefix in remaining:
+            ts_short = ts[11:16]
+            pn = (prefix + nick) if (show_prefix and prefix and nick) else nick
+            if etype == 'message':
+              widget.addline_msg(pn, text, timestamp_override=ts_short)
+            elif etype == 'action':
+              widget.addline_nick(["* ", (pn,), " %s" % text], state.actionformat,
+                                  timestamp_override=ts_short)
+            elif etype == 'notice':
+              widget.addline_nick(["-", (pn,), "- %s" % text], state.noticeformat,
+                                  timestamp_override=ts_short)
+            elif etype == 'join':
+              widget.addline_nick(["* ", (pn,), " has joined %s" % (text or chname)],
+                                  state.infoformat, timestamp_override=ts_short)
+            elif etype == 'part':
+              widget.addline_nick(["* ", (pn,), " has left %s" % (text or chname)],
+                                  state.infoformat, timestamp_override=ts_short)
+            elif etype == 'quit':
+              widget.addline_nick(["* ", (pn,), " has quit (%s)" % (text or "")],
+                                  state.infoformat, timestamp_override=ts_short)
+            elif etype == 'kick':
+              widget.addline(text or '', state.infoformat, timestamp_override=ts_short)
+            elif etype == 'nick':
+              widget.addline_nick(["* ", (pn,), " is now known as ", (text or '?',)],
+                                  state.infoformat, timestamp_override=ts_short)
+            elif etype == 'topic':
+              widget.addline_nick(["* ", (pn,), " changed the topic to: %s" % (text or '')],
+                                  state.infoformat, timestamp_override=ts_short)
+            elif etype == 'mode':
+              widget.addline_nick(["* ", (pn,), " %s" % text], state.infoformat,
+                                  timestamp_override=ts_short)
+        finally:
+          widget._in_replay = False
+          widget.cur.endEditBlock()
+          widget.output.setUpdatesEnabled(True)
+          widget._auto_scroll = saved_auto_scroll
+          if saved_auto_scroll:
+            widget._scroll_to_bottom()
       widget.add_separator(' End of saved history ')
       widget._flush_replay_queue()
     else:
