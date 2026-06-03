@@ -814,17 +814,46 @@ class Window(QWidget):
       self.input.setFocus()
 
   def _updateBottomAlign(self):
-    """Push content to bottom of viewport when it doesn't fill the window."""
-    doc = self.output.document()
-    viewport_height = self.output.viewport().height()
-    root_frame = doc.rootFrame()
-    fmt = root_frame.frameFormat()
-    old_margin = fmt.topMargin()
-    content_height = doc.size().height() - old_margin
-    new_margin = max(0, viewport_height - content_height)
-    if abs(old_margin - new_margin) > 1:
-      fmt.setTopMargin(new_margin)
-      root_frame.setFrameFormat(fmt)
+    """Schedule a deferred bottom-align update.
+
+    The actual work (querying doc.size().height() which forces a full
+    document layout) runs once per event-loop iteration via a zero-timer,
+    no matter how many lines were added in the same batch.  Once the
+    content fills the viewport and the margin reaches 0, further calls
+    are skipped entirely until a resize or clear resets the flag.
+    """
+    if self._bottom_align_filled:
+      return  # content already fills viewport — margin is 0, nothing to do
+    if not hasattr(self, '_bottom_align_timer'):
+      self._bottom_align_timer = QTimer(self)
+      self._bottom_align_timer.setSingleShot(True)
+      self._bottom_align_timer.setInterval(0)
+      self._bottom_align_timer.timeout.connect(self._doBottomAlign)
+    if not self._bottom_align_timer.isActive():
+      self._bottom_align_timer.start()
+
+  def _doBottomAlign(self):
+    """Actually compute and apply the top-margin for bottom-alignment."""
+    try:
+      doc = self.output.document()
+      viewport_height = self.output.viewport().height()
+      root_frame = doc.rootFrame()
+      fmt = root_frame.frameFormat()
+      old_margin = fmt.topMargin()
+      content_height = doc.size().height() - old_margin
+      new_margin = max(0, viewport_height - content_height)
+      if new_margin == 0 and old_margin == 0:
+        # Content fills (or exceeds) viewport — it will only grow from
+        # here, so skip all future calls until a resize/clear.
+        self._bottom_align_filled = True
+        return
+      if abs(old_margin - new_margin) > 1:
+        fmt.setTopMargin(new_margin)
+        root_frame.setFrameFormat(fmt)
+        if new_margin == 0:
+          self._bottom_align_filled = True
+    except RuntimeError:
+      pass  # C++ object deleted
 
   # Activity levels: higher overrides lower
   ACTIVITY_NONE = 0
@@ -887,6 +916,7 @@ class Window(QWidget):
     self.vs = self.output.verticalScrollBar()
     self._auto_scroll = True
     self._programmatic_scroll = False
+    self._bottom_align_filled = False  # True once content fills viewport (margin=0)
     self.vs.rangeChanged.connect(self._on_range_changed)
     self.vs.valueChanged.connect(self._on_scroll_changed)
     self.cur = QTextCursor(self.output.document())
@@ -1599,8 +1629,10 @@ class Window(QWidget):
 
   def showEvent(self, event):
     super().showEvent(event)
+    self._bottom_align_filled = False  # viewport size may have changed
     self._updateBottomAlign()
   def resizeEvent(self, event):
+    self._bottom_align_filled = False  # viewport size changed
     self._updateBottomAlign()
   def moveEvent(self, event):
     QWidget.moveEvent(self, event)
@@ -1748,10 +1780,11 @@ class NickItem(QListWidgetItem):
     self._update_display()
 
   def _mode_prefix(self):
-    """Return the mode prefix symbol for this nick in its channel, or ''."""
+    """Return the highest mode prefix symbol for display, or ''."""
     if not state.config.show_mode_prefix_nicklist or not self.user or not self._chnlower:
       return ''
-    return self.user.prefix.get(self._chnlower, '')
+    prefix = self.user.prefix.get(self._chnlower, '')
+    return prefix[0] if prefix else ''
 
   def _update_display(self):
     """Recompose display text from mode prefix, typing prefix, and nick."""
@@ -1779,18 +1812,20 @@ class NickItem(QListWidgetItem):
 
   def _prefix_sort_key(self):
     """Return a sort key: (rank, nick_lower). Lower rank = higher status."""
-    mp = self._mode_prefix()
-    if mp:
-      idx = self._PREFIX_RANK.find(mp)
+    if not self.user or not self._chnlower:
+      return (len(self._PREFIX_RANK) + 1, self._nick.lower())
+    prefix = self.user.prefix.get(self._chnlower, '')
+    if prefix:
+      # Use the first (highest-ranked) symbol
+      idx = self._PREFIX_RANK.find(prefix[0])
       rank = idx if idx >= 0 else len(self._PREFIX_RANK)
     else:
       rank = len(self._PREFIX_RANK) + 1
     return (rank, self._nick.lower())
 
   def __lt__(self, other):
-    if state.config.show_mode_prefix_nicklist:
-      return self._prefix_sort_key() < other._prefix_sort_key()
-    return self._nick.lower() < other._nick.lower()
+    # Always sort by prefix rank (ops at top), regardless of display setting
+    return self._prefix_sort_key() < other._prefix_sort_key()
 
 
 class Inputwidget(QTextEdit):
