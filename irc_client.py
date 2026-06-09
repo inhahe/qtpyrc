@@ -1635,27 +1635,43 @@ class IRCClient(asyncirc.IRCClient):
       self.client.users[lnewname] = user
     # Update per-channel nicks and nick list items
     for chnlower, chan in self.client.channels.items():
-      if oldname in chan.nicks:
-        chan.nicks.discard(oldname)
-        chan.nicks.add(newname)
-        # Re-key in channel users dict
-        u = chan.users.pop(loldname, None)
-        if u:
-          chan.users[lnewname] = u
-        # Update nick list widget
-        nl = chan.window.nickslist
-        for i in range(nl.count()):
-          item = nl.item(i)
-          if item and item._nick == oldname:
-            item.set_nick(newname)
-            if hasattr(item, 'user') and item.user:
-              item.user.nick = newname
-            break
-        chan.window.addline_nick(["* ", (self._pnick(oldname, chan.name),), " is now known as ", (newname,)], state.infoformat,
-                                timestamp_override=ts)
-        if not playback:
-          _history_save(self._log_network, chnlower, 'nick', oldname, newname,
-                        prefix=self._nick_prefix(oldname, chan.name))
+      if oldname not in chan.nicks:
+        continue
+      new_already = newname in chan.nicks
+      chan.nicks.discard(oldname)
+      chan.nicks.add(newname)
+      # Re-key in channel users dict
+      u = chan.users.pop(loldname, None)
+      if u and lnewname not in chan.users:
+        chan.users[lnewname] = u
+      # Update nick list widget. Dedup-safe: if a row for newname already
+      # exists (e.g. a bouncer reconnect left a stale oldname row beside a
+      # freshly-joined newname row), drop the old row instead of creating a
+      # duplicate.
+      nl = chan.window.nickslist
+      old_idx = None
+      new_exists = False
+      for i in range(nl.count()):
+        item = nl.item(i)
+        if not item:
+          continue
+        if item._nick == oldname and old_idx is None:
+          old_idx = i
+        elif item._nick == newname:
+          new_exists = True
+      if old_idx is not None:
+        if new_exists:
+          nl.takeItem(old_idx)
+        else:
+          item = nl.item(old_idx)
+          item.set_nick(newname)
+          if hasattr(item, 'user') and item.user:
+            item.user.nick = newname
+      chan.window.addline_nick(["* ", (self._pnick(oldname, chan.name),), " is now known as ", (newname,)], state.infoformat,
+                              timestamp_override=ts)
+      if not playback:
+        _history_save(self._log_network, chnlower, 'nick', oldname, newname,
+                      prefix=self._nick_prefix(oldname, chan.name))
     # Update queries — keys are (ident, host), so just update the nick field
     for q in self.client.queries.values():
       if q.nick and self.irclower(q.nick) == loldname:
@@ -1665,6 +1681,20 @@ class IRCClient(asyncirc.IRCClient):
           q.window.addline_nick(
             ["* ", (oldname,), " is now known as ", (newname,)],
             state.infoformat, timestamp_override=ts)
+
+  def ownNickResynced(self, old, new):
+    # Our nick drifted out of sync with the server's view of it — almost
+    # always a bouncer (e.g. ZNC) changing our nick during an upstream
+    # reconnect without a NICK message reaching us. Detected because a numeric
+    # reply addressed us by a different nick (see asyncirc._maybe_resync_nick).
+    # Correct self.nickname and reconcile all channel/query/title state so that
+    # own-message echo, own-JOIN detection and op tracking work again.
+    self.nickname = new
+    self.window.addline('[Nick resynced to %s (was %s)]' % (new, old))
+    self.userRenamed(old, new)
+    self._update_server_title()
+    from qtpyrc import _update_all_titles
+    _update_all_titles()
 
   def modeChanged(self, usermask, channel, set_, modes, args):
     nick = usermask.split('!', 1)[0]

@@ -744,7 +744,8 @@ class SettingsDialog(QDialog):
             # Show a placeholder
             lbl = self._pages.get('__net_placeholder__')
             if not lbl:
-                lbl = QLabel("Right-click to add a network.\nSelect a network to edit it.")
+                lbl = QLabel("Right-click \"Networks\" in the tree on the left to add a network.\n"
+                             "Select a network in the tree to edit it.")
                 lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._pages['__net_placeholder__'] = lbl
                 self.stack.addWidget(lbl)
@@ -780,7 +781,7 @@ class SettingsDialog(QDialog):
             menu.exec(self.tree.viewport().mapToGlobal(pos))
 
     def _add_network(self):
-        name, ok = QInputDialog.getText(self, "Add Network", "Network key:")
+        name, ok = QInputDialog.getText(self, "Add Network", "Network name:")
         if not ok or not name.strip():
             return
         name = name.strip()
@@ -796,7 +797,7 @@ class SettingsDialog(QDialog):
         self.tree.setCurrentItem(node)
 
     def _rename_network(self, item, old_key):
-        new_key, ok = QInputDialog.getText(self, "Rename Network", "New key:", text=old_key)
+        new_key, ok = QInputDialog.getText(self, "Rename Network", "New name:", text=old_key)
         if not ok or not new_key.strip() or new_key.strip() == old_key:
             return
         new_key = new_key.strip()

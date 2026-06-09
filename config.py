@@ -174,9 +174,14 @@ def _match_any(user, masks):
   nick = ulow.split('!', 1)[0]
   for m in masks:
     ml = m.lower()
-    # Plain nick match (no ! or @)
+    # Plain nick entry (no ! or @): wildcard-match against the nick if it
+    # contains * or ? (e.g. "bob*" matches bob123), otherwise exact match
+    # (e.g. "bob" matches only bob, not bob123).
     if '!' not in ml and '@' not in ml:
-      if nick == ml:
+      if '*' in ml or '?' in ml:
+        if _mask_match(nick, ml):
+          return True
+      elif nick == ml:
         return True
     else:
       if _mask_match(ulow, ml):

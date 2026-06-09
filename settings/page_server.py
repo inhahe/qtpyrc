@@ -138,7 +138,15 @@ class ServerPage(QWidget):
         srv = {'host': '', 'port': 6667, 'tls': False, 'tls_verify': True}
         self._servers.append(srv)
         self._refresh_list()
-        self._server_list.setCurrentRow(len(self._servers) - 1)
+        new_row = len(self._servers) - 1
+        self._server_list.setCurrentRow(new_row)
+        # setCurrentRow() only emits currentRowChanged when the index actually
+        # changes. _refresh_list() may have already selected this row (e.g. the
+        # very first server, where the row goes from -1 to 0 inside the
+        # signal-blocked refresh), so the form would never load or enable.
+        # Force the edit form to populate/enable for the new row explicitly.
+        self._on_row_changed(new_row)
+        self.host.setFocus()
 
     def _remove_server(self, row=None):
         if row is None:
