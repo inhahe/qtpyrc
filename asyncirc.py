@@ -482,6 +482,12 @@ class IRCClient:
         line = lowDequote(line)
         try:
             tags, prefix, command, params = parsemsg(line)
+            # Self-heal own-nick desync. Every numeric reply addresses us by
+            # our current nick in params[0]; if that disagrees with
+            # self.nickname, a bouncer almost certainly changed our nick during
+            # a reconnect without a (received) NICK message, leaving us stale.
+            if len(command) == 3 and command.isdigit():
+                self._maybe_resync_nick(params)
             if command in numeric_to_symbolic:
                 command = numeric_to_symbolic[command]
             self._current_tags = tags
@@ -492,6 +498,27 @@ class IRCClient:
             traceback.print_exc()
         finally:
             self._current_tags = {}
+
+    def _maybe_resync_nick(self, params):
+        """Re-sync self.nickname from a numeric reply's params[0] if it has
+        drifted (see _lineReceived). Only runs after sign-on, and ignores the
+        pre-registration '*' placeholder, channel targets and server names."""
+        if not getattr(self, '_signed_on', False) or not params:
+            return
+        target = params[0]
+        if (not target or target == '*'
+                or target[0] in CHANNEL_PREFIXES
+                or ' ' in target
+                or '.' in target):  # '.' => server name, never a nick
+            return
+        if self.irclower(target) == self.irclower(self.nickname):
+            return
+        self.ownNickResynced(self.nickname, target)
+
+    def ownNickResynced(self, old, new):
+        """Hook: our own nick was found out-of-sync with the server and is
+        being corrected from *old* to *new*. Override to reconcile UI state."""
+        self.nickname = new
 
     def handleCommand(self, command, prefix, params):
         method = getattr(self, "irc_%s" % command, None)
@@ -670,6 +697,7 @@ class IRCClient:
         self._cap_ls_buffer = []
         self._batches = {}
         self._current_tags = {}
+        self._signed_on = False
         if self._starttls_requested and not self._starttls_done:
             # Request STARTTLS before anything else
             self._send_raw("STARTTLS")
@@ -924,6 +952,7 @@ class IRCClient:
         # Server confirms our nick in params[0]
         if params:
             self.nickname = params[0]
+        self._signed_on = True
         self.signedOn(params[1] if len(params) > 1 else '')
 
     def irc_JOIN(self, prefix, params):

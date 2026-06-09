@@ -137,16 +137,40 @@ Not all servers support all ELIST parameters. The `>N` filter is the most widely
 
 | Command | Syntax | Description |
 |---------|--------|-------------|
-| `/ignore` | `/ignore [-lrw] [mask] [#channel] [network]` | Add/remove/list ignore masks |
-| `/aop` | `/aop [-lrw] <on\|off\|nick\|address> [#channels] [type] [network]` | Manage auto-op entries |
+| `/ignore` | `/ignore [-lrw] [nick\|mask] [#channel] [network]` | Add/remove/list ignore masks |
+| `/aop` | `/aop [-lrw] <nick\|mask> [#chan1,#chan2] [network]` | Auto-op matching users when they join |
 
-Flags for both commands:
+#### /ignore and /aop details
 
-- **`-l`** — List current entries. For `/ignore -l`, lists all ignores. For `/aop -l`, lists all auto-op entries. Shows entries at all levels (global, network, channel).
-- **`-r`** — Remove an entry instead of adding it. E.g. `/ignore -r spammer` removes the mask.
-- **`-w`** — Operate at the global (top-level) scope, regardless of which network you're connected to. Without `-w`, entries are scoped to the current network. Combine with `#channel` to scope to a specific channel.
+Both commands take a **nick or a hostmask** as the target. A bare nick (e.g. `spammer`) matches that nickname exactly. If a bare nick contains `*` or `?` wildcards (e.g. `bob*`), it matches any nick fitting the pattern (`bob`, `bob123`, …). A hostmask matches `nick!ident@host` with `*` and `?` wildcards (e.g. `trusted!*@*.example.com`, `*!*@somehost`). `/aop` gives `+o` automatically to anyone matching an entry when they join a channel the entry applies to.
 
-Ignore and auto-op lists are **additive**: channel-level entries add to network-level, which add to global. A user matching any level is considered ignored/auto-opped.
+**Flags** (shared by `/ignore`, `/aop`, `/highlight` and `/notify`):
+
+- **`-l`** — List current entries (shows all scopes: global, network, channel). `/ignore -l`, `/aop -l`, etc. `-l` is also the default when you give no target.
+- **`-r`** — Remove an entry instead of adding it. E.g. `/aop -r trusted!*@*`.
+- **`-w`** — Operate at the global (top-level) scope, so the entry applies on every network. Without `-w`, entries are scoped to the current network.
+
+**Scopes** (broadest to narrowest):
+
+- **Global** — pass `-w`. Applies on all networks.
+- **Network** (default) — applies on the current network. To target a different network, pass its network key as the last argument.
+- **Channel** — pass one or more channels (comma-separated, **no spaces**) to scope the entry to just those channels, e.g. `/aop trusted!*@* #chan1,#chan2`. If you give no channel while in a channel window, the current channel is used.
+
+Lists are **additive**: channel-level entries add to network-level, which add to global. A user matching at any level is ignored / auto-opped.
+
+Examples:
+
+```
+/ignore spammer!*@*              Ignore on the current network
+/ignore -w spammer!*@*           Ignore globally (all networks)
+/ignore spammer #channel         Ignore only in #channel
+/ignore -r spammer               Remove ignore on the current network
+/ignore -l                       List all ignores
+/aop trusted                     Auto-op the nick "trusted" on this network
+/aop trusted!*@* #chan1,#chan2   Auto-op a hostmask in specific channels
+/aop -r trusted!*@*              Remove an auto-op entry
+/aop -l                          List all auto-op entries
+```
 
 ### Highlights
 
@@ -154,9 +178,11 @@ Ignore and auto-op lists are **additive**: channel-level entries add to network-
 |---------|--------|-------------|
 | `/highlight` | `/highlight [-lrw] [pattern]` | Add/remove/list custom highlight patterns |
 
-Flags: same as `/ignore` (`-l` list, `-r` remove, `-w` global scope).
+#### /highlight details
 
-Patterns: plain strings are case-insensitive substring matches. Use `/regex/` for regex with optional flags: `i` (case-insensitive), `m` (multiline — `^`/`$` match line boundaries), `s` (dotall — `.` matches newlines). Example: `/regex/i`, `/regex/ims`. Use `{nick}` to refer to your current nickname (escaped properly in regex). The default config includes `{nick}`; removing it disables nick-mention highlighting. Unknown `{name}` references produce a one-time warning. Use `\{` and `\}` for literal braces, `\\` for a literal backslash (so a literal `\{` requires `\\{`). Regex quantifiers like `{3}` and `{1,5}` are unaffected.
+**Flags:** same as `/ignore` — `-l` list, `-r` remove, `-w` global scope (no `-w` = current network).
+
+**Patterns:** plain strings are case-insensitive substring matches. Use `/regex/` for a regex with optional trailing flags: `i` (case-insensitive), `m` (multiline — `^`/`$` match line boundaries), `s` (dotall — `.` matches newlines). Example: `/regex/i`, `/regex/ims`. Use `{nick}` to refer to your current nickname (escaped properly inside the regex). The default config includes `{nick}`; removing it disables nick-mention highlighting. Unknown `{name}` references produce a one-time warning. Use `\{` and `\}` for literal braces, `\\` for a literal backslash (so a literal `\{` requires `\\{`). Regex quantifiers like `{3}` and `{1,5}` are unaffected.
 
 Highlights are **additive** (global + network + channel). Set `highlights: false` at the channel level in config to disable all highlights. Set `highlight_notify: false` to suppress beep/desktop notifications while still coloring highlights.
 
@@ -166,25 +192,15 @@ Highlights are **additive** (global + network + channel). Set `highlights: false
 |---------|--------|-------------|
 | `/notify` | `/notify [-lrw] [nick]` | Add/remove/list nicks on the watch list |
 
-Flags:
+#### /notify details
+
+**Flags:**
 
 - **`-l`** — List notify nicks with their online/offline status.
 - **`-r`** — Remove a nick from the list.
 - **`-w`** — Operate on the global list instead of the current network's list.
 
 Nicks are checked via server-side MONITOR when supported (instant push notifications), falling back to periodic ISON polling. When a watched nick signs on or off, a notification is shown in the server window (and optionally a sound/desktop alert per config). Use `/on notify_online` and `/on notify_offline` for custom per-nick actions.
-
-Examples:
-
-```
-/ignore spammer!*@*              Add ignore on current network
-/ignore -w spammer!*@*           Add global ignore (all networks)
-/ignore spammer #channel         Add ignore only in #channel
-/ignore -r spammer               Remove ignore from current network
-/ignore -l                       List all ignores
-/aop trusted!*@* #chan1,#chan2    Auto-op in specific channels
-/aop -l                          List all auto-op entries
-```
 
 ### Scripting
 

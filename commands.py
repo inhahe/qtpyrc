@@ -958,8 +958,11 @@ class Commands:
     window.client.conn.sendLine("MODE %s -q %s" % (window.channel.name, target))
 
   def aop(window, text):
-    """/aop [-lrw] <on|off|nick|address> [#channel1,#channel2,...] [type] [network]
-    -r remove  -l list  -w any network (top-level)"""
+    """/aop [-lrw] <nick|mask> [#chan1,#chan2,...] [network]
+    Auto-op users matching a nick or hostmask when they join.
+    -l list  -r remove  -w global (all networks)
+    With no channel given in a channel window, the current channel is used.
+    (Legacy: `on`/`off` and a trailing `type` arg are accepted but ignored.)"""
     args = text.split()
     flags = set()
     positional = []
@@ -1645,12 +1648,7 @@ class Commands:
 
     # If user typed /help /command, try command lookup first
     if force_command:
-      lines_found = []
-      for m in re.finditer(
-          r'^\| `/%s`\s*\|([^|]*)\|([^|]*)\|' % re.escape(cmd), ref, re.MULTILINE):
-        syntax = m.group(1).strip().strip('`').strip()
-        desc = m.group(2).strip()
-        lines_found.append((syntax, desc))
+      lines_found = _find_command_rows(ref, cmd)
       if lines_found:
         for syntax, desc in lines_found:
           window.addline('  %s — %s' % (syntax, desc))
@@ -1734,12 +1732,7 @@ class Commands:
       return
 
     # Find table rows for this command
-    lines_found = []
-    for m in re.finditer(
-        r'^\| `/%s`\s*\|([^|]*)\|([^|]*)\|' % re.escape(cmd), ref, re.MULTILINE):
-      syntax = m.group(1).strip().strip('`').strip()
-      desc = m.group(2).strip()
-      lines_found.append((syntax, desc))
+    lines_found = _find_command_rows(ref, cmd)
 
     if not lines_found:
       window.redmessage('[No help for: /%s]' % cmd)
@@ -2536,6 +2529,31 @@ def _parse_server_args(text):
     result['starttls'] = True
 
   return result
+
+
+def _unescape_md(s):
+  """Turn markdown-escaped table-cell text back into plain text."""
+  return s.replace('\\|', '|').replace('\\\\', '\\')
+
+
+def _find_command_rows(ref, cmd):
+  """Find reference.md table rows for /cmd, handling escaped pipes (\\|).
+
+  Returns a list of (syntax, desc) tuples. The cell pattern
+  ``(?:[^|\\]|\\.)*`` matches any run of characters that are neither an
+  unescaped pipe nor a backslash, plus any backslash-escaped character — so
+  ``<on\\|off>`` is captured whole instead of being cut at the first pipe.
+  """
+  import re as _re
+  cell = r'((?:[^|\\]|\\.)*)'
+  pat = _re.compile(
+      r'^\| `/%s`\s*\|%s\|%s\|' % (_re.escape(cmd), cell, cell), _re.MULTILINE)
+  rows = []
+  for m in pat.finditer(ref):
+    syntax = _unescape_md(m.group(1).strip()).strip('`').strip()
+    desc = _unescape_md(m.group(2).strip())
+    rows.append((syntax, desc))
+  return rows
 
 
 def _show_help_section(window, ref, heading, start_match=None):
