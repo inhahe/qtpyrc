@@ -377,19 +377,12 @@ class NotificationManager:
         current[nick_lower] = False
         self.notify_signoff(conn, nick_lower)
 
-  @staticmethod
-  def _notify_window():
-    """Return the active window, or None."""
-    active_sub = state.app.mainwin.workspace.activeSubWindow()
-    if active_sub:
-      return active_sub.widget()
-    return None
-
   def notify_signon(self, conn, nick):
     """Called when a /notify nick is detected as online.
 
     Fires config-based notifications, /on hooks, and prints to the
-    active window.
+    server/status window for this network (notify updates are status
+    noise and should not land in whatever window happens to be active).
     Called from ISON polling and server-side MONITOR."""
     from exec_system import _dispatch_on_hooks
     nk = conn.client.network_key
@@ -397,7 +390,7 @@ class NotificationManager:
     self.fire('notify_online', 'Signon',
               '%s is now online (%s)' % (nick, net))
     _dispatch_on_hooks('notify_online', conn, (nick,))
-    win = self._notify_window() or conn.client.window
+    win = conn.client.window
     if win:
       win.addline('[Notify] %s is now online (%s)' % (nick, net), state.infoformat)
 
@@ -405,7 +398,7 @@ class NotificationManager:
     """Called when a /notify nick is detected as offline.
 
     Fires config-based notifications, /on hooks, and prints to the
-    active window.
+    server/status window for this network.
     Called from ISON polling and server-side MONITOR."""
     from exec_system import _dispatch_on_hooks
     nk = conn.client.network_key
@@ -413,14 +406,16 @@ class NotificationManager:
     self.fire('notify_offline', 'Signoff',
               '%s is now offline (%s)' % (nick, net))
     _dispatch_on_hooks('notify_offline', conn, (nick,))
-    win = self._notify_window() or conn.client.window
+    win = conn.client.window
     if win:
       win.addline('[Notify] %s is now offline (%s)' % (nick, net), state.infoformat)
 
   def notify_already_online(self, conn, nick):
-    """Called when a newly added /notify nick is already online."""
+    """Called when a newly added /notify nick is already online.
+
+    Prints to the server/status window for this network."""
     net = conn.client.network or conn.client.network_key
-    win = self._notify_window() or conn.client.window
+    win = conn.client.window
     if win:
       win.addline('[Notify] %s is already online (%s)' % (nick, net), state.infoformat)
 

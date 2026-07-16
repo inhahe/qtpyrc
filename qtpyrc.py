@@ -424,142 +424,129 @@ def _update_all_titles():
 # ---------------------------------------------------------------------------
 
 _bg_replay_queue = []  # list of (window, network, chname, chan_obj)
-_bg_replay_timer = None
+_bg_replay_task = None  # asyncio.Task driving the drip-feed (replaces QTimer)
 _bg_replay_total = 0   # total channels queued for replay
 _bg_replay_done = 0    # channels completed
 
 
 def _start_bg_replay():
-  """Start the background replay timer if there's work to do."""
-  global _bg_replay_timer
-  if _bg_replay_queue and not _bg_replay_timer:
-    interval = state.config.history_bg_interval if state.config else 100
-    _bg_replay_timer = QTimer()
-    _bg_replay_timer.timeout.connect(_bg_replay_tick)
-    _bg_replay_timer.start(interval)
+  """Start the background replay driver task if there's work and it isn't
+  already running."""
+  global _bg_replay_task
+  if _bg_replay_queue and (_bg_replay_task is None or _bg_replay_task.done()):
+    _bg_replay_task = asyncio.ensure_future(_bg_replay_loop())
     _update_replay_status()
 
 
-def _bg_replay_tick():
-  """Process one chunk of history replay for the next window in the queue."""
-  global _bg_replay_timer, _bg_replay_done
-  while _bg_replay_queue:
-    entry = _bg_replay_queue[0]
-    window, network, chname, chan_obj = entry
+def _bg_replay_drop(window):
+  """Remove *window* from the drip-feed queue and clear its replay attributes.
+  Called when a window is closed or fully replayed by the click path so the
+  drip-feed loop stops considering it."""
+  for i, entry in enumerate(_bg_replay_queue):
+    if entry[0] is window:
+      _bg_replay_queue.pop(i)
+      break
+  for attr in ('_bg_replay', '_deferred_replay'):
+    if hasattr(window, attr):
+      try:
+        delattr(window, attr)
+      except Exception:
+        pass
 
-    # Skip if window was already fully replayed (user clicked on it)
-    if not hasattr(window, '_deferred_replay') and not hasattr(window, '_bg_replay'):
-      _bg_replay_queue.pop(0)
-      continue
 
-    # First time for this window — fetch all rows and store as pending
-    if not hasattr(window, '_bg_replay'):
-      db = state.historydb
-      limit = state.config.history_replay_channels
-      if not db or limit <= 0:
+async def _bg_replay_loop():
+  """Drip-feed saved history into queued windows one chunk at a time.
+
+  Reads from the DB on a background thread (state.historyreader) so the GUI
+  thread never blocks on disk I/O -- this was ~a third of GUI-thread wall time.
+  Each fetched chunk is rendered on the GUI thread (cheap) via the shared
+  render_history_rows() helper. Replaces the old 200ms QTimer tick.
+
+  Concurrency note: this coroutine only ever runs on the GUI thread (qasync),
+  suspended at each await. The click-to-open path (_on_subwindow_activated) may
+  run during an await and finish a window's replay itself; we re-validate the
+  window after every await and discard a just-fetched chunk if the window was
+  finished or closed in the meantime, so a chunk is never rendered twice."""
+  global _bg_replay_task, _bg_replay_done, _bg_replay_total
+  from irc_client import render_history_rows
+  from shiboken6 import isValid
+  reader = state.historyreader
+  try:
+    while _bg_replay_queue:
+      entry = _bg_replay_queue[0]
+      window, network, chname, chan_obj = entry
+      chunk = state.config.history_bg_chunk if state.config else 50
+      interval = (state.config.history_bg_interval if state.config else 100) / 1000.0
+
+      # Window already fully replayed (user clicked into it) or closed -> drop.
+      if not hasattr(window, '_deferred_replay') and not hasattr(window, '_bg_replay'):
+        if _bg_replay_queue and _bg_replay_queue[0] is entry:
+          _bg_replay_queue.pop(0)
+        continue
+
+      if not reader:
+        break
+
+      # First time for this window: resolve the id-range to replay (off-thread).
+      if not hasattr(window, '_bg_replay'):
+        limit = state.config.history_replay_channels
+        if limit <= 0:
+          _bg_replay_drop(window)
+          _bg_replay_done += 1
+          _update_replay_status()
+          continue
+        bounds = await reader.replay_bounds(network, chname.lower(), limit)
+        # The click path may have handled/closed this window during the await.
+        if not isValid(window.output):
+          _bg_replay_drop(window)
+          continue
+        if not hasattr(window, '_deferred_replay') and not hasattr(window, '_bg_replay'):
+          continue  # click path did a full replay while we were reading bounds
+        if not bounds:
+          _bg_replay_drop(window)
+          _bg_replay_done += 1
+          _update_replay_status()
+          continue
+        min_id, max_id = bounds
+        window._replay_queue = []  # queue live messages during replay
+        window._bg_replay = {
+          'last_id': min_id - 1,   # id > last_id, so first chunk includes min_id
+          'max_id': max_id,        # snapshot: don't replay live msgs added later
+          'chan_obj': chan_obj,
+        }
+
+      bg = window._bg_replay
+      rows, new_last_id = await reader.get_chunk(
+        network, chname.lower(), bg['last_id'], bg['max_id'], chunk)
+
+      # Re-validate after the await. If the click path finished this window's
+      # replay (deleting _bg_replay) or the window was closed, discard this
+      # chunk -- the click path already rendered from bg['last_id'] onward.
+      if getattr(window, '_bg_replay', None) is not bg or not isValid(window.output):
+        continue
+
+      render_history_rows(window, chname, rows, bg['chan_obj'])
+      bg['last_id'] = new_last_id
+
+      # Fewer rows than a full chunk means we've reached max_id -> done.
+      if len(rows) < chunk:
+        window.add_separator(' End of saved history ')
+        if hasattr(window, '_bg_replay'):
+          del window._bg_replay
         if hasattr(window, '_deferred_replay'):
           del window._deferred_replay
-        _bg_replay_queue.pop(0)
-        continue
-      rows = db.get_last(network, chname.lower(), limit)
-      if not rows:
-        if hasattr(window, '_deferred_replay'):
-          del window._deferred_replay
-        _bg_replay_queue.pop(0)
-        continue
-      window._replay_queue = []  # queue live messages during replay
-      window._bg_replay = {
-        'rows': rows,
-        'index': 0,
-        'chan_obj': chan_obj,
-      }
+        window._flush_replay_queue()  # flush live msgs queued during replay
+        if _bg_replay_queue and _bg_replay_queue[0] is entry:
+          _bg_replay_queue.pop(0)
+        _bg_replay_done += 1
+        _update_replay_status()
 
-    bg = window._bg_replay
-    rows = bg['rows']
-    idx = bg['index']
-    chunk = state.config.history_bg_chunk if state.config else 50
-    end = min(idx + chunk, len(rows))
-    show_prefix = state.config.show_mode_prefix_messages
-    history = bg['chan_obj'].history if bg['chan_obj'] else None
-
-    # Batch all insertions to suppress per-line document relayout.
-    # Suppress auto-scroll during the batch — we'll scroll once at the end.
-    saved_auto_scroll = window._auto_scroll
-    window._auto_scroll = False
-    window.output.setUpdatesEnabled(False)
-    window._in_replay = True
-    window.cur.beginEditBlock()
-    try:
-      for i in range(idx, end):
-        ts, etype, nick, text, prefix = rows[i]
-        ts_short = ts[11:16]
-        pn = (prefix + nick) if (show_prefix and prefix and nick) else nick
-        if etype == 'message':
-          window.addline_msg(pn, text, timestamp_override=ts_short)
-        elif etype == 'action':
-          window.addline_nick(["* ", (pn,), " %s" % text], state.actionformat,
-                              timestamp_override=ts_short)
-        elif etype == 'notice':
-          window.addline_nick(["-", (pn,), "- %s" % text], state.noticeformat,
-                              timestamp_override=ts_short)
-        elif etype == 'join':
-          window.addline_nick(["* ", (pn,), " has joined %s" % (text or chname)],
-                              state.infoformat, timestamp_override=ts_short)
-        elif etype == 'part':
-          window.addline_nick(["* ", (pn,), " has left %s" % (text or chname)],
-                              state.infoformat, timestamp_override=ts_short)
-        elif etype == 'quit':
-          window.addline_nick(["* ", (pn,), " has quit (%s)" % (text or "")],
-                              state.infoformat, timestamp_override=ts_short)
-        elif etype == 'kick':
-          window.addline(text or '', state.infoformat, timestamp_override=ts_short)
-        elif etype == 'nick':
-          window.addline_nick(["* ", (pn,), " is now known as ", (text or '?',)],
-                              state.infoformat, timestamp_override=ts_short)
-        elif etype == 'topic':
-          window.addline_nick(["* ", (pn,), " changed the topic to: %s" % (text or '')],
-                              state.infoformat, timestamp_override=ts_short)
-        elif etype == 'mode':
-          window.addline_nick(["* ", (pn,), " %s" % text], state.infoformat,
-                              timestamp_override=ts_short)
-        if history is not None:
-          from models import HistoryMessage
-          from datetime import datetime
-          try:
-            t = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
-          except Exception:
-            t = datetime.now()
-          history.append(HistoryMessage(None, nick, text, etype, prefix=prefix, time=t))
-    finally:
-      window._in_replay = False
-      window.cur.endEditBlock()
-      window.output.setUpdatesEnabled(True)
-      # Restore auto-scroll and scroll to bottom once for the whole chunk
-      window._auto_scroll = saved_auto_scroll
-      if saved_auto_scroll:
-        window._scroll_to_bottom()
-
-    bg['index'] = end
-
-    if end >= len(rows):
-      # Done with this window
-      window.add_separator(' End of saved history ')
-      del window._bg_replay
-      if hasattr(window, '_deferred_replay'):
-        del window._deferred_replay
-      # Flush any live messages that arrived during replay
-      window._flush_replay_queue()
-      _bg_replay_queue.pop(0)
-      _bg_replay_done += 1
-      _update_replay_status()
-    return  # one chunk per tick
-
-  # Queue empty — stop timer
-  if _bg_replay_timer:
-    _bg_replay_timer.stop()
-    _bg_replay_timer = None
-    _bg_replay_done = 0
-    _bg_replay_total = 0
+      await asyncio.sleep(interval)
+  finally:
+    _bg_replay_task = None
+    if not _bg_replay_queue:
+      _bg_replay_done = 0
+      _bg_replay_total = 0
     _update_replay_status()
 
 
@@ -567,7 +554,8 @@ def _update_replay_status():
   """Update the {replay} variable and refresh the title bar."""
   if not state.app or not state.app.mainwin:
     return
-  if _bg_replay_timer and _bg_replay_total > 0:
+  active = _bg_replay_task is not None and not _bg_replay_task.done()
+  if active and _bg_replay_total > 0:
     state.app.mainwin._replay_status = (
         ' [history: %d/%d]' % (_bg_replay_done, _bg_replay_total))
   else:
@@ -607,11 +595,14 @@ def _on_subwindow_activated(subwindow):
     # Cancel any in-progress background replay
     bg = getattr(widget, '_bg_replay', None)
     if bg:
-      # Background replay was partial — finish it immediately
-      # Continue from where background left off
-      rows = bg['rows']
-      idx = bg['index']
-      remaining = rows[idx:]
+      # Background replay was partial — finish it immediately by pulling every
+      # remaining row in one go (chunk=-1 -> SQLite LIMIT -1 = unlimited).
+      db = state.historydb
+      if db:
+        remaining, _ = db.get_chunk(
+          network, chname.lower(), bg['last_id'], bg['max_id'], -1)
+      else:
+        remaining = []
       del widget._bg_replay
       if remaining:
         widget._in_replay = True
@@ -765,6 +756,8 @@ def _close_window(widget, force=False):
   ws = state.app.mainwin.workspace
   if not widget or not hasattr(widget, 'type') or not widget.client:
     return
+  # Stop any in-flight background replay from rendering into this window.
+  _bg_replay_drop(widget)
   client = widget.client
   conn = client.conn
   sub = widget.subwindow
@@ -926,8 +919,92 @@ def _register_settings_paths():
     desc[ui_path] = label
 
 
-def makeapp(args):
-  app = QApplication(args)
+def _build_event_type_names():
+  """Map QEvent.Type integer -> readable name, for event-profiling reports."""
+  from PySide6.QtCore import QEvent
+  names = {}
+  try:
+    for nm in dir(QEvent.Type):
+      if nm.startswith('_'):
+        continue
+      val = getattr(QEvent.Type, nm)
+      try:
+        names[int(val)] = nm
+      except (TypeError, ValueError):
+        pass
+  except Exception:
+    pass
+  return names
+
+
+class _ProfilingApplication(QApplication):
+  """QApplication that times every event dispatch (notify()) so we can measure
+  the wall-clock latency of each user interaction -- keypresses, clicks, paints
+  -- separately from background/server work. Records per-event-type totals and
+  a chronological log of slow events (>= _slow_threshold). Enabled only when
+  --sample-profile is used, so normal runs pay nothing. Times are absolute
+  perf_counter() values so the stack sampler can correlate slow events with the
+  Python stacks it captured during them."""
+  def __init__(self, args):
+    super().__init__(args)
+    import collections, time as _t, threading
+    self._ev_names = _build_event_type_names()
+    self._ev_stats = collections.defaultdict(lambda: [0, 0.0, 0.0])  # [n,tot,max]
+    # Exclusive self-time per (event_type, receiver_class). "Self" = time spent
+    # inside super().notify() for this event MINUS time spent in nested notify()
+    # calls it triggered. Crucially this captures Qt's own C++ work that does NOT
+    # re-enter notify() -- e.g. a QPaintEvent on the chat widget whose real cost
+    # is QTextDocument layout+paint. That work is invisible to the Python stack
+    # sampler, so this is the only way to see how much of the "Qt black box" is
+    # actually the text widget repainting vs. genuine event routing.
+    self._self_stats = collections.defaultdict(lambda: [0, 0.0, 0.0])  # [n,tot,max]
+    self._call_stack = threading.local()  # per-thread nesting of [children_incl]
+    self._slow_events = []          # (t_abs_start, event_type, receiver_cls, dt)
+    self._slow_threshold = 0.030    # 30 ms ~= a perceptible hitch
+    self._prof_start = _t.perf_counter()
+
+  def notify(self, receiver, event):
+    import time as _t
+    stack = getattr(self._call_stack, 'frames', None)
+    if stack is None:
+      stack = self._call_stack.frames = []
+    frame = [0.0]            # accumulates inclusive time of my nested notifies
+    stack.append(frame)
+    t0 = _t.perf_counter()
+    try:
+      return super().notify(receiver, event)
+    finally:
+      incl = _t.perf_counter() - t0
+      stack.pop()
+      if stack:
+        stack[-1][0] += incl   # charge my inclusive time to my parent's children
+      self_time = incl - frame[0]
+      if self_time < 0.0:
+        self_time = 0.0
+      try:
+        et = int(event.type())
+      except Exception:
+        et = -1
+      try:
+        rname = type(receiver).__name__
+      except Exception:
+        rname = '?'
+      s = self._ev_stats[et]
+      s[0] += 1
+      s[1] += incl
+      if incl > s[2]:
+        s[2] = incl
+      ss = self._self_stats[(et, rname)]
+      ss[0] += 1
+      ss[1] += self_time
+      if self_time > ss[2]:
+        ss[2] = self_time
+      if incl >= self._slow_threshold:
+        self._slow_events.append((t0, et, rname, incl))
+
+
+def makeapp(args, profile_events=False):
+  app = _ProfilingApplication(args) if profile_events else QApplication(args)
   app.setStyleSheet(_build_app_stylesheet())
   app.mainwin = QMainWindow()
   app.mainwin._custom_titlebar = None
@@ -1398,9 +1475,20 @@ def quit():
     if client.conn:
       client.conn.disconnect()
   # Close history database (safe now — no handlers are running)
+  if state.historyreader:
+    try:
+      state.historyreader.close()
+    except Exception:
+      pass
   if state.historydb:
     try:
       state.historydb.close()
+    except Exception:
+      pass
+  # Flush and close cached log file handles
+  if state.irclogger:
+    try:
+      state.irclogger.close()
     except Exception:
       pass
   loop.stop()
@@ -1776,6 +1864,27 @@ def _apply_set_opts(config, set_opts):
 # ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
+  # Write our PID to a fixed file so external profiling/debug tools (py-spy,
+  # cdb) can attach to THIS exact process without guessing among python.exe's.
+  # Done first thing so attach-mode profilers can catch startup. Cleaned up on
+  # a clean exit; a hard crash leaves a stale file, so consumers should verify
+  # the PID is still alive (debug\pyspy_dump.bat does).
+  try:
+    _dbg_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debug')
+    os.makedirs(_dbg_dir, exist_ok=True)
+    _pid_file = os.path.join(_dbg_dir, 'qtpyrc.pid')
+    with open(_pid_file, 'w') as _pf:
+      _pf.write(str(os.getpid()))
+    import atexit as _atexit_pid
+    def _remove_pid_file():
+      try:
+        os.remove(_pid_file)
+      except OSError:
+        pass
+    _atexit_pid.register(_remove_pid_file)
+  except OSError:
+    pass
+
   import qasync
   from logger import IRCLogger
   from plugins import loadscripts, apply_hooks, init_irc
@@ -1825,6 +1934,29 @@ if __name__ == '__main__':
                       help='Generate a new config file and exit. '
                            'PATH can be a filename, directory, or dir/filename '
                            '(default: config.yaml in current directory)')
+  parser.add_argument('--profile', nargs='?', const='qtpyrc.prof', default=None,
+                      metavar='[PATH]',
+                      help='Run under cProfile and write stats on exit. '
+                           'PATH is the output .prof file (default: qtpyrc.prof '
+                           'in the config directory). On exit, the top functions '
+                           'by cumulative and total time are printed to stderr.')
+  parser.add_argument('--sample-profile', nargs='?', const='qtpyrc.folded',
+                      default=None, metavar='[PATH]',
+                      help='Low-overhead in-process interaction profiler. A '
+                           'background thread samples the main (GUI) thread\'s '
+                           'Python stack ~200x/sec, and the QApplication times '
+                           'every event dispatch. On exit it writes Brendan-Gregg '
+                           'folded stacks to PATH (default: qtpyrc.folded in the '
+                           'config directory) and prints to stderr: a split of '
+                           'GUI-thread time into idle / server-driven / UI, where '
+                           'UI-interaction time went, a worst-first log of slow '
+                           'interactions (keypress/click/paint >= 30ms) each '
+                           'correlated with the stacks sampled during it, and '
+                           'event-dispatch time by type. Unlike cProfile it '
+                           'barely slows the app, and unlike py-spy it needs no '
+                           'cross-process access, so it works reliably on Windows '
+                           'and new Python builds. It isolates the latency of '
+                           'YOUR actions from background/server work.')
   cli_args, qt_args = parser.parse_known_args()
   # Error on unrecognized arguments (parse_known_args silently ignores them)
   unknown = [a for a in qt_args if a.startswith('-')]
@@ -1882,11 +2014,42 @@ if __name__ == '__main__':
   state.irclogger = IRCLogger(state.config, config_dir)
 
   # --- History DB ---
-  from history import HistoryDB
+  from history import HistoryDB, HistoryReader
   hf = state.config.history_file
   if not os.path.isabs(hf):
     hf = os.path.join(config_dir, hf)
   state.historydb = HistoryDB(hf, keep_limit=state.config.backscroll_limit)
+  # Separate read-only connection on a background thread. The background history
+  # replay drip-feed reads through this so its disk I/O never blocks the GUI
+  # thread (WAL mode allows concurrent reader + writer connections).
+  state.historyreader = HistoryReader(hf)
+
+  # --- Pre-warm heavy lazy imports off the GUI thread ---
+  # The URL/link-preview feature is imported lazily: the first message that
+  # contains a URL does `from link_preview import check_and_preview`, and its
+  # fetch coroutines then lazily pull in the stdlib HTTP stack (urllib.request
+  # -> http.client -> the large `email` package, plus json/html/aiohttp). The
+  # very first time, Python compiles that whole tree of .py -> .pyc from cold
+  # disk — several seconds of work on this machine. Because qasync runs the
+  # asyncio loop ON the GUI thread, that first import freezes the entire UI the
+  # instant the user sends their first URL (the "press Enter and it hangs for a
+  # few seconds" symptom). Importing is process-global and guarded by the import
+  # lock, so warming these modules in a daemon thread lands them in sys.modules
+  # before they're needed; the later in-line imports become instant dict lookups.
+  # (link_preview itself is intentionally NOT warmed here — it defines a QObject
+  # subclass, which should be done on the GUI thread; its cost is trivial anyway,
+  # as it only re-imports already-loaded Qt. The multi-second cost is the stdlib
+  # HTTP/email tree below.)
+  import threading as _threading
+  def _prewarm_imports():
+    for _mod in ('urllib.request', 'http.client', 'email', 'json', 'html',
+                 'aiohttp'):
+      try:
+        __import__(_mod)
+      except Exception:
+        pass
+  _threading.Thread(target=_prewarm_imports, name='prewarm-imports',
+                    daemon=True).start()
 
   # --- Headless mode ---
   if cli_args.headless:
@@ -1940,9 +2103,20 @@ if __name__ == '__main__':
         if client.conn:
           client.conn.disconnect()
       # Close history database
+      if state.historyreader:
+        try:
+          state.historyreader.close()
+        except Exception:
+          pass
       if state.historydb:
         try:
           state.historydb.close()
+        except Exception:
+          pass
+      # Flush and close cached log file handles
+      if state.irclogger:
+        try:
+          state.irclogger.close()
         except Exception:
           pass
       loop.stop()
@@ -1963,7 +2137,8 @@ if __name__ == '__main__':
     sys.exit(0)
 
   # --- Qt app ---
-  state.app = makeapp([sys.argv[0]] + qt_args)
+  state.app = makeapp([sys.argv[0]] + qt_args,
+                      profile_events=(cli_args.sample_profile is not None))
 
   # --- --ui-list: print all registered paths and exit ---
   if cli_args.ui_list:
@@ -2150,5 +2325,261 @@ if __name__ == '__main__':
     _crash_fh.close()
   atexit.register(_atexit)
 
-  with loop:
-    loop.run_forever()
+  # --- In-process statistical sampler (see --sample-profile) --------------
+  class _StackSampler:
+    """Samples the main (GUI) thread's Python stack from a daemon thread and
+    writes Brendan-Gregg 'folded' stacks on exit. No cross-process memory
+    reads or thread suspension, so it works where py-spy struggles (Windows +
+    brand-new CPython). When the GUI thread is stuck inside a slow Qt C++ call,
+    the deepest Python frame we see is the exact call site that entered Qt, so
+    the folded output still pinpoints the culprit."""
+    # A sample is "server-driven" (network -> us, which the user said they
+    # don't care about) if its stack passes through any of these. Everything
+    # not server-driven and not idle is treated as UI/interaction work.
+    _SERVER_MARKERS = (
+      '_read_loop (asyncirc', '_lineReceived (asyncirc',
+      'handleCommand (asyncirc', 'handleCommand (irc_client',
+      'isonReply (', 'connect_to_server (models', 'connect (asyncirc',
+      '_ping_loop (', '_history_replay (',
+    )
+
+    def __init__(self, path, hz=200):
+      import threading, collections
+      self._path = path
+      self._interval = 1.0 / hz
+      self._main_tid = threading.get_ident()  # constructed on the main thread
+      self._counts = collections.Counter()
+      self._timeline = []            # (t_abs, stack_key) for slow-event correlation
+      self._samples = 0
+      self._stop = threading.Event()
+      self._thread = threading.Thread(target=self._run, name='StackSampler',
+                                      daemon=True)
+
+    def start(self):
+      self._thread.start()
+
+    def _run(self):
+      import time
+      _winmm = None
+      try:
+        if sys.platform == 'win32':
+          import ctypes
+          _winmm = ctypes.windll.winmm
+          _winmm.timeBeginPeriod(1)  # finer sleep granularity (~1ms)
+      except Exception:
+        _winmm = None
+      try:
+        next_t = time.perf_counter()
+        while not self._stop.is_set():
+          now = time.perf_counter()
+          frame = sys._current_frames().get(self._main_tid)
+          if frame is not None:
+            stack = []
+            f = frame
+            while f is not None:
+              co = f.f_code
+              stack.append('%s (%s:%d)' % (
+                co.co_name, os.path.basename(co.co_filename), co.co_firstlineno))
+              f = f.f_back
+            stack.reverse()
+            key = ';'.join(stack)
+            self._counts[key] += 1
+            self._timeline.append((now, key))
+            self._samples += 1
+          frame = f = None  # drop refs to other-thread frames promptly
+          next_t += self._interval
+          dt = next_t - time.perf_counter()
+          if dt > 0:
+            time.sleep(dt)
+          else:
+            next_t = time.perf_counter()  # fell behind; resync, don't spin
+      finally:
+        if _winmm is not None:
+          try:
+            _winmm.timeEndPeriod(1)
+          except Exception:
+            pass
+
+    @classmethod
+    def _classify(cls, stack):
+      leaf = stack.rsplit(';', 1)[-1]
+      if leaf.startswith('run_forever ('):
+        return 'idle'
+      for m in cls._SERVER_MARKERS:
+        if m in stack:
+          return 'server'
+      return 'ui'
+
+    def stop_and_write(self):
+      self._stop.set()
+      self._thread.join(timeout=2.0)
+      import collections
+      # 1) Full folded stacks to disk (for flamegraph / my own analysis).
+      try:
+        with open(self._path, 'w', encoding='utf-8') as fh:
+          for stack, n in self._counts.most_common():
+            fh.write('%s %d\n' % (stack, n))
+      except OSError as e:
+        print('Could not write folded stacks to %s: %s' % (self._path, e),
+              file=sys.stderr)
+      # Tee the human-readable report (everything below) to a .txt next to the
+      # .folded, so the whole analysis -- including the Qt self-time table, which
+      # is NOT in the folded stacks -- can be sent as a single file. All report
+      # lines print to sys.stderr, so we swap in a tee for the duration.
+      class _Tee:
+        def __init__(self, *streams): self._s = streams
+        def write(self, d):
+          for s in self._s:
+            try: s.write(d)
+            except Exception: pass
+        def flush(self):
+          for s in self._s:
+            try: s.flush()
+            except Exception: pass
+      report_path = self._path
+      if report_path.endswith('.folded'):
+        report_path = report_path[:-len('.folded')] + '_report.txt'
+      else:
+        report_path = report_path + '_report.txt'
+      _real_stderr = sys.stderr
+      try:
+        _rf = open(report_path, 'w', encoding='utf-8')
+      except OSError:
+        _rf = None
+      if _rf is not None:
+        sys.stderr = _Tee(_real_stderr, _rf)
+      try:
+        self._write_report(report_path, _real_stderr, collections)
+      finally:
+        if _rf is not None:
+          sys.stderr = _real_stderr
+          try: _rf.close()
+          except Exception: pass
+
+    def _write_report(self, report_path, _real_stderr, collections):
+      # 2) Bucket every sample into idle / server / ui.
+      buckets = collections.Counter()
+      ui_leaf = collections.Counter()
+      for stack, n in self._counts.items():
+        kind = self._classify(stack)
+        buckets[kind] += n
+        if kind == 'ui':
+          ui_leaf[stack.rsplit(';', 1)[-1]] += n
+      total = self._samples or 1
+      ui_total = buckets['ui'] or 1
+      print('\n===== sample-profile: %d GUI-thread samples ====='
+            % self._samples, file=sys.stderr)
+      print('  idle (event loop waiting): %5.1f%%  %d'
+            % (100.0 * buckets['idle'] / total, buckets['idle']), file=sys.stderr)
+      print('  server-driven (ignored):   %5.1f%%  %d'
+            % (100.0 * buckets['server'] / total, buckets['server']),
+            file=sys.stderr)
+      print('  UI / interaction:          %5.1f%%  %d'
+            % (100.0 * buckets['ui'] / total, buckets['ui']), file=sys.stderr)
+      print('\nWhere UI/interaction time went (leaf frame, %% of UI time):',
+            file=sys.stderr)
+      for name, n in ui_leaf.most_common(20):
+        print('  %5.1f%%  %6d  %s' % (100.0 * n / ui_total, n, name),
+              file=sys.stderr)
+      # 3) Slow individual interactions, correlated with sampled stacks.
+      app = getattr(state, 'app', None)
+      slow = list(getattr(app, '_slow_events', []) or [])
+      ev_names = getattr(app, '_ev_names', {})
+      ev_stats = getattr(app, '_ev_stats', {})
+      t0 = getattr(app, '_prof_start', None)
+      if slow:
+        timeline = sorted(self._timeline)
+        print('\n===== Slow interactions (event dispatch >= 30ms), worst first '
+              '=====', file=sys.stderr)
+        for (ts, et, rname, dt) in sorted(slow, key=lambda x: -x[3])[:20]:
+          etname = ev_names.get(et, str(et))
+          rel = (ts - t0) if t0 is not None else ts
+          print('  %6.0fms  %-18s on %-22s @ t=%.1fs'
+                % (dt * 1000.0, etname, rname, rel), file=sys.stderr)
+          win = [s for (tt, s) in timeline if ts <= tt <= ts + dt]
+          if win:
+            wl = collections.Counter(s.rsplit(';', 1)[-1] for s in win)
+            for lname, ln in wl.most_common(3):
+              print('             %5.1f%%  %s'
+                    % (100.0 * ln / len(win), lname), file=sys.stderr)
+      if ev_stats:
+        print('\n===== Event-dispatch time by type (inclusive) =====',
+              file=sys.stderr)
+        print('  %-22s %8s %10s %9s' % ('event', 'count', 'total(s)', 'max(ms)'),
+              file=sys.stderr)
+        for et, (cnt, tot, mx) in sorted(ev_stats.items(),
+                                         key=lambda kv: -kv[1][1])[:20]:
+          print('  %-22s %8d %10.3f %9.0f'
+                % (ev_names.get(et, str(et)), cnt, tot, mx * 1000.0),
+                file=sys.stderr)
+      # The important one: EXCLUSIVE self-time per (event type, receiver widget).
+      # This attributes Qt's own C++ cost (invisible to the Python sampler) to
+      # the widget that incurred it. If Paint/LayoutRequest/UpdateRequest on the
+      # chat-output widget dominates, that's QTextEdit/QTextDocument layout+paint
+      # -- i.e. the case for a custom-drawn line widget instead of QTextEdit.
+      self_stats = getattr(app, '_self_stats', {})
+      if self_stats:
+        self_total = sum(v[1] for v in self_stats.values()) or 1.0
+        print('\n===== Qt self-time by (event x widget), exclusive of nested '
+              'dispatch =====', file=sys.stderr)
+        print('  This is where the "Qt C++ black box" time actually goes.',
+              file=sys.stderr)
+        print('  %-20s %-22s %8s %10s %9s %7s'
+              % ('event', 'widget', 'count', 'self(s)', 'max(ms)', '%'),
+              file=sys.stderr)
+        for (et, rname), (cnt, tot, mx) in sorted(
+            self_stats.items(), key=lambda kv: -kv[1][1])[:25]:
+          print('  %-20s %-22s %8d %10.3f %9.0f %6.1f%%'
+                % (ev_names.get(et, str(et))[:20], rname[:22], cnt, tot,
+                   mx * 1000.0, 100.0 * tot / self_total), file=sys.stderr)
+      print('\nFull folded stacks written to %s' % self._path, file=sys.stderr)
+      print('Full text report (incl. the Qt self-time table) written to %s'
+            % report_path, file=sys.stderr)
+      print('(send the _report.txt to Claude; or render the flamegraph: '
+            'flamegraph.pl %s > out.svg)' % self._path, file=sys.stderr)
+
+  _sampler = None
+  if cli_args.sample_profile is not None:
+    sp_path = cli_args.sample_profile
+    if not os.path.isabs(sp_path):
+      sp_path = os.path.join(
+        os.path.dirname(os.path.abspath(state.config.path)), sp_path)
+    _sampler = _StackSampler(sp_path)
+    _sampler.start()
+    print('In-process stack sampler enabled — folded stacks -> %s on exit.'
+          % sp_path, file=sys.stderr)
+
+  try:
+    if cli_args.profile is not None:
+      import cProfile, pstats
+      prof_path = cli_args.profile
+      if not os.path.isabs(prof_path):
+        prof_path = os.path.join(
+          os.path.dirname(os.path.abspath(state.config.path)), prof_path)
+      print('Profiling enabled — stats will be written to %s on exit.' % prof_path,
+            file=sys.stderr)
+      profiler = cProfile.Profile()
+      profiler.enable()
+      try:
+        with loop:
+          loop.run_forever()
+      finally:
+        profiler.disable()
+        try:
+          profiler.dump_stats(prof_path)
+        except OSError as e:
+          print('Could not write profile to %s: %s' % (prof_path, e), file=sys.stderr)
+        stats = pstats.Stats(profiler, stream=sys.stderr)
+        print('\n===== cProfile: top 30 by cumulative time =====', file=sys.stderr)
+        stats.sort_stats('cumulative').print_stats(30)
+        print('\n===== cProfile: top 30 by total (self) time =====', file=sys.stderr)
+        stats.sort_stats('tottime').print_stats(30)
+        print('Full profile saved to %s '
+              '(open with: python -m pstats %s, or snakeviz %s)'
+              % (prof_path, prof_path, prof_path), file=sys.stderr)
+    else:
+      with loop:
+        loop.run_forever()
+  finally:
+    if _sampler is not None:
+      _sampler.stop_and_write()

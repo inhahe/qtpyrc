@@ -1834,19 +1834,20 @@ class Inputwidget(QTextEdit):
 
 
 def _open_query(client, nick):
-  """Open (or focus) a query/message window for *nick*."""
-  from models import Query
+  """Open (or focus) a query/message window for *nick*.
+
+  Routes through _find_or_create_query so opening a query by clicking a
+  nick uses the same nick-based keying, dedup and history replay as an
+  incoming PM or the /query command."""
   conn = client.conn
   if not conn:
     return
+  from irc_client import _find_or_create_query
   lnick = conn.irclower(nick)
-  # Find existing query by nick
-  for key, q in client.queries.items():
-    if conn.irclower(q.nick) == lnick:
-      state.app.mainwin.workspace.setActiveSubWindow(q.window.subwindow)
-      return q
-  q = Query(client, nick)
-  client.queries[lnick] = q
+  user = client.users.get(lnick)
+  ident = user.ident if user else None
+  host = user.host if user else None
+  q, _new = _find_or_create_query(conn, nick, ident, host)
   state.app.mainwin.workspace.setActiveSubWindow(q.window.subwindow)
   return q
 

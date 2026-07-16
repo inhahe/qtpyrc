@@ -64,21 +64,24 @@ def _query_history_key(nick, ident):
 
 
 def _find_or_create_query(conn, nick, ident, host):
-  """Find an existing query by nick or create a new one.
-  If an existing query was opened without ident/host (e.g. via /query),
-  re-keys it with the proper (ident, host) tuple.
+  """Find an existing query for *nick* or create a new one.
+
+  Query windows are keyed by lowercased nick, which is the unique
+  identifier for a conversation (you can only have one query window per
+  nick).  Keying by (ident, host) is wrong because two different unknown
+  users both key to (None, None), which silently overwrites/orphans query
+  windows and leads to duplicate windows being opened later.
+
+  On creation, saved history for the nick is replayed into the window.
   Returns (query, is_new)."""
   from models import Query
-  key = (ident, host)
-  if key in conn.queries:
-    return conn.queries[key], False
-  # Check for query under a different key (e.g. (None, None) from /query)
-  for qk, qv in list(conn.queries.items()):
-    if qv.nick and conn.irclower(qv.nick) == conn.irclower(nick):
-      q = conn.queries.pop(qk)
+  key = conn.irclower(nick)
+  q = conn.queries.get(key)
+  if q is not None:
+    # Fill in ident/host if we've learned them since the query was opened.
+    if ident and not q.ident:
       q.ident = ident
-      conn.queries[key] = q
-      return q, False
+    return q, False
   # Create new
   q = Query(conn.client, nick, ident)
   conn.queries[key] = q
@@ -95,24 +98,25 @@ def _history_save(network, channel, event_type, nick=None, text=None, prefix='')
     db.add(network, channel.lower(), event_type, nick, text, prefix)
 
 
-def _history_replay(window, network, channel, limit=None, chan_obj=None):
-  """Load saved history into a window."""
-  db = state.historydb
-  if limit is None:
-    limit = state.config.history_replay_channels
-  if not db or limit <= 0:
-    return
-  rows = db.get_last(network, channel.lower(), limit)
+def render_history_rows(window, channel, rows, chan_obj=None):
+  """Render a list of history rows into *window*, wrapped in a single edit block
+  with updates suppressed and auto-scroll restored once at the end.
+
+  *rows* is a list of (ts, type, nick, text, prefix) tuples (oldest first). This
+  is the one place history rows are turned into visible lines -- the synchronous
+  on-open replay and the background drip-feed both call it. It does NOT add the
+  'End of saved history' separator or flush the replay queue; the caller decides
+  when replay is complete (the drip-feed spans many chunks). Safe to call with
+  an empty list (does nothing)."""
   if not rows:
     return
-  window._replay_queue = []  # queue live messages during replay
+  show_prefix = state.config.show_mode_prefix_messages
+  history = chan_obj.history if chan_obj else None
   window._in_replay = True
   saved_auto_scroll = window._auto_scroll
   window._auto_scroll = False
   window.output.setUpdatesEnabled(False)
   window.cur.beginEditBlock()
-  show_prefix = state.config.show_mode_prefix_messages
-  history = chan_obj.history if chan_obj else None
   try:
     for ts, etype, nick, text, prefix in rows:
       # Show timestamp from DB instead of current time
@@ -164,6 +168,20 @@ def _history_replay(window, network, channel, limit=None, chan_obj=None):
     window._auto_scroll = saved_auto_scroll
     if saved_auto_scroll:
       window._scroll_to_bottom()
+
+
+def _history_replay(window, network, channel, limit=None, chan_obj=None):
+  """Load saved history into a window (synchronous on-open replay)."""
+  db = state.historydb
+  if limit is None:
+    limit = state.config.history_replay_channels
+  if not db or limit <= 0:
+    return
+  rows = db.get_last(network, channel.lower(), limit)
+  if not rows:
+    return
+  window._replay_queue = []  # queue live messages during replay
+  render_history_rows(window, channel, rows, chan_obj)
   window.add_separator(" End of saved history ")
   window._flush_replay_queue()
 
@@ -261,7 +279,7 @@ class IRCClient(asyncirc.IRCClient):
   # --- IRCv3 capabilities ---
 
   def _get_desired_caps(self):
-    caps = ['batch', 'server-time', 'message-tags']
+    caps = ['batch', 'server-time', 'message-tags', 'multi-prefix', 'userhost-in-names']
     # SASL: override login method or config
     if self._login_method in ('sasl', 'external'):
       caps.append('sasl')
@@ -1358,7 +1376,7 @@ class IRCClient(asyncirc.IRCClient):
                                                     timestamp_override=ts)
       state.irclogger.log(self._log_network, nick,
                           "* %s %s" % (nick, data))
-      self._hook_activity(self.queries[ident, host].window, Window.ACTIVITY_HIGHLIGHT)
+      self._hook_activity(q.window, Window.ACTIVITY_HIGHLIGHT)
       if not playback:
         _history_save(self._log_network, _query_history_key(nick, ident), 'action', nick, data)
         _save_urls(self._log_network, _query_history_key(nick, ident),
@@ -1476,14 +1494,27 @@ class IRCClient(asyncirc.IRCClient):
     chan = self.channels.get(chnlower)
     if not chan:
       return
-    for nick in names:
+    for token in names:
       # Strip mode prefixes (@, +, %, ~, &)
-      raw = nick.lstrip('@+%~&')
-      prefix = nick[:len(nick) - len(raw)]
-      user = self._get_user(raw)
+      raw = token.lstrip('@+%~&')
+      prefix = token[:len(token) - len(raw)]
+      # Handle userhost-in-names: the token may be "nick!ident@host"
+      # rather than a bare nick. Split off the hostmask so we store the
+      # clean nick in the nick list and populate ident/host if present.
+      nick, ident, host = raw, None, None
+      bang = raw.find('!')
+      if bang != -1:
+        nick = raw[:bang]
+        rest = raw[bang + 1:]
+        at = rest.find('@')
+        if at != -1:
+          ident, host = rest[:at], rest[at + 1:]
+        else:
+          ident = rest
+      user = self._get_user(nick, ident, host)
       if prefix:
         user.prefix[chnlower] = prefix
-      chan.addnick(raw, user)
+      chan.addnick(nick, user)
 
   def privmsg(self, user, message):
     if is_ignored(user, self.client.network_key):
@@ -1672,15 +1703,16 @@ class IRCClient(asyncirc.IRCClient):
       if not playback:
         _history_save(self._log_network, chnlower, 'nick', oldname, newname,
                       prefix=self._nick_prefix(oldname, chan.name))
-    # Update queries — keys are (ident, host), so just update the nick field
-    for q in self.client.queries.values():
-      if q.nick and self.irclower(q.nick) == loldname:
-        q.nick = newname
-        q.update_title()
-        if q.window:
-          q.window.addline_nick(
-            ["* ", (oldname,), " is now known as ", (newname,)],
-            state.infoformat, timestamp_override=ts)
+    # Update queries — keyed by lowercased nick, so re-key on rename.
+    q = self.client.queries.pop(loldname, None)
+    if q is not None:
+      q.nick = newname
+      self.client.queries[lnewname] = q
+      q.update_title()
+      if q.window:
+        q.window.addline_nick(
+          ["* ", (oldname,), " is now known as ", (newname,)],
+          state.infoformat, timestamp_override=ts)
 
   def ownNickResynced(self, old, new):
     # Our nick drifted out of sync with the server's view of it — almost
