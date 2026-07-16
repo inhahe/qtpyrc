@@ -22,6 +22,8 @@ python qtpyrc.py [options]
 | `--ui-list` | Print all registered `/ui` paths to stdout and exit |
 | `-o`, `--override KEY=VALUE` | Override a config option at runtime without saving (dot path, repeatable, e.g. `-o font.size=15`). With `--init`, seeds the value into the new file |
 | `--init [PATH]` | Generate a new config file and exit. PATH can be a filename, directory, or dir/filename (default: `config.yaml` in current directory). Errors if file exists. Can combine with `-o` to seed values |
+| `--profile [PATH]` | Run under `cProfile` and write stats to PATH (default: `qtpyrc.prof` in the config directory) on exit. On exit, the top 30 functions by cumulative time and by total (self) time are printed to stderr. Open the saved file with `python -m pstats <file>` or `snakeviz <file>`. Use this to determine whether slowness is Python-side (per-line work) or Qt-side (little Python time accounted for the wall-clock spent) |
+| `--sample-profile [PATH]` | Low-overhead in-process **interaction** profiler. A background daemon thread samples the main (GUI) thread's Python stack ~200x/sec, *and* the QApplication times every event dispatch (`notify()`). Writes Brendan-Gregg *folded* stacks to PATH (default: `qtpyrc.folded` in the config directory) on exit, and prints to stderr: (1) a split of GUI-thread time into **idle / server-driven / UI**, (2) where UI-interaction time went (leaf frames), (3) a worst-first log of **slow interactions** (keypress/click/paint ≥ 30 ms), each correlated with the Python stacks sampled during it, (4) event-dispatch time by event type, and (5) **Qt self-time by (event × widget)** — exclusive time spent inside each widget's event handling, minus nested dispatch. Report (5) is the key one for deciding *toolkit* questions: because the Python sampler can't see into Qt's C++, expensive `QTextEdit`/`QTextDocument` layout+paint is invisible in the folded stacks but shows up here as `Paint`/`LayoutRequest`/`UpdateRequest` self-time on the chat-output widget. This isolates the latency of *your* actions (typing, clicks, scrolling) from background/server work, which is usually what you actually feel. Unlike `--profile` it barely slows the app, and unlike py-spy it needs no cross-process access, so it works reliably on Windows and on brand-new CPython builds. Render the folded file with `flamegraph.pl <file> > out.svg`, or inspect it directly |
 
 Examples:
 
@@ -35,6 +37,10 @@ python qtpyrc.py --run "*.rc"                  # run all .rc scripts
 python qtpyrc.py --plugin "*"                  # load all plugins
 python qtpyrc.py -e "/connect libera" -e "/join #test"
 python qtpyrc.py -o font.size=18 -o font.family=Consolas  # override config at runtime
+python qtpyrc.py --profile                     # profile a session; stats printed on exit
+python qtpyrc.py --profile run1.prof           # write profile to run1.prof
+python qtpyrc.py --sample-profile              # low-overhead sampler; folded stacks on exit
+python qtpyrc.py --sample-profile run1.folded  # write folded stacks to run1.folded
 python qtpyrc.py --init                        # create config.yaml in current dir
 python qtpyrc.py --init myconfig.yaml          # create myconfig.yaml in current dir
 python qtpyrc.py --init path/to/dir/           # create config.yaml in path/to/dir/

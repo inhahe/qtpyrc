@@ -455,6 +455,35 @@ async def fetch_preview(url, max_size=65536, timeout=10.0, proxy=''):
 
 _preview_counter = 0
 
+# Sentinel: distinguishes "image was not pre-decoded" from "pre-decoded to None
+# (decode failed / no image)". Lets _insert_preview know whether to fall back to
+# an inline decode.
+_NO_PREDECODE = object()
+
+
+def _decode_and_scale(image_data, width, height):
+    """Decode raw image bytes and scale to the preview thumbnail size.
+
+    Returns ``(QImage, thumb_w, thumb_h)`` or ``None`` on failure. This is the
+    expensive part (a large image can take seconds to decode + smooth-scale), so
+    it is designed to run OFF the GUI thread via ``loop.run_in_executor``. QImage
+    decoding/scaling is thread-safe (unlike QPixmap, which needs the GUI thread);
+    only the later addResource()/document insertion must stay on the GUI thread.
+    """
+    img = QImage()
+    if not img.loadFromData(image_data):
+        return None
+    thumb_h = max(40, height - 16)
+    thumb_w = int(img.width() * thumb_h / max(img.height(), 1))
+    if thumb_w > width // 2:
+        thumb_w = width // 2
+        thumb_h = int(img.height() * thumb_w / max(img.width(), 1))
+    img = img.scaled(thumb_w, thumb_h,
+                     aspectMode=Qt.AspectRatioMode.KeepAspectRatio,
+                     mode=Qt.TransformationMode.SmoothTransformation)
+    return img, thumb_w, thumb_h
+
+
 def _insert_preview(window, info, marker_name=None):
     """Insert a link preview block into the chat output.
 
@@ -502,27 +531,24 @@ def _insert_preview(window, info, marker_name=None):
     url = info.get('url', '')
     image_data = info.get('image_data')
 
-    # Register thumbnail image with the document if available
+    # Register thumbnail image with the document if available.
+    # The decode+scale (which can take seconds for a big image) is normally done
+    # off the GUI thread by _fetch_and_insert, which stashes the result under
+    # '_scaled_image'. If that key is absent (e.g. a direct caller), fall back to
+    # decoding inline here.
     img_name = ''
     thumb_w = 0
     thumb_h = 0
-    if image_data:
-        img = QImage()
-        if img.loadFromData(image_data):
-            # Scale to fit preview height
-            thumb_h = max(40, height - 16)
-            thumb_w = int(img.width() * thumb_h / max(img.height(), 1))
-            if thumb_w > width // 2:
-                thumb_w = width // 2
-                thumb_h = int(img.height() * thumb_w / max(img.width(), 1))
-            img = img.scaled(thumb_w, thumb_h,
-                             aspectMode=Qt.AspectRatioMode.KeepAspectRatio,
-                             mode=Qt.TransformationMode.SmoothTransformation)
-            _preview_counter += 1
-            img_name = 'preview_%d' % _preview_counter
-            window.output.document().addResource(
-                3,  # QTextDocument.ResourceType.ImageResource
-                QUrl(img_name), img)
+    scaled = info.get('_scaled_image', _NO_PREDECODE)
+    if scaled is _NO_PREDECODE:
+        scaled = _decode_and_scale(image_data, width, height) if image_data else None
+    if scaled:
+        img, thumb_w, thumb_h = scaled
+        _preview_counter += 1
+        img_name = 'preview_%d' % _preview_counter
+        window.output.document().addResource(
+            3,  # QTextDocument.ResourceType.ImageResource
+            QUrl(img_name), img)
 
     # Calculate optimal table width based on text length and image size.
     # Goal: text shouldn't wrap the box taller than the image unless
@@ -738,6 +764,18 @@ async def _fetch_and_insert(window, url, marker_name=None):
             proxy=state.config.link_preview_proxy)
         if info:
             state.dbg(state.LOG_DEBUG, '[link_preview] got title=%r for: %s' % (info.get('title', ''), url))
+            # Decode + scale the thumbnail off the GUI thread so a large image
+            # doesn't freeze the UI (QImage decode/scale is thread-safe).
+            image_data = info.get('image_data')
+            if image_data:
+                cfg = state.config
+                try:
+                    info['_scaled_image'] = await asyncio.get_event_loop().run_in_executor(
+                        None, _decode_and_scale, image_data,
+                        cfg.link_preview_width, cfg.link_preview_height)
+                except Exception as e:
+                    state.dbg(state.LOG_DEBUG, '[link_preview] decode error for %s: %s' % (url, e))
+                    info['_scaled_image'] = None
             _insert_preview(window, info, marker_name)
         else:
             state.dbg(state.LOG_DEBUG, '[link_preview] no info returned for: %s' % url)

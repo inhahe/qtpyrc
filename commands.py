@@ -1489,19 +1489,16 @@ class Commands:
     if not conn:
       window.redmessage('[Not connected]')
       return
-    # Find or create the query window
+    # Find or create the query window.  Route through _find_or_create_query
+    # so we get consistent nick-based keying, dedup against an already-open
+    # window, and replay of saved conversation history on first open.
     nicklower = conn.irclower(nick)
-    qkey, existing = _find_query(window.client, nick)
-    if existing:
-      qwin = existing.window
-    else:
-      user = window.client.users.get(nicklower)
-      ident = user.ident if user else None
-      host = user.host if user else None
-      qkey = (ident, host)
-      from models import Query
-      window.client.queries[qkey] = Query(window.client, nick, ident)
-      qwin = window.client.queries[qkey].window
+    user = window.client.users.get(nicklower)
+    ident = user.ident if user else None
+    host = user.host if user else None
+    from irc_client import _find_or_create_query
+    q, _new = _find_or_create_query(conn, nick, ident, host)
+    qwin = q.window
     # Activate the query window
     if not no_activate:
       ws = state.app.mainwin.workspace

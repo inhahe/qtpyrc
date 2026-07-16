@@ -41,6 +41,7 @@ clients = None
 activescripts = None
 irclogger = None
 historydb = None
+historyreader = None  # HistoryReader: off-GUI-thread read connection
 
 # Text formats (QTextCharFormat instances, set after config is loaded)
 redformat = None
