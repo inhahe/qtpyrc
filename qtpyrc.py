@@ -488,14 +488,17 @@ async def _bg_replay_loop():
         break
 
       # First time for this window: resolve the id-range to replay (off-thread).
+      # Only the most-recent *initial* lines are drip-rendered; older lines (up
+      # to the channels cap) load lazily when the user scrolls up.
       if not hasattr(window, '_bg_replay'):
-        limit = state.config.history_replay_channels
-        if limit <= 0:
+        cap = state.config.history_replay_channels
+        if cap <= 0:
           _bg_replay_drop(window)
           _bg_replay_done += 1
           _update_replay_status()
           continue
-        bounds = await reader.replay_bounds(network, chname.lower(), limit)
+        eager = min(state.config.history_replay_initial, cap)
+        bounds = await reader.replay_bounds(network, chname.lower(), eager)
         # The click path may have handled/closed this window during the await.
         if not isValid(window.output):
           _bg_replay_drop(window)
@@ -513,6 +516,9 @@ async def _bg_replay_loop():
           'last_id': min_id - 1,   # id > last_id, so first chunk includes min_id
           'max_id': max_id,        # snapshot: don't replay live msgs added later
           'chan_obj': chan_obj,
+          'min_id': min_id,        # oldest rendered id (for lazy scroll-up)
+          'cap': cap,              # max total lines the user may scroll back to
+          'loaded': eager,         # lines rendered up front
         }
 
       bg = window._bg_replay
@@ -531,6 +537,9 @@ async def _bg_replay_loop():
       # Fewer rows than a full chunk means we've reached max_id -> done.
       if len(rows) < chunk:
         window.add_separator(' End of saved history ')
+        from irc_client import _setup_history_more
+        _setup_history_more(window, network, chname.lower(),
+                            bg['min_id'], bg['loaded'], bg['cap'])
         if hasattr(window, '_bg_replay'):
           del window._bg_replay
         if hasattr(window, '_deferred_replay'):
@@ -579,6 +588,63 @@ def _queue_bg_replay(window, network, chname, chan_obj):
   _start_bg_replay()
 
 
+def _finish_pending_replay(widget):
+  """Complete any deferred/partial history replay for a window immediately.
+
+  Returns True if a replay was pending and got finished, False if there was
+  nothing to do. Safe to call from window activation OR from a search that
+  needs the full history to be present (and _history_more set up) before it
+  can scan unloaded older lines.
+  """
+  replay_info = getattr(widget, '_deferred_replay', None)
+  if not replay_info:
+    return False
+  del widget._deferred_replay
+  from irc_client import _history_replay
+  network, chname, chan = replay_info
+  # Cancel any in-progress background replay
+  bg = getattr(widget, '_bg_replay', None)
+  if bg:
+    # Background replay was partial — finish it immediately by pulling every
+    # remaining row in one go (chunk=-1 -> SQLite LIMIT -1 = unlimited).
+    db = state.historydb
+    if db:
+      remaining, _ = db.get_chunk(
+        network, chname.lower(), bg['last_id'], bg['max_id'], -1)
+    else:
+      remaining = []
+    del widget._bg_replay
+    from irc_client import _render_history_row, _setup_history_more
+    if remaining:
+      widget._in_replay = True
+      saved_auto_scroll = widget._auto_scroll
+      widget._auto_scroll = False
+      widget.output.setUpdatesEnabled(False)
+      widget.cur.beginEditBlock()
+      show_prefix = state.config.show_mode_prefix_messages
+      try:
+        for ts, etype, nick, text, prefix in remaining:
+          _render_history_row(widget, chname, ts, etype, nick, text, prefix,
+                              show_prefix)
+      finally:
+        widget._in_replay = False
+        widget.cur.endEditBlock()
+        widget.output.setUpdatesEnabled(True)
+        widget._auto_scroll = saved_auto_scroll
+        if saved_auto_scroll:
+          widget._scroll_to_bottom()
+    # Set up lazy scroll-up for older lines beyond the eager window.
+    _setup_history_more(widget, network, chname.lower(),
+                        bg['min_id'], bg['loaded'], bg['cap'])
+    widget.add_separator(' End of saved history ')
+    widget._flush_replay_queue()
+  else:
+    # No background replay was started — do full replay
+    # _history_replay adds the separator and flushes the queue
+    _history_replay(widget, network, chname, chan_obj=chan)
+  return True
+
+
 def _on_subwindow_activated(subwindow):
   """Sync the treeview selection and clear activity when switching windows."""
   if not subwindow:
@@ -587,76 +653,7 @@ def _on_subwindow_activated(subwindow):
   if not widget:
     return
   # Run deferred history replay on first activation (complete it immediately)
-  replay_info = getattr(widget, '_deferred_replay', None)
-  if replay_info:
-    del widget._deferred_replay
-    from irc_client import _history_replay
-    network, chname, chan = replay_info
-    # Cancel any in-progress background replay
-    bg = getattr(widget, '_bg_replay', None)
-    if bg:
-      # Background replay was partial — finish it immediately by pulling every
-      # remaining row in one go (chunk=-1 -> SQLite LIMIT -1 = unlimited).
-      db = state.historydb
-      if db:
-        remaining, _ = db.get_chunk(
-          network, chname.lower(), bg['last_id'], bg['max_id'], -1)
-      else:
-        remaining = []
-      del widget._bg_replay
-      if remaining:
-        widget._in_replay = True
-        saved_auto_scroll = widget._auto_scroll
-        widget._auto_scroll = False
-        widget.output.setUpdatesEnabled(False)
-        widget.cur.beginEditBlock()
-        show_prefix = state.config.show_mode_prefix_messages
-        history = bg['chan_obj'].history if bg['chan_obj'] else None
-        try:
-          for ts, etype, nick, text, prefix in remaining:
-            ts_short = ts[11:16]
-            pn = (prefix + nick) if (show_prefix and prefix and nick) else nick
-            if etype == 'message':
-              widget.addline_msg(pn, text, timestamp_override=ts_short)
-            elif etype == 'action':
-              widget.addline_nick(["* ", (pn,), " %s" % text], state.actionformat,
-                                  timestamp_override=ts_short)
-            elif etype == 'notice':
-              widget.addline_nick(["-", (pn,), "- %s" % text], state.noticeformat,
-                                  timestamp_override=ts_short)
-            elif etype == 'join':
-              widget.addline_nick(["* ", (pn,), " has joined %s" % (text or chname)],
-                                  state.infoformat, timestamp_override=ts_short)
-            elif etype == 'part':
-              widget.addline_nick(["* ", (pn,), " has left %s" % (text or chname)],
-                                  state.infoformat, timestamp_override=ts_short)
-            elif etype == 'quit':
-              widget.addline_nick(["* ", (pn,), " has quit (%s)" % (text or "")],
-                                  state.infoformat, timestamp_override=ts_short)
-            elif etype == 'kick':
-              widget.addline(text or '', state.infoformat, timestamp_override=ts_short)
-            elif etype == 'nick':
-              widget.addline_nick(["* ", (pn,), " is now known as ", (text or '?',)],
-                                  state.infoformat, timestamp_override=ts_short)
-            elif etype == 'topic':
-              widget.addline_nick(["* ", (pn,), " changed the topic to: %s" % (text or '')],
-                                  state.infoformat, timestamp_override=ts_short)
-            elif etype == 'mode':
-              widget.addline_nick(["* ", (pn,), " %s" % text], state.infoformat,
-                                  timestamp_override=ts_short)
-        finally:
-          widget._in_replay = False
-          widget.cur.endEditBlock()
-          widget.output.setUpdatesEnabled(True)
-          widget._auto_scroll = saved_auto_scroll
-          if saved_auto_scroll:
-            widget._scroll_to_bottom()
-      widget.add_separator(' End of saved history ')
-      widget._flush_replay_queue()
-    else:
-      # No background replay was started — do full replay
-      # _history_replay adds the separator and flushes the queue
-      _history_replay(widget, network, chname, chan_obj=chan)
+  _finish_pending_replay(widget)
   # Clear activity highlight on the now-active window
   if hasattr(widget, 'clear_activity'):
     widget.clear_activity()
@@ -1345,7 +1342,40 @@ def makeapp(args, profile_events=False):
   app.mainwin.activateWindow()
   app.lastWindowClosed.connect(quit)
   app.aboutToQuit.connect(quit)
+  # Respond immediately when the OS ends the session (shutdown / restart /
+  # logout). Without a handler, Qt's default commitData() closes every top-level
+  # window one by one -- any dialog with a confirm-on-close prompt (or slow
+  # closeEvent) then blocks the whole restart, and Windows flags us as
+  # "preventing restart". By connecting here we take control: tell the session
+  # manager we don't need to restart and run our fast, idempotent cleanup, so
+  # the OS can proceed without waiting on us.
+  app.commitDataRequest.connect(_on_commit_data, Qt.ConnectionType.DirectConnection)
   return app
+
+def _on_commit_data(session_manager):
+  """Session-manager commitDataRequest slot: the OS is ending the session and
+  wants us to save state and get out of the way *fast*. Do not pop dialogs or
+  do slow work here -- Windows times the app out and shows the "this app is
+  preventing restart" screen if we dawdle.
+
+  IMPORTANT: this must be *non-destructive*. commitDataRequest can fire for a
+  shutdown / logout / restart that another app (or the user) then vetoes, in
+  which case our process keeps running. If we tore everything down here (cancel
+  all asyncio tasks, disconnect IRC, close the DBs, stop the loop) the Qt window
+  would stay open but the async backend would be dead -- a zombie UI that
+  silently ignores every keystroke. So we only tell the session manager not to
+  block: set the restart hint and release(). If the session really ends the OS
+  terminates us anyway (SQLite's WAL is crash-safe), and a normal user-initiated
+  quit still runs full cleanup via aboutToQuit -> quit()."""
+  try:
+    session_manager.setRestartHint(QSessionManager.RestartHint.RestartNever)
+  except Exception:
+    pass
+  # Don't request user interaction; just release so the OS continues.
+  try:
+    session_manager.release()
+  except Exception:
+    pass
 
 def _startup_path():
   """Return the path to the startup commands file, or None if not configured."""

@@ -549,10 +549,16 @@ backscroll_limit: 10000
 history_replay:
   # lines to replay on channel join (default: backscroll_limit)
   channels: 10000
-  # lines to replay on query open (default: 0 / disabled).
-  # Note: nicks can be reused by different people,
-  # so query history may not belong to the same person.
-  queries: 0
+  # lines to replay on query (private message) open (default: backscroll_limit).
+  # Set to 0 to disable replaying past conversations when a query opens.
+  # Query history is keyed by nick, so if a nick is later reused by a different
+  # person you may see the previous person's conversation.
+  queries: 10000
+  # How many of the most recent lines to render up front when a window opens.
+  # Older lines (up to the channels/queries cap above) load lazily as you
+  # scroll up, so opening a channel doesn't read+render its whole backlog.
+  # Lower = faster window opens; higher = more history visible without scrolling.
+  initial: 500
   # load history in the background after connecting.
   # true = channels fill gradually, UI stays responsive.
   # false = history loads all at once when you switch to a channel.

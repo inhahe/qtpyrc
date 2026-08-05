@@ -345,7 +345,7 @@ Aliases are not persistent — add `/alias` commands to your startup script to r
 | Command | Syntax | Description |
 |---------|--------|-------------|
 | `/close` | `/close [-f] [target]` | Close the current window (or target). `-f` skips server confirmation |
-| `/find` | `/find [text]` | Open the search bar, optionally searching for text |
+| `/find` | `/find [text]` | Open the search bar, optionally searching for text. Searching upward (Previous) automatically pulls in older saved history that hasn't been rendered yet, so Find reaches the whole replayable backlog, not just the lines currently on screen |
 | `/title` | `/title [text]` | Set a custom window title format (no args to restore default). `-s` targets server window, `-a` targets app titlebar |
 | `/tabbed` | `/tabbed` | Switch to tabbed view mode |
 | `/mdi` | `/mdi` | Switch to MDI (multi-document) view mode |

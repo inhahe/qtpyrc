@@ -25,6 +25,39 @@ _MIRC_STRIP_RE = re.compile(
 _URL_RE = re.compile(r'https?://[^\s<>\x00-\x1f]+', re.IGNORECASE)
 
 
+def parse_names_token(token, prefix_symbols='@%+'):
+  """Parse one RPL_NAMREPLY (353) token into (prefix, nick, ident, host).
+
+  Handles two IRCv3 features at once:
+
+  * multi-prefix  - one or more leading mode symbols (e.g. "@+nick")
+  * userhost-in-names - the token carries a full "nick!ident@host"
+    hostmask instead of a bare nick (as sent by Ergo and others).
+
+  Only characters in *prefix_symbols* (the server's ISUPPORT PREFIX
+  symbols) are treated as mode prefixes, so a '~' that is part of an
+  ident is never mistaken for an owner-mode symbol. ``ident`` / ``host``
+  are ``None`` when the token carries only a bare nick.
+  """
+  i = 0
+  n = len(token)
+  while i < n and token[i] in prefix_symbols:
+    i += 1
+  prefix = token[:i]
+  rest = token[i:]
+  nick, ident, host = rest, None, None
+  bang = rest.find('!')
+  if bang != -1:
+    nick = rest[:bang]
+    userhost = rest[bang + 1:]
+    at = userhost.find('@')
+    if at != -1:
+      ident, host = userhost[:at], userhost[at + 1:]
+    else:
+      ident = userhost
+  return prefix, nick, ident, host
+
+
 def _format_size(size):
   if not size: return '0 B'
   for unit in ('B', 'KB', 'MB', 'GB'):
@@ -57,10 +90,17 @@ def _save_urls(network, channel, nick, host, text):
     db.add_url(network or '', channel.lower(), nick, host, url)
 
 
-def _query_history_key(nick, ident):
-  """Build a DB key for query history: =nick:ident (~ prefix stripped)."""
-  ident = ident.lstrip('~') if ident else ''
-  return '=%s:%s' % (nick.lower(), ident.lower())
+def _query_history_key(nick, ident=None):
+  """Build a DB key for query history: "=nick" (nick only, lowercased).
+
+  A query conversation is identified by nick -- that's how the query window is
+  keyed (conn.queries[irclower(nick)]) and how logging is keyed. The key used to
+  also embed the sender's ident ("=nick:ident"), but /query-ing a nick who isn't
+  currently online (ident unknown) then built "=nick:" which never matched the
+  history saved under "=nick:realident", so no conversation history replayed.
+  The *ident* argument is accepted (and ignored) for call-site compatibility.
+  Old "=nick:ident" rows are migrated to "=nick" by HistoryDB (user_version 1)."""
+  return '=%s' % nick.lower()
 
 
 def _find_or_create_query(conn, nick, ident, host):
@@ -98,6 +138,46 @@ def _history_save(network, channel, event_type, nick=None, text=None, prefix='')
     db.add(network, channel.lower(), event_type, nick, text, prefix)
 
 
+def _render_history_row(window, channel, ts, etype, nick, text, prefix, show_prefix):
+  """Turn one history row into a visible line at the window's current cursor.
+
+  Shared by the append replay (render_history_rows) and the lazy scroll-up
+  prepend path so both render identically. Does NOT touch the channel history
+  buffer, edit blocks, or scrolling -- the caller manages those."""
+  ts_short = ts[11:16]  # HH:MM from "YYYY-MM-DD HH:MM:SS"
+  pn = (prefix + nick) if (show_prefix and prefix and nick) else nick
+  if etype == 'message':
+    window.addline_msg(pn, text, timestamp_override=ts_short)
+  elif etype == 'action':
+    window.addline_nick(["* ", (pn,), " %s" % text], state.actionformat,
+                        timestamp_override=ts_short)
+  elif etype == 'notice':
+    window.addline_nick(["-", (pn,), "- %s" % text], state.noticeformat,
+                        timestamp_override=ts_short)
+  elif etype == 'join':
+    window.addline_nick(["* ", (pn,), " has joined %s" % (text or channel)],
+                        state.infoformat, timestamp_override=ts_short)
+  elif etype == 'part':
+    window.addline_nick(["* ", (pn,), " has left %s" % (text or channel)],
+                        state.infoformat, timestamp_override=ts_short)
+  elif etype == 'quit':
+    window.addline_nick(["* ", (pn,), " has quit (%s)" % (text or "")],
+                        state.infoformat, timestamp_override=ts_short)
+  elif etype == 'kick':
+    window.addline(text or '', state.infoformat, timestamp_override=ts_short)
+  elif etype == 'nick':
+    old, new = (nick, text) if text else (nick, '?')
+    pold = (prefix + old) if (show_prefix and prefix) else old
+    window.addline_nick(["* ", (pold,), " is now known as ", (new,)],
+                        state.infoformat, timestamp_override=ts_short)
+  elif etype == 'mode':
+    window.addline_nick(["* ", (pn,), " %s" % (text or '')],
+                        state.infoformat, timestamp_override=ts_short)
+  elif etype == 'topic':
+    window.addline_nick(["* ", (pn,), " changed the topic to: %s" % (text or '')],
+                        state.infoformat, timestamp_override=ts_short)
+
+
 def render_history_rows(window, channel, rows, chan_obj=None):
   """Render a list of history rows into *window*, wrapped in a single edit block
   with updates suppressed and auto-scroll restored once at the end.
@@ -119,39 +199,7 @@ def render_history_rows(window, channel, rows, chan_obj=None):
   window.cur.beginEditBlock()
   try:
     for ts, etype, nick, text, prefix in rows:
-      # Show timestamp from DB instead of current time
-      ts_short = ts[11:16]  # HH:MM from "YYYY-MM-DD HH:MM:SS"
-      pn = (prefix + nick) if (show_prefix and prefix and nick) else nick
-      if etype == 'message':
-        window.addline_msg(pn, text, timestamp_override=ts_short)
-      elif etype == 'action':
-        window.addline_nick(["* ", (pn,), " %s" % text], state.actionformat,
-                            timestamp_override=ts_short)
-      elif etype == 'notice':
-        window.addline_nick(["-", (pn,), "- %s" % text], state.noticeformat,
-                            timestamp_override=ts_short)
-      elif etype == 'join':
-        window.addline_nick(["* ", (pn,), " has joined %s" % (text or channel)],
-                            state.infoformat, timestamp_override=ts_short)
-      elif etype == 'part':
-        window.addline_nick(["* ", (pn,), " has left %s" % (text or channel)],
-                            state.infoformat, timestamp_override=ts_short)
-      elif etype == 'quit':
-        window.addline_nick(["* ", (pn,), " has quit (%s)" % (text or "")],
-                            state.infoformat, timestamp_override=ts_short)
-      elif etype == 'kick':
-        window.addline(text or '', state.infoformat, timestamp_override=ts_short)
-      elif etype == 'nick':
-        old, new = (nick, text) if text else (nick, '?')
-        pold = (prefix + old) if (show_prefix and prefix) else old
-        window.addline_nick(["* ", (pold,), " is now known as ", (new,)],
-                            state.infoformat, timestamp_override=ts_short)
-      elif etype == 'mode':
-        window.addline_nick(["* ", (pn,), " %s" % (text or '')],
-                            state.infoformat, timestamp_override=ts_short)
-      elif etype == 'topic':
-        window.addline_nick(["* ", (pn,), " changed the topic to: %s" % (text or '')],
-                            state.infoformat, timestamp_override=ts_short)
+      _render_history_row(window, channel, ts, etype, nick, text, prefix, show_prefix)
       # Populate channel history buffer from DB rows
       if history is not None and nick and etype in (
           'message', 'action', 'notice', 'join', 'part', 'quit', 'kick'):
@@ -170,19 +218,55 @@ def render_history_rows(window, channel, rows, chan_obj=None):
       window._scroll_to_bottom()
 
 
+def _setup_history_more(window, network, channel_lower, oldest_id, loaded, cap):
+  """Record on *window* that older history is available to lazy-load on
+  scroll-up. *oldest_id* is the DB id of the oldest currently-rendered history
+  row; *loaded* how many history rows are rendered; *cap* the max total the user
+  may scroll back to (history_replay_channels/queries). Clears the marker when
+  there's nothing more to load.
+
+  The cap is additionally clamped to the widget's backscroll_limit: the output
+  QTextEdit trims blocks from the *top* once it exceeds maximumBlockCount, so
+  loading past that budget would just discard the lines we prepend (breaking
+  both scroll-up and Find). Never offer more than the widget can actually hold."""
+  bl = state.config.backscroll_limit
+  if bl and bl > 0:
+    cap = min(cap, bl)
+  if oldest_id is None or loaded >= cap or oldest_id <= 1:
+    window._history_more = None
+    return
+  window._history_more = {
+    'network': network,
+    'channel': channel_lower,
+    'oldest_id': oldest_id,
+    'loaded': loaded,
+    'cap': cap,
+    'loading': False,
+    'exhausted': False,
+  }
+
+
 def _history_replay(window, network, channel, limit=None, chan_obj=None):
-  """Load saved history into a window (synchronous on-open replay)."""
+  """Load saved history into a window (synchronous on-open replay).
+
+  Only the most-recent *initial* lines are rendered up front; older lines (up to
+  *limit*) load lazily when the user scrolls up. This keeps window-open cheap
+  even for channels with a large backlog."""
   db = state.historydb
   if limit is None:
     limit = state.config.history_replay_channels
   if not db or limit <= 0:
     return
-  rows = db.get_last(network, channel.lower(), limit)
-  if not rows:
-    return
+  eager = min(state.config.history_replay_initial, limit)
+  chlow = channel.lower()
+  rows = db.get_last(network, chlow, eager)
   window._replay_queue = []  # queue live messages during replay
-  render_history_rows(window, channel, rows, chan_obj)
-  window.add_separator(" End of saved history ")
+  if rows:
+    render_history_rows(window, channel, rows, chan_obj)
+    bounds = db.replay_bounds(network, chlow, eager)
+    oldest_id = bounds[0] if bounds else None
+    _setup_history_more(window, network, chlow, oldest_id, len(rows), limit)
+    window.add_separator(" End of saved history ")
   window._flush_replay_queue()
 
 
@@ -1495,22 +1579,14 @@ class IRCClient(asyncirc.IRCClient):
     if not chan:
       return
     for token in names:
-      # Strip mode prefixes (@, +, %, ~, &)
-      raw = token.lstrip('@+%~&')
-      prefix = token[:len(token) - len(raw)]
-      # Handle userhost-in-names: the token may be "nick!ident@host"
-      # rather than a bare nick. Split off the hostmask so we store the
-      # clean nick in the nick list and populate ident/host if present.
-      nick, ident, host = raw, None, None
-      bang = raw.find('!')
-      if bang != -1:
-        nick = raw[:bang]
-        rest = raw[bang + 1:]
-        at = rest.find('@')
-        if at != -1:
-          ident, host = rest[:at], rest[at + 1:]
-        else:
-          ident = rest
+      if not token:
+        continue
+      # parse_names_token handles both multi-prefix (leading mode
+      # symbols) and userhost-in-names ("nick!ident@host"), using the
+      # server's actual PREFIX symbols so we store a clean bare nick.
+      prefix, nick, ident, host = parse_names_token(token, self._prefix_symbols)
+      if not nick:
+        continue
       user = self._get_user(nick, ident, host)
       if prefix:
         user.prefix[chnlower] = prefix
@@ -1707,6 +1783,23 @@ class IRCClient(asyncirc.IRCClient):
     q = self.client.queries.pop(loldname, None)
     if q is not None:
       q.nick = newname
+      # A query window may already exist under the new nick (e.g. we had queries
+      # open with both "bob" and "bob_", and "bob_" renamed to "bob"). Blindly
+      # assigning here would overwrite that entry and orphan its window: it stays
+      # open and visible, but _find_or_create_query can never find it again, so
+      # the user ends up with two identical-looking query windows and only one
+      # of them receives messages. Close the stale one first -- its conversation
+      # is already persisted in the history DB under the same "=nick" key, so it
+      # replays into the surviving window.
+      existing = self.client.queries.get(lnewname)
+      if existing is not None and existing is not q:
+        try:
+          import qtpyrc
+          if existing.window:
+            qtpyrc._close_window(existing.window, force=True)
+        except Exception:
+          pass
+        self.client.queries.pop(lnewname, None)
       self.client.queries[lnewname] = q
       q.update_title()
       if q.window:

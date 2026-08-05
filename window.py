@@ -322,14 +322,22 @@ class SearchBar(QWidget):
   *set_cursor* — if True, the text widget's cursor is moved to the match
   position (useful for editable text).  If False, only extra-selections
   are used for highlighting (useful for read-only chat output).
+  *load_older* — optional zero-arg callable that pulls one older batch of
+  content into the top of the document (used by chat windows whose history is
+  lazily loaded). It must return True if lines were prepended, False when the
+  backlog is exhausted. When provided, a backward search that runs off the top
+  of the loaded document keeps loading + searching older history until it
+  matches or the backlog runs out.
   """
 
   def __init__(self, text_widget, on_close_focus=None, set_cursor=False,
-               parent=None):
+               parent=None, load_older=None, ensure_loaded=None):
     super().__init__(parent)
     self._text = text_widget
     self._close_focus = on_close_focus
     self._set_cursor = set_cursor
+    self._load_older = load_older
+    self._ensure_loaded = ensure_loaded
     self._search_cursor = QTextCursor()
     self._open = False
 
@@ -422,6 +430,14 @@ class SearchBar(QWidget):
     query = self._input.text()
     if not query:
       return
+    # Make sure any deferred/partial history replay for this window has finished
+    # and lazy scroll-up is armed, so a backward search can reach older lines
+    # that were never eagerly loaded -- even when this window currently has focus.
+    if self._ensure_loaded:
+      try:
+        self._ensure_loaded()
+      except Exception:
+        pass
     try:
       doc = self._text.document()
     except RuntimeError:
@@ -429,16 +445,107 @@ class SearchBar(QWidget):
     case_sensitive = self._case_cb.isChecked()
     use_regex = self._regex_cb.isChecked()
 
+    # Build the matcher (a str for plain search, a QRegularExpression for regex).
+    # QTextDocument.find() accepts either and operates on document positions,
+    # which correctly handles tables (link previews) and embedded images.
+    flags = QTextDocument.FindFlag(0)
     if use_regex:
-      try:
-        flags = 0 if case_sensitive else re.IGNORECASE
-        pat = re.compile(query, flags)
-      except re.error:
+      matcher = self._build_regex(query, case_sensitive)
+      if matcher is None:
         return
-      found = self._regex_find(doc, pat, forward)
     else:
-      found = self._plain_find(doc, query, case_sensitive, forward)
+      matcher = query
+      if case_sensitive:
+        flags |= QTextDocument.FindFlag.FindCaseSensitively
+    if not forward:
+      flags |= QTextDocument.FindFlag.FindBackward
 
+    # Primary search from the current position (no wrap yet).
+    found = doc.find(matcher, self._start_cursor(doc, forward), flags)
+
+    # A backward search that finds nothing in the loaded document means we've
+    # scanned everything from the cursor up to the top. If this window lazily
+    # loads its history, pull older batches in from the DB and keep searching
+    # upward until we match or the backlog is exhausted -- so Find reaches lines
+    # that were never eagerly rendered.
+    if ((found.isNull() or not found.hasSelection())
+        and not forward and self._load_older):
+      found = self._find_in_older(doc, matcher, flags)
+
+    # Wrap around if still nothing found.
+    if found.isNull() or not found.hasSelection():
+      wrap_cursor = QTextCursor(doc)
+      if not forward:
+        wrap_cursor.movePosition(QTextCursor.MoveOperation.End)
+      found = doc.find(matcher, wrap_cursor, flags)
+
+    self._apply_found(found)
+
+  def _build_regex(self, query, case_sensitive):
+    """Compile *query* into a QRegularExpression, or None if invalid. Python's
+    re is used to validate and to pick up inline flags like (?m)/(?s)."""
+    from PySide6.QtCore import QRegularExpression
+    try:
+      flags = 0 if case_sensitive else re.IGNORECASE
+      pat = re.compile(query, flags)
+    except re.error:
+      return None
+    options = QRegularExpression.PatternOption.NoPatternOption
+    if pat.flags & re.IGNORECASE:
+      options |= QRegularExpression.PatternOption.CaseInsensitiveOption
+    if pat.flags & re.MULTILINE:
+      options |= QRegularExpression.PatternOption.MultilineOption
+    if pat.flags & re.DOTALL:
+      options |= QRegularExpression.PatternOption.DotMatchesEverythingOption
+    qre = QRegularExpression(pat.pattern, options)
+    if not qre.isValid():
+      return None
+    return qre
+
+  def _start_cursor(self, doc, forward):
+    """Cursor to start the (non-wrapping) search from: just past the current
+    match in the search direction, or the document end/start on a fresh search."""
+    if self._search_cursor.hasSelection():
+      c = QTextCursor(self._search_cursor)
+      if forward:
+        c.setPosition(self._search_cursor.selectionEnd())
+      else:
+        c.setPosition(self._search_cursor.selectionStart())
+      return c
+    c = QTextCursor(doc)
+    if not forward:
+      c.movePosition(QTextCursor.MoveOperation.End)
+    return c
+
+  def _find_in_older(self, doc, matcher, flags):
+    """Backward search ran off the top of the loaded document. Repeatedly pull
+    an older batch of history in (via the load_older callback) and search the
+    freshly-prepended region until a match turns up or the backlog is exhausted.
+
+    Each batch is prepended at position 0, so the new region is exactly
+    [0, chars_added); we search it backward from that boundary. Bounded by the
+    window's history cap, so a no-match query loads at most the cap -- the same
+    as scrolling all the way up."""
+    back = flags | QTextDocument.FindFlag.FindBackward
+    while True:
+      try:
+        before = doc.characterCount()
+        grew = self._load_older()
+        if not grew:
+          return QTextCursor()  # backlog exhausted
+        boundary = doc.characterCount() - before
+      except RuntimeError:
+        return QTextCursor()  # C++ object deleted
+      if boundary <= 0:
+        continue
+      c = QTextCursor(doc)
+      c.setPosition(boundary)
+      found = doc.find(matcher, c, back)
+      if not found.isNull() and found.hasSelection():
+        return found
+
+  def _apply_found(self, found):
+    """Highlight and scroll to *found* (or clear the highlight if it's null)."""
     try:
       if found and not found.isNull() and found.hasSelection():
         self._search_cursor = found
@@ -461,77 +568,6 @@ class SearchBar(QWidget):
         self._search_cursor = QTextCursor()
     except RuntimeError:
       self._search_cursor = QTextCursor()
-
-  def _plain_find(self, doc, query, case_sensitive, forward):
-    # Use QTextDocument.find() — it operates on document positions, which
-    # correctly handles tables (link previews) and embedded images.
-    flags = QTextDocument.FindFlag(0)
-    if case_sensitive:
-      flags |= QTextDocument.FindFlag.FindCaseSensitively
-    if not forward:
-      flags |= QTextDocument.FindFlag.FindBackward
-
-    if self._search_cursor.hasSelection():
-      start_cursor = QTextCursor(self._search_cursor)
-      if forward:
-        start_cursor.setPosition(self._search_cursor.selectionEnd())
-      else:
-        start_cursor.setPosition(self._search_cursor.selectionStart())
-    else:
-      start_cursor = QTextCursor(doc)
-      if not forward:
-        start_cursor.movePosition(QTextCursor.MoveOperation.End)
-
-    found = doc.find(query, start_cursor, flags)
-    if found.isNull() or not found.hasSelection():
-      # Wrap around
-      wrap_cursor = QTextCursor(doc)
-      if not forward:
-        wrap_cursor.movePosition(QTextCursor.MoveOperation.End)
-      found = doc.find(query, wrap_cursor, flags)
-      if found.isNull() or not found.hasSelection():
-        return QTextCursor()
-    return found
-
-  def _regex_find(self, doc, pat, forward):
-    # Use Qt's QRegularExpression find which operates on document positions.
-    from PySide6.QtCore import QRegularExpression
-    options = QRegularExpression.PatternOption.NoPatternOption
-    if pat.flags & re.IGNORECASE:
-      options |= QRegularExpression.PatternOption.CaseInsensitiveOption
-    if pat.flags & re.MULTILINE:
-      options |= QRegularExpression.PatternOption.MultilineOption
-    if pat.flags & re.DOTALL:
-      options |= QRegularExpression.PatternOption.DotMatchesEverythingOption
-    qre = QRegularExpression(pat.pattern, options)
-    if not qre.isValid():
-      return QTextCursor()
-
-    flags = QTextDocument.FindFlag(0)
-    if not forward:
-      flags |= QTextDocument.FindFlag.FindBackward
-
-    if self._search_cursor.hasSelection():
-      start_cursor = QTextCursor(self._search_cursor)
-      if forward:
-        start_cursor.setPosition(self._search_cursor.selectionEnd())
-      else:
-        start_cursor.setPosition(self._search_cursor.selectionStart())
-    else:
-      start_cursor = QTextCursor(doc)
-      if not forward:
-        start_cursor.movePosition(QTextCursor.MoveOperation.End)
-
-    found = doc.find(qre, start_cursor, flags)
-    if found.isNull() or not found.hasSelection():
-      # Wrap around
-      wrap_cursor = QTextCursor(doc)
-      if not forward:
-        wrap_cursor.movePosition(QTextCursor.MoveOperation.End)
-      found = doc.find(qre, wrap_cursor, flags)
-      if found.isNull() or not found.hasSelection():
-        return QTextCursor()
-    return found
 
   def eventFilter(self, obj, event):
     """Intercept keys on the QLineEdit before it consumes them."""
@@ -931,13 +967,17 @@ class Window(QWidget):
       Qt.ScrollBarPolicy.ScrollBarAlwaysOff if lines <= 1
       else Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
-    self._search_bar = SearchBar(self.output, on_close_focus=self.input, parent=self)
+    self._search_bar = SearchBar(self.output, on_close_focus=self.input,
+                                 parent=self, load_older=self._search_load_older,
+                                 ensure_loaded=self._ensure_history_loaded)
     self._search_bar.setVisible(False)
 
     self._build_layout()
 
     self._replay_queue = None  # list of (method_name, args, kwargs) during replay
     self._in_replay = False    # True while replay is actively inserting lines
+    self._prepending = False   # True while inserting older history at the top
+    self._history_more = None  # lazy scroll-up state (set by _setup_history_more)
 
     self.inputhistory = list(state.ui_state.input_history) if state.ui_state else []
     self._history_index = -1
@@ -999,6 +1039,11 @@ class Window(QWidget):
     """Track whether user has scrolled away from bottom."""
     if not self._programmatic_scroll:
       self._auto_scroll = self._near_bottom()
+      # Lazy-load older history when the user scrolls near the top.
+      more = self._history_more
+      if (more and not more['loading'] and not more['exhausted']
+          and _value <= self.output.fontMetrics().height() * 2):
+        self._load_older_history()
 
   def _scroll_to_bottom(self):
     """Scroll the output to the very bottom."""
@@ -1007,6 +1052,114 @@ class Window(QWidget):
     self.output.moveCursor(QTextCursor.MoveOperation.End)
     self.vs.setValue(self.vs.maximum())
     self._programmatic_scroll = False
+
+  def _prepend_history_rows(self, rows, channel):
+    """Insert older history *rows* (oldest-first) at the top of the document,
+    preserving the user's current scroll position. Used by lazy scroll-up.
+
+    Reuses the shared per-row render path (irc_client._render_history_row) via a
+    temporary cursor positioned at the document start; the ``_prepending`` flag
+    suppresses the End-moves in the addline_* methods so lines land at the top
+    instead of the bottom."""
+    if not rows:
+      return
+    from irc_client import _render_history_row
+    show_prefix = state.config.show_mode_prefix_messages
+    vs = self.vs
+    old_val = vs.value()
+    old_max = vs.maximum()
+    saved_cur = self.cur
+    saved_auto = self._auto_scroll
+    prepend_cur = QTextCursor(self.output.document())
+    prepend_cur.movePosition(QTextCursor.MoveOperation.Start)
+    self.cur = prepend_cur
+    self._prepending = True
+    self._auto_scroll = False
+    self.output.setUpdatesEnabled(False)
+    prepend_cur.beginEditBlock()
+    try:
+      for ts, etype, nick, text, prefix in rows:
+        _render_history_row(self, channel, ts, etype, nick, text, prefix,
+                            show_prefix)
+      # Separate the prepended block from the existing first line.
+      prepend_cur.insertText('\n')
+    finally:
+      prepend_cur.endEditBlock()
+      self.cur = saved_cur
+      self._prepending = False
+      self.output.setUpdatesEnabled(True)
+    # Content grew above the viewport — shift the scrollbar down by the added
+    # height so the same lines stay under the user's eyes.
+    new_max = vs.maximum()
+    self._programmatic_scroll = True
+    vs.setValue(old_val + (new_max - old_max))
+    self._programmatic_scroll = False
+    self._auto_scroll = saved_auto
+
+  def _load_older_history(self):
+    """Synchronously load and prepend the next batch of older history lines.
+
+    Triggered by scrolling near the top when ``_history_more`` says more lines
+    are available. Reads up to ``history_replay_initial`` older rows from the DB
+    on the GUI thread (bounded, so cheap) and prepends them."""
+    more = self._history_more
+    if not more or more['loading'] or more['exhausted']:
+      return
+    db = state.historydb
+    if not db:
+      self._history_more = None
+      return
+    more['loading'] = True
+    try:
+      remaining = more['cap'] - more['loaded']
+      if remaining <= 0:
+        more['exhausted'] = True
+        return
+      batch = min(state.config.history_replay_initial, remaining)
+      rows, oldest_id = db.get_before(
+        more['network'], more['channel'], more['oldest_id'], batch)
+      if not rows:
+        more['exhausted'] = True
+        return
+      self._prepend_history_rows(rows, more['channel'])
+      more['oldest_id'] = oldest_id
+      more['loaded'] += len(rows)
+      if more['loaded'] >= more['cap'] or oldest_id <= 1 or len(rows) < batch:
+        more['exhausted'] = True
+    finally:
+      more['loading'] = False
+
+  def _ensure_history_loaded(self):
+    """Callback for the Find bar (invoked before a search): if this window still
+    has a deferred or partially-dripped history replay, finish it now so the
+    eager window is present and lazy scroll-up (_history_more) is armed. Without
+    this, searching a channel that currently has focus but whose replay hasn't
+    completed would find nothing older than what happened to be rendered."""
+    if getattr(self, '_deferred_replay', None) is None:
+      return
+    try:
+      import qtpyrc
+      qtpyrc._finish_pending_replay(self)
+    except Exception:
+      pass
+
+  def _search_load_older(self):
+    """Callback for the Find bar: pull one older batch of history into the top
+    of the document so a backward search can reach lines that weren't eagerly
+    rendered. Returns True if lines were prepended, False when the backlog is
+    exhausted (or this window has no lazily-loaded history)."""
+    more = self._history_more
+    if not more or more['exhausted']:
+      return False
+    try:
+      before = self.output.document().characterCount()
+    except RuntimeError:
+      return False
+    self._load_older_history()
+    try:
+      return self.output.document().characterCount() > before
+    except RuntimeError:
+      return False
 
   def _widget_alive(self):
     """Return False if the underlying C++ objects have been deleted."""
@@ -1123,7 +1276,8 @@ class Window(QWidget):
           cur.insertText(nick, anchor_fmt)
       else:
         self._render_text(part, base_format=base)
-    cur.movePosition(QTextCursor.MoveOperation.End)
+    if not self._prepending:
+      cur.movePosition(QTextCursor.MoveOperation.End)
     self._updateBottomAlign()
 
   @staticmethod
@@ -1172,7 +1326,8 @@ class Window(QWidget):
     cur.insertText(nick, anchor_fmt)
     # Insert "> "
     cur.insertText('> ', bracket_fmt)
-    cur.movePosition(QTextCursor.MoveOperation.End)
+    if not self._prepending:
+      cur.movePosition(QTextCursor.MoveOperation.End)
     # Now render the message body with mIRC formatting
     self._render_text(message)
     self._updateBottomAlign()
@@ -1260,7 +1415,8 @@ class Window(QWidget):
         tf.setForeground(fg)
         tf.setBackground(bg)
       self._insert_with_urls(cur, text, tf)
-      cur.movePosition(QTextCursor.MoveOperation.End)
+      if not self._prepending:
+        cur.movePosition(QTextCursor.MoveOperation.End)
 
   def redmessage(self, text):
     if not self._widget_alive(): return
@@ -1270,7 +1426,8 @@ class Window(QWidget):
       self.cur.insertText('\n')
     self._insert_timestamp()
     self.cur.insertText(text, state.redformat)
-    self.cur.movePosition(QTextCursor.MoveOperation.End)
+    if not self._prepending:
+      self.cur.movePosition(QTextCursor.MoveOperation.End)
     self._updateBottomAlign()
 
   def addlinef(self, text, format):
@@ -1279,7 +1436,8 @@ class Window(QWidget):
       self.cur.insertText('\n'+text, format)
     else:
       self.cur.insertText(text, format)
-    self.cur.movePosition(QTextCursor.MoveOperation.End)
+    if not self._prepending:
+      self.cur.movePosition(QTextCursor.MoveOperation.End)
     self._updateBottomAlign()
 
   # --- activity tracking (tab/tree highlighting) ---
