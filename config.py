@@ -736,12 +736,20 @@ class AppConfig:
     self.backscroll_limit = data.get('backscroll_limit', 10000)
     hr = data.get('history_replay') or {}
     if isinstance(hr, int):
-      # legacy: single value applies to channels only
+      # legacy: single value applies to both channels and queries
       self.history_replay_channels = hr
-      self.history_replay_queries = 0
+      self.history_replay_queries = hr
     else:
       self.history_replay_channels = hr.get('channels', self.backscroll_limit)
-      self.history_replay_queries = hr.get('queries', 0)
+      # Queries default to the same as channels so /query reloads a past
+      # conversation out of the box. (0 disables query-history replay.)
+      self.history_replay_queries = hr.get('queries', self.backscroll_limit)
+    # Eager replay window: how many of the most recent history lines are
+    # rendered up front when a channel/query opens. Older lines (up to the
+    # channels/queries cap above) are loaded lazily when the user scrolls up,
+    # so opening a channel doesn't have to read+render its whole backlog.
+    self.history_replay_initial = int(
+      hr.get('initial', 500) if isinstance(hr, dict) else 500)
     self.history_bg_enabled = bool(hr.get('bg_enabled', True) if isinstance(hr, dict) else True)
     self.history_bg_chunk = int(hr.get('bg_chunk', 50) if isinstance(hr, dict) else 50)
     self.history_bg_interval = int(hr.get('bg_interval', 100) if isinstance(hr, dict) else 100)

@@ -87,6 +87,10 @@ class GeneralPage(QWidget):
         self.history_replay_queries.setSpecialValueText("disabled")
         layout.addRow("Query history:", self.history_replay_queries)
 
+        self.history_replay_initial = _ck(QSpinBox(), 'history_replay.initial')
+        self.history_replay_initial.setRange(1, 1000000)
+        layout.addRow("Initial lines shown:", self.history_replay_initial)
+
         self.bg_replay_enabled = _ck(QCheckBox(), 'history_replay.bg_enabled')
         layout.addRow("Background replay:", self.bg_replay_enabled)
 
@@ -148,9 +152,11 @@ class GeneralPage(QWidget):
         if isinstance(hr, int):
             self.history_replay_channels.setValue(hr)
             self.history_replay_queries.setValue(0)
+            self.history_replay_initial.setValue(500)
         else:
             self.history_replay_channels.setValue(int(hr.get('channels', data.get('backscroll_limit', 10000))))
             self.history_replay_queries.setValue(int(hr.get('queries', 0)))
+            self.history_replay_initial.setValue(int(hr.get('initial', 500)))
         if isinstance(hr, dict):
             self.bg_replay_enabled.setChecked(bool(hr.get('bg_enabled', True)))
             self.bg_chunk.setValue(int(hr.get('bg_chunk', 50)))
@@ -201,6 +207,7 @@ class GeneralPage(QWidget):
             data['history_replay'] = hr
         hr['channels'] = self.history_replay_channels.value()
         hr['queries'] = self.history_replay_queries.value()
+        hr['initial'] = self.history_replay_initial.value()
         hr['bg_enabled'] = self.bg_replay_enabled.isChecked()
         hr['bg_chunk'] = self.bg_chunk.value()
         hr['bg_interval'] = self.bg_interval.value()

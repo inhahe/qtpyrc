@@ -40,6 +40,26 @@ def _q_replay_bounds(conn, network, channel, limit):
   return (min_id, max_id)
 
 
+def _q_get_before(conn, network, channel, before_id, limit):
+  """Return (rows, oldest_id) for the *limit* history rows immediately older
+  than *before_id* (i.e. with id < before_id), oldest first. Used by the lazy
+  scroll-up loader: when the user scrolls to the top of a window we prepend the
+  next batch of older lines. rows are 5-tuples (ts, type, nick, text, prefix);
+  oldest_id is the smallest id in the batch (pass it as *before_id* on the next
+  call). When no older rows exist, returns ([], before_id)."""
+  cur = conn.execute(
+    "SELECT id, ts, type, nick, text, COALESCE(prefix, '') FROM history "
+    "WHERE network = ? AND channel = ? AND id < ? "
+    "ORDER BY id DESC LIMIT ?",
+    (network or '', channel, before_id, limit))
+  raw = cur.fetchall()
+  if not raw:
+    return [], before_id
+  raw.reverse()  # oldest first
+  rows = [r[1:] for r in raw]
+  return rows, raw[0][0]
+
+
 def _q_get_chunk(conn, network, channel, after_id, max_id, chunk):
   cur = conn.execute(
     "SELECT id, ts, type, nick, text, COALESCE(prefix, '') FROM history "
@@ -89,6 +109,9 @@ class HistoryReader:
   def _do_get_last(self, network, channel, limit):
     return _q_get_last(self._get_conn(), network, channel, limit)
 
+  def _do_get_before(self, network, channel, before_id, limit):
+    return _q_get_before(self._get_conn(), network, channel, before_id, limit)
+
   # --- async wrappers (await from the GUI thread) ---------------------------
   async def replay_bounds(self, network, channel, limit):
     loop = asyncio.get_event_loop()
@@ -104,6 +127,11 @@ class HistoryReader:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
       self._executor, self._do_get_last, network, channel, limit)
+
+  async def get_before(self, network, channel, before_id, limit):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+      self._executor, self._do_get_before, network, channel, before_id, limit)
 
   def close(self):
     """Close the reader connection (on the worker thread) and stop the pool."""
@@ -167,9 +195,33 @@ class HistoryDB:
       ON urls (network, ts)
     """)
     self._conn.commit()
+    self._migrate()
     self._keep = keep_limit
     self._url_keep = 50000
     self._add_count = 0
+
+  def _migrate(self):
+    """Apply one-time schema/data migrations, tracked via PRAGMA user_version.
+
+    v1: query history used to be keyed by "=nick:ident", but query windows and
+    logging are keyed by nick alone, so /query-ing an offline nick (ident
+    unknown) never matched its saved history. Re-key those rows to "=nick".
+    IRC nicks and idents contain no ':' , so the format is exactly one colon and
+    substr up to it yields "=nick". The predicate matches nothing once migrated,
+    and user_version gates the (full-scan) UPDATE so it runs only once."""
+    try:
+      ver = self._conn.execute("PRAGMA user_version").fetchone()[0]
+    except sqlite3.Error:
+      return
+    if ver < 1:
+      try:
+        self._conn.execute(
+          "UPDATE history SET channel = substr(channel, 1, instr(channel, ':') - 1) "
+          "WHERE channel LIKE '=%:%'")
+        self._conn.execute("PRAGMA user_version = 1")
+        self._conn.commit()
+      except sqlite3.Error:
+        pass
 
   def add(self, network, channel, event_type, nick=None, text=None, prefix=''):
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -213,6 +265,11 @@ class HistoryDB:
     last_id is the id to pass as *after_id* on the next call. When fewer than
     *chunk* rows come back the caller has reached max_id and replay is done."""
     return _q_get_chunk(self._conn, network, channel, after_id, max_id, chunk)
+
+  def get_before(self, network, channel, before_id, limit):
+    """Return (rows, oldest_id) for the *limit* rows older than *before_id*,
+    oldest first. Used by the lazy scroll-up loader to prepend older lines."""
+    return _q_get_before(self._conn, network, channel, before_id, limit)
 
   def _prune_all(self):
     """Prune all channels to keep at most self._keep rows each."""
