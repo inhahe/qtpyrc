@@ -9,6 +9,7 @@ from datetime import datetime
 from functools import partial
 
 import state
+from state import dbg, LOG_WARN
 from config import _format_timestamp, _parse_color
 from models import mircre, irccolors, perceivedbrightness
 
@@ -179,12 +180,27 @@ class NetworkTree(QTreeWidget):
 # GUI: Window classes
 # ---------------------------------------------------------------------------
 
+# Called once, with no arguments, the first time any chat view actually paints.
+# --timing installs a milestone here: laying out chat text is what forces Qt to
+# resolve the chat font's fallback chain, so "window shown" and "chat legible"
+# can be far apart and only the second one is what the user experiences as
+# startup finishing.
+first_chat_paint_hook = None
+
+
 class ChatOutput(QTextEdit):
   """QTextEdit subclass that supports right-clicking on nick anchors and clickable URLs."""
   def __init__(self, parent_window):
     super().__init__(parent_window)
     self._parent_window = parent_window
     self.setMouseTracking(True)
+
+  def paintEvent(self, event):
+    super().paintEvent(event)
+    global first_chat_paint_hook
+    if first_chat_paint_hook is not None:
+      hook, first_chat_paint_hook = first_chat_paint_hook, None
+      hook()
 
   def _refocus_input(self):
     """Return focus to the parent window's input widget."""
@@ -308,6 +324,158 @@ class ChatOutput(QTextEdit):
           copy_action=has_selection):
         super().contextMenuEvent(event)
     self._refocus_input()
+
+
+# ---------------------------------------------------------------------------
+# Shared chat font
+# ---------------------------------------------------------------------------
+
+# Preferred stand-ins for characters the chat font itself has no glyph for.
+# Order matters:
+#   Segoe UI        — full Unicode punctuation: curly quotes (U+2019), em
+#                     dashes, ellipsis. Must come before Segoe UI Symbol or Qt
+#                     mis-picks the symbol font for typographic punctuation and
+#                     renders it as missing glyphs.
+#   Segoe UI Symbol — monochrome dingbats / BMP symbol ranges (U+2600-27BF),
+#                     kept ahead of the oversized colour emoji fonts.
+# Qt keeps searching the rest of the system fonts after these, which is where
+# real colour emoji (U+1F600+) get picked up.
+CHAT_FALLBACK_FAMILIES = ('Segoe UI', 'Segoe UI Symbol')
+
+# (key, QFont, line height) — built once, reused by every window.
+_chat_font_cache = None
+# (key, QRawFont) for the chat family, used to answer "can this font draw X?".
+_chat_rawfont_cache = None
+# Characters the chat font is already known to cover, so each one is only ever
+# asked about once.
+_chat_covered_chars = set()
+# Font families we have already registered CHAT_FALLBACK_FAMILIES for.
+_chat_fallbacks_installed = set()
+_chat_fallbacks_pending = False
+
+# Set by qtpyrc to _refresh_all_window_fonts. Called when the fallback list is
+# installed, so open windows pick up the new resolution order.
+refresh_fonts_hook = None
+
+
+def _chat_font_key():
+  cfg = state.config
+  return (cfg.fontfamily, cfg.fontheight)
+
+
+def _build_chat_font():
+  """The chat font, as a single family, plus its line height.
+
+  Deliberately *one* family. Asking Qt to match a font that names more than one
+  family forces it to enumerate the entire system font database, because it has
+  to know which of those families covers each glyph — ~0.55s with the font files
+  already in the OS cache and considerably worse without. That cost is flat: it
+  is triggered by the presence of a second family, not by the text (measured
+  identical for pure-ASCII lines, and identical again for a fallback family that
+  doesn't even exist). It used to be charged to the first window's constructor,
+  i.e. before anything was on screen.
+
+  Qt already falls back per glyph on its own; the only thing an explicit list
+  buys is *which* substitute wins for characters the chat font lacks. So the
+  preference is registered lazily instead — see note_chat_text() — at the moment
+  such a character actually turns up, which is a moment when Qt has to build the
+  database anyway. Fonts that cover everything their user reads never pay it.
+  """
+  cfg = state.config
+  f = QFont(cfg.fontfamily, cfg.fontheight)
+  return f, QFontMetrics(f).height()
+
+
+def chat_font():
+  """The shared chat QFont."""
+  global _chat_font_cache
+  key = _chat_font_key()
+  if _chat_font_cache is None or _chat_font_cache[0] != key:
+    font, height = _build_chat_font()
+    _chat_font_cache = (key, font, height)
+  return _chat_font_cache[1]
+
+
+def chat_line_height():
+  """Height of one line in the chat font."""
+  chat_font()          # ensure the cache is populated
+  return _chat_font_cache[2]
+
+
+def invalidate_chat_font():
+  """Drop the cached chat font (call after the font config changes)."""
+  global _chat_font_cache, _chat_rawfont_cache, _chat_covered_chars
+  _chat_font_cache = None
+  _chat_rawfont_cache = None
+  _chat_covered_chars = set()
+
+
+def _chat_rawfont():
+  """QRawFont for the chat family — the physical font, so it can be asked
+  directly which characters it has glyphs for."""
+  global _chat_rawfont_cache
+  key = _chat_font_key()
+  if _chat_rawfont_cache is None or _chat_rawfont_cache[0] != key:
+    try:
+      raw = QRawFont.fromFont(chat_font())
+    except Exception as e:
+      dbg(LOG_WARN, 'Cannot inspect chat font coverage: %s' % e)
+      raw = None
+    _chat_rawfont_cache = (key, raw)
+  return _chat_rawfont_cache[1]
+
+
+def _install_chat_fallbacks():
+  """Register CHAT_FALLBACK_FAMILIES as stand-ins for the chat family and
+  re-apply the font everywhere, so open windows use the new resolution order."""
+  global _chat_fallbacks_pending
+  _chat_fallbacks_pending = False
+  family = state.config.fontfamily
+  if family in _chat_fallbacks_installed:
+    return
+  _chat_fallbacks_installed.add(family)
+  QFont.insertSubstitutions(family, list(CHAT_FALLBACK_FAMILIES))
+  invalidate_chat_font()
+  if refresh_fonts_hook is not None:
+    refresh_fonts_hook()
+
+
+def note_chat_text(text):
+  """Note text about to be shown in a chat view.
+
+  Installs the fallback preference the first time a character appears that the
+  chat font has no glyph for. Doing it on demand rather than up front is what
+  keeps startup cheap (see _build_chat_font), and it costs nothing extra: a
+  character the chat font lacks makes Qt search the whole font database anyway.
+
+  Cheap enough for the message path — each distinct character is asked about
+  once, then remembered, so steady-state this is a set difference that comes
+  back empty.
+  """
+  global _chat_fallbacks_pending
+  if _chat_fallbacks_pending or not text:
+    return
+  if state.config.fontfamily in _chat_fallbacks_installed:
+    return
+  unknown = set(text) - _chat_covered_chars
+  if not unknown:
+    return
+  raw = _chat_rawfont()
+  if raw is None or not raw.isValid():
+    return
+  missing = False
+  for ch in unknown:
+    # Note the int overload: supportsCharacter(str) only answers correctly for
+    # Latin-1 and reports everything above it as unsupported.
+    if raw.supportsCharacter(ord(ch)):
+      _chat_covered_chars.add(ch)
+    else:
+      missing = True
+  if missing:
+    # Deferred: this runs mid-insertion, and installing the fallbacks re-lays
+    # out every open document.
+    _chat_fallbacks_pending = True
+    QTimer.singleShot(0, _install_chat_fallbacks)
 
 
 # ---------------------------------------------------------------------------
@@ -926,24 +1094,7 @@ class Window(QWidget):
     self.output = ChatOutput(self)
     self.output.setReadOnly(True)
     self.output.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
-    _chatfont = QFont(state.config.fontfamily, state.config.fontheight)
-    # Per-glyph font fallback chain. Order matters:
-    #   1. user's chosen font (covers Latin etc.)
-    #   2. Segoe UI       — full Unicode punctuation: curly quotes (U+2019),
-    #                       em dashes, ellipsis, etc.  Must come before
-    #                       Segoe UI Symbol or Qt will mis-pick the symbol
-    #                       font for typographic punctuation and render it
-    #                       as missing glyphs.
-    #   3. Segoe UI Symbol — monochrome dingbats / BMP symbol ranges
-    #                       (U+2600-27BF), kept here so they don't fall
-    #                       through to oversized color emoji.
-    # Qt then continues searching all system fonts after this list is
-    # exhausted (where actual color emoji like U+1F600+ get picked up).
-    _chatfont.setFamilies([
-      state.config.fontfamily,
-      'Segoe UI',
-      'Segoe UI Symbol',
-    ])
+    _chatfont = chat_font()
     self.output.setFont(_chatfont)
     # Set default document font explicitly
     self.output.document().setDefaultFont(_chatfont)
@@ -960,9 +1111,8 @@ class Window(QWidget):
     self.input = QTextEdit(self)
     self.input.setAcceptRichText(False)
     self.input.setFont(_chatfont)
-    fm = QFontMetrics(_chatfont)
     lines = max(1, state.config.input_lines)
-    self.input.setFixedHeight(fm.height() * lines + 10)
+    self.input.setFixedHeight(chat_line_height() * lines + 10)
     self.input.setVerticalScrollBarPolicy(
       Qt.ScrollBarPolicy.ScrollBarAlwaysOff if lines <= 1
       else Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -975,6 +1125,7 @@ class Window(QWidget):
     self._build_layout()
 
     self._replay_queue = None  # list of (method_name, args, kwargs) during replay
+    self._replay_cutoff_id = None  # history id the queue was opened at
     self._in_replay = False    # True while replay is actively inserting lines
     self._prepending = False   # True while inserting older history at the top
     self._history_more = None  # lazy scroll-up state (set by _setup_history_more)
@@ -1186,7 +1337,31 @@ class Window(QWidget):
     else:
       side = 10
     line = '\u2500' * side + ' ' + label + ' ' + '\u2500' * side
+    note_chat_text(line)
     self.cur.insertText(line, sep_fmt)
+
+  def begin_replay_queue(self):
+    """Start holding live output back until the pending history replay is done.
+
+    Idempotent on purpose. More than one place opens the queue for the same
+    window -- the handler that creates the window (a join, or a query opened by
+    an incoming PM) and then the drip-feed loop when it gets round to reading
+    that window's backlog -- and live messages arrive in between. For a query
+    window opened *by* a private message, the message that opened it always
+    does. Assigning a fresh list instead of keeping the existing one threw
+    those lines away silently.
+
+    Opening the queue also snapshots how far the history table had got, because
+    every line held back here is *also* written to that table as it arrives. A
+    replay bounded only by "the newest row" would render those lines and the
+    flush would then render them a second time -- which is exactly what happened
+    to the message that opens a query window. Replay reads pass the snapshot as
+    their cutoff, so the backlog ends precisely where the held-back queue begins.
+    """
+    if self._replay_queue is None:
+      self._replay_queue = []
+      db = state.historydb
+      self._replay_cutoff_id = db.current_max_id() if db else None
 
   def _queue_if_replaying(self, method_name, args, kwargs):
     """If replay is in progress, queue this call for after replay finishes.
@@ -1215,6 +1390,7 @@ class Window(QWidget):
       return
     queue = self._replay_queue
     self._replay_queue = None
+    self._replay_cutoff_id = None   # the next hold-back takes its own snapshot
     for method_name, args, kwargs in queue:
       getattr(self, method_name)(*args, **kwargs)
 
@@ -1264,6 +1440,7 @@ class Window(QWidget):
           anchor_fmt.setAnchor(True)
           anchor_fmt.setAnchorHref(href)
           anchor_fmt.setFontUnderline(False)
+          note_chat_text(text)
           cur.insertText(text, anchor_fmt)
         else:
           nick = part[0]
@@ -1273,6 +1450,7 @@ class Window(QWidget):
           anchor_fmt.setAnchor(True)
           anchor_fmt.setAnchorHref("nick:" + clean)
           anchor_fmt.setFontUnderline(False)
+          note_chat_text(nick)
           cur.insertText(nick, anchor_fmt)
       else:
         self._render_text(part, base_format=base)
@@ -1323,6 +1501,7 @@ class Window(QWidget):
       anchor_fmt.setForeground(QBrush(nick_qcolor))
     else:
       anchor_fmt.setForeground(QBrush(state.config.fgcolor))
+    note_chat_text(nick)
     cur.insertText(nick, anchor_fmt)
     # Insert "> "
     cur.insertText('> ', bracket_fmt)
@@ -1369,6 +1548,9 @@ class Window(QWidget):
     # separators that QTextEdit would render as extra blank lines.
     line = line.replace('\r', '').replace('\n', ' ')
     line = line.replace('\u2028', ' ').replace('\u2029', ' ')
+    # Every message body reaches the chat view through here, which makes it the
+    # right place to notice characters the chat font can't draw.
+    note_chat_text(line)
     bold = underline = italics = False
     base_fg = base_format.foreground().color() if base_format else state.config.fgcolor
     if base_format:
@@ -1425,6 +1607,7 @@ class Window(QWidget):
     if self.cur.position():
       self.cur.insertText('\n')
     self._insert_timestamp()
+    note_chat_text(text)
     self.cur.insertText(text, state.redformat)
     if not self._prepending:
       self.cur.movePosition(QTextCursor.MoveOperation.End)
@@ -1432,6 +1615,7 @@ class Window(QWidget):
 
   def addlinef(self, text, format):
     if not self._widget_alive(): return
+    note_chat_text(text)
     if self.cur.position():
       self.cur.insertText('\n'+text, format)
     else:
@@ -1448,13 +1632,20 @@ class Window(QWidget):
     return sub is not None and sub.widget() is self
 
   def set_activity(self, level):
-    """Set activity level if higher than current, and update tab/tree colors."""
+    """Set activity level if higher than current, and update tab/tree colors.
+
+    Nothing is suppressed while a history replay is pending. Replayed content
+    never reaches this method -- render_history_rows() calls the addline_*
+    methods directly -- so the only callers are live IRC events, and those must
+    colour the tab whether or not the window's backlog has finished loading.
+    Gating on a pending replay swallowed the mark permanently (it is never
+    re-applied when the replay completes), which silently un-highlighted the
+    first message of every freshly opened query window: those are created with a
+    deferred replay already attached, so the very message that opened the window
+    arrived while the gate was shut.
+    """
     if self._is_active_window():
       return  # don't mark the window the user is looking at
-    # Suppress during local DB history replay (replayed content shouldn't
-    # mark tabs as unread)
-    if hasattr(self, '_deferred_replay') or hasattr(self, '_bg_replay'):
-      return
     if level <= self._activity:
       return  # don't downgrade
     self._activity = level

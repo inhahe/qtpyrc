@@ -13,29 +13,47 @@ from datetime import datetime
 # drifting apart.
 # ---------------------------------------------------------------------------
 
-def _q_get_last(conn, network, channel, limit):
+def _id_cap(cutoff_id):
+  """SQL fragment + params restricting a read to rows that existed at *cutoff_id*.
+
+  A window that is replaying its backlog holds its live output back in a queue
+  and renders it afterwards -- but those same live lines are also written to this
+  table as they arrive, so a replay bounded only by "newest row" would render
+  them too and the flushed queue would then repeat every one of them. Callers
+  that hold output back pass the id the table ended at when they started holding
+  (Window.begin_replay_queue -> HistoryDB.current_max_id), which splits the rows
+  cleanly: <= cutoff is backlog to replay, > cutoff is a line already queued.
+  """
+  if cutoff_id is None:
+    return '', ()
+  return ' AND id <= ?', (cutoff_id,)
+
+
+def _q_get_last(conn, network, channel, limit, cutoff_id=None):
+  cap, cap_params = _id_cap(cutoff_id)
   cur = conn.execute(
     "SELECT ts, type, nick, text, COALESCE(prefix, '') FROM history "
-    "WHERE network = ? AND channel = ? "
+    "WHERE network = ? AND channel = ?" + cap + " "
     "ORDER BY id DESC LIMIT ?",
-    (network or '', channel, limit))
+    (network or '', channel) + cap_params + (limit,))
   rows = cur.fetchall()
   rows.reverse()
   return rows  # [(ts, type, nick, text, prefix), ...]
 
 
-def _q_replay_bounds(conn, network, channel, limit):
+def _q_replay_bounds(conn, network, channel, limit, cutoff_id=None):
   net = network or ''
+  cap, cap_params = _id_cap(cutoff_id)
   row = conn.execute(
-    "SELECT MAX(id) FROM history WHERE network = ? AND channel = ?",
-    (net, channel)).fetchone()
+    "SELECT MAX(id) FROM history WHERE network = ? AND channel = ?" + cap,
+    (net, channel) + cap_params).fetchone()
   max_id = row[0] if row else None
   if max_id is None:
     return None  # no history for this channel
   row = conn.execute(
-    "SELECT id FROM history WHERE network = ? AND channel = ? "
+    "SELECT id FROM history WHERE network = ? AND channel = ?" + cap + " "
     "ORDER BY id DESC LIMIT 1 OFFSET ?",
-    (net, channel, max(0, int(limit) - 1))).fetchone()
+    (net, channel) + cap_params + (max(0, int(limit) - 1),)).fetchone()
   min_id = row[0] if row else 0
   return (min_id, max_id)
 
@@ -100,33 +118,33 @@ class HistoryReader:
     return self._conn
 
   # --- worker-thread bodies -------------------------------------------------
-  def _do_replay_bounds(self, network, channel, limit):
-    return _q_replay_bounds(self._get_conn(), network, channel, limit)
+  def _do_replay_bounds(self, network, channel, limit, cutoff_id):
+    return _q_replay_bounds(self._get_conn(), network, channel, limit, cutoff_id)
 
   def _do_get_chunk(self, network, channel, after_id, max_id, chunk):
     return _q_get_chunk(self._get_conn(), network, channel, after_id, max_id, chunk)
 
-  def _do_get_last(self, network, channel, limit):
-    return _q_get_last(self._get_conn(), network, channel, limit)
+  def _do_get_last(self, network, channel, limit, cutoff_id):
+    return _q_get_last(self._get_conn(), network, channel, limit, cutoff_id)
 
   def _do_get_before(self, network, channel, before_id, limit):
     return _q_get_before(self._get_conn(), network, channel, before_id, limit)
 
   # --- async wrappers (await from the GUI thread) ---------------------------
-  async def replay_bounds(self, network, channel, limit):
+  async def replay_bounds(self, network, channel, limit, cutoff_id=None):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
-      self._executor, self._do_replay_bounds, network, channel, limit)
+      self._executor, self._do_replay_bounds, network, channel, limit, cutoff_id)
 
   async def get_chunk(self, network, channel, after_id, max_id, chunk):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
       self._executor, self._do_get_chunk, network, channel, after_id, max_id, chunk)
 
-  async def get_last(self, network, channel, limit):
+  async def get_last(self, network, channel, limit, cutoff_id=None):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
-      self._executor, self._do_get_last, network, channel, limit)
+      self._executor, self._do_get_last, network, channel, limit, cutoff_id)
 
   async def get_before(self, network, channel, before_id, limit):
     loop = asyncio.get_event_loop()
@@ -199,6 +217,15 @@ class HistoryDB:
     self._keep = keep_limit
     self._url_keep = 50000
     self._add_count = 0
+    # Highest row id in the table, kept current by add() so current_max_id() is
+    # free to call from the GUI thread (see _id_cap for what it is used for).
+    # Read once here because the table is usually non-empty at startup and no
+    # insert has happened yet to tell us where it left off.
+    try:
+      row = self._conn.execute("SELECT MAX(id) FROM history").fetchone()
+      self._max_id = (row[0] if row and row[0] is not None else 0)
+    except sqlite3.Error:
+      self._max_id = 0
 
   def _migrate(self):
     """Apply one-time schema/data migrations, tracked via PRAGMA user_version.
@@ -226,11 +253,13 @@ class HistoryDB:
   def add(self, network, channel, event_type, nick=None, text=None, prefix=''):
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     try:
-      self._conn.execute(
+      cur = self._conn.execute(
         "INSERT INTO history (ts, network, channel, type, nick, text, prefix) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (ts, network or '', channel, event_type, nick, text, prefix or ''))
       self._conn.commit()
+      if cur.lastrowid:
+        self._max_id = cur.lastrowid
     except sqlite3.ProgrammingError:
       return  # DB already closed during shutdown
     # Prune every 500 inserts to keep the DB bounded
@@ -240,11 +269,20 @@ class HistoryDB:
       self._prune_all()
       self.prune_urls()
 
-  def get_last(self, network, channel, limit):
-    """Return the last *limit* rows for a channel, oldest first."""
-    return _q_get_last(self._conn, network, channel, limit)
+  def current_max_id(self):
+    """Return the id the table currently ends at (0 when empty).
 
-  def replay_bounds(self, network, channel, limit):
+    Cheap: maintained by add(), not queried. Callers pass it back later as a
+    *cutoff_id* to read the table as it was at this moment -- see _id_cap."""
+    return self._max_id
+
+  def get_last(self, network, channel, limit, cutoff_id=None):
+    """Return the last *limit* rows for a channel, oldest first.
+
+    *cutoff_id* restricts the read to rows that existed at that id (_id_cap)."""
+    return _q_get_last(self._conn, network, channel, limit, cutoff_id)
+
+  def replay_bounds(self, network, channel, limit, cutoff_id=None):
     """Return (min_id, max_id) covering the newest *limit* rows for a channel,
     or None if there is no history. Used by the streamed background replay so we
     can walk the window in ascending-id chunks without materialising every row
@@ -254,8 +292,10 @@ class HistoryDB:
     Two tiny single-row queries (both index-served): MAX(id) gives the newest
     row, and DESC ... LIMIT 1 OFFSET (limit-1) gives the id of the limit-th
     newest row (the lower bound). If fewer than *limit* rows exist the OFFSET
-    query returns nothing, so we include everything from id 0."""
-    return _q_replay_bounds(self._conn, network, channel, limit)
+    query returns nothing, so we include everything from id 0.
+
+    *cutoff_id* restricts the bounds to rows that existed at that id (_id_cap)."""
+    return _q_replay_bounds(self._conn, network, channel, limit, cutoff_id)
 
   def get_chunk(self, network, channel, after_id, max_id, chunk):
     """Return (rows, last_id) for the next ascending-id slice of a channel's

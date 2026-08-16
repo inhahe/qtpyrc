@@ -58,6 +58,10 @@ tray_icon = None
 # DCC manager (set at startup by qtpyrc.py)
 dcc_manager = None
 
+# Non-modal font replacement dialog (dialogs.offer_font_replacement). Held here
+# only so Python doesn't garbage-collect the dialog while it is on screen.
+_font_picker_dialog = None
+
 # Global list tracking open color-picker dialogs (so we can close them)
 _colorcodewindow = []
 

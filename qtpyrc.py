@@ -22,7 +22,10 @@
 #    module <- the script's entire module
 #    script <- the script module's running Script() instance
 
-import sys, os, asyncio, argparse, signal
+import sys, os, asyncio, argparse, signal, time as _time
+# Wall-clock origin for --timing. Set as early as possible (before the heavy
+# PySide6 imports below) so the reported "python imports" phase is honest.
+_START_TIME = _time.monotonic()
 import faulthandler
 faulthandler.enable()
 
@@ -48,11 +51,82 @@ from PySide6.QtCore import *
 APP_NAME = 'qtpyrc'
 APP_VERSION = '1.2.6'  # fallback; overridden by config app_version if set
 
+# ---------------------------------------------------------------------------
+# Startup timing (--timing)
+# ---------------------------------------------------------------------------
+# Startup cost is spread across two very different places: the synchronous work
+# in main() (imports, Qt app construction, DB open, plugin loading) and the
+# *asynchronous* work that follows (connecting, joining, and replaying history
+# into each window). Guessing which dominates is how you optimise the wrong
+# thing, so --timing measures both and prints a breakdown.
+_TIMING = False
+_timing_marks = []      # [(label, seconds_since_start, delta_from_previous)]
+_timing_counters = {}   # label -> [count, total_seconds]  (for repeated work)
+_timing_last = None
+
+
+def _mark(label):
+  """Record a named startup milestone (no-op unless --timing)."""
+  global _timing_last
+  if not _TIMING:
+    return
+  now = _time.monotonic()
+  since_start = now - _START_TIME
+  delta = now - (_timing_last if _timing_last is not None else _START_TIME)
+  _timing_marks.append((label, since_start, delta))
+  _timing_last = now
+  print('[timing] %7.3fs (+%6.3fs)  %s' % (since_start, delta, label), flush=True)
+
+
+def timing_add(label, seconds, count=1):
+  """Accumulate repeated work (e.g. per-window history replay) under *label*."""
+  if not _TIMING:
+    return
+  slot = _timing_counters.setdefault(label, [0, 0.0])
+  slot[0] += count
+  slot[1] += seconds
+
+
+def timing_enabled():
+  return _TIMING
+
+
+def _set_timing(on):
+  global _TIMING
+  _TIMING = bool(on)
+
+
+_timing_reported = False
+
+
+def _timing_report():
+  """Print the accumulated startup breakdown, slowest phase first."""
+  global _timing_reported
+  if not _TIMING or _timing_reported:
+    return
+  _timing_reported = True
+  print('\n[timing] ===== startup breakdown =====', flush=True)
+  if _timing_marks:
+    worst = sorted(_timing_marks, key=lambda m: m[2], reverse=True)
+    print('[timing] phases, slowest first:', flush=True)
+    for label, since, delta in worst:
+      print('[timing]   %6.3fs  %s  (at %.3fs)' % (delta, label, since), flush=True)
+  if _timing_counters:
+    print('[timing] repeated work:', flush=True)
+    for label, (count, total) in sorted(
+        _timing_counters.items(), key=lambda kv: kv[1][1], reverse=True):
+      avg = (total / count) if count else 0.0
+      print('[timing]   %6.3fs total  %5d calls  %6.1fms avg  %s'
+            % (total, count, avg * 1000.0, label), flush=True)
+  print('[timing] total to window shown: %.3fs\n'
+        % (_timing_marks[-1][1] if _timing_marks else 0.0), flush=True)
+
 import state
 from config import loadconfig, UIState
 from models import Client, newclient
+import window
 from window import NetworkTree
-from dialogs import _validate_font, open_settings
+from dialogs import _validate_font, offer_font_replacement, open_settings
 from tabbar import TabbedWorkspace
 from toolbar import build_toolbar
 
@@ -150,9 +224,15 @@ def _refresh_all_window_fonts():
   """Update font on all open chat windows (output, input, nick list)."""
   if not state.clients:
     return
-  from PySide6.QtGui import QFont, QFontMetrics
+  from PySide6.QtGui import QFont
+  _window = window
   cfg = state.config
-  f = QFont(cfg.fontfamily, cfg.fontheight)
+  # Rebuild the shared chat font from the current config. Going through
+  # window.chat_font() is what keeps open windows in step with new ones -- both
+  # the font itself and, once installed, the fallback preference registered for
+  # its family (window.note_chat_text).
+  _window.invalidate_chat_font()
+  f = _window.chat_font()
   # Nick list font: use dedicated setting if configured, otherwise chat font
   if cfg.nicklist_font_family or cfg.nicklist_font_size:
     nf = QFont(cfg.nicklist_font_family or cfg.fontfamily,
@@ -160,13 +240,21 @@ def _refresh_all_window_fonts():
   else:
     nf = f
   lines = max(1, cfg.input_lines)
+  height = _window.chat_line_height() * lines + 10
   for client in state.clients:
     for win in _iter_windows(client):
       win.output.setFont(f)
+      win.output.document().setDefaultFont(f)
       win.input.setFont(f)
-      win.input.setFixedHeight(QFontMetrics(f).height() * lines + 10)
+      win.input.setFixedHeight(height)
       if hasattr(win, 'nicklist'):
         win.nicklist.setFont(nf)
+
+
+# window.py registers fallback fonts on demand and needs the open windows
+# re-fonted afterwards; it can't import this module (it is __main__), so the
+# call goes back through a hook.
+window.refresh_fonts_hook = _refresh_all_window_fonts
 
 
 def _refresh_navigation(mw=None):
@@ -452,6 +540,17 @@ def _bg_replay_drop(window):
         delattr(window, attr)
       except Exception:
         pass
+  # No replay is coming for this window any more, so anything held back
+  # waiting for one has to be released -- otherwise _queue_if_replaying keeps
+  # swallowing every line for the rest of the window's life. This is reached
+  # for a window with nothing to replay at all (no rows, or replay disabled for
+  # it), which is exactly the case where live messages are the only content
+  # there will ever be. For a window that is closing, the flushed calls find
+  # the widget dead and return.
+  try:
+    window._flush_replay_queue()
+  except Exception:
+    pass
 
 
 async def _bg_replay_loop():
@@ -491,14 +590,20 @@ async def _bg_replay_loop():
       # Only the most-recent *initial* lines are drip-rendered; older lines (up
       # to the channels cap) load lazily when the user scrolls up.
       if not hasattr(window, '_bg_replay'):
-        cap = state.config.history_replay_channels
+        from irc_client import replay_limit_for
+        cap = replay_limit_for(chname)
         if cap <= 0:
           _bg_replay_drop(window)
           _bg_replay_done += 1
           _update_replay_status()
           continue
         eager = min(state.config.history_replay_initial, cap)
-        bounds = await reader.replay_bounds(network, chname.lower(), eager)
+        # Bound the backlog at the id the window's hold-back queue started at:
+        # rows written since then are the live lines it is holding, and would
+        # otherwise be rendered here and again by the flush below.
+        window.begin_replay_queue()  # hold live messages back during replay
+        bounds = await reader.replay_bounds(network, chname.lower(), eager,
+                                            window._replay_cutoff_id)
         # The click path may have handled/closed this window during the await.
         if not isValid(window.output):
           _bg_replay_drop(window)
@@ -511,10 +616,9 @@ async def _bg_replay_loop():
           _update_replay_status()
           continue
         min_id, max_id = bounds
-        window._replay_queue = []  # queue live messages during replay
         window._bg_replay = {
           'last_id': min_id - 1,   # id > last_id, so first chunk includes min_id
-          'max_id': max_id,        # snapshot: don't replay live msgs added later
+          'max_id': max_id,        # bounded by the hold-back cutoff (see above)
           'chan_obj': chan_obj,
           'min_id': min_id,        # oldest rendered id (for lazy scroll-up)
           'cap': cap,              # max total lines the user may scroll back to
@@ -1485,6 +1589,15 @@ def quit():
   if _quitting:
     return
   _quitting = True
+  try:
+    _timing_report()
+  except Exception:
+    pass
+  try:
+    import hang_watchdog
+    hang_watchdog.stop()
+  except Exception:
+    pass
   if state.dcc_manager:
     state.dcc_manager.cleanup()
   # Save window geometry before closing
@@ -1987,7 +2100,26 @@ if __name__ == '__main__':
                            'cross-process access, so it works reliably on Windows '
                            'and new Python builds. It isolates the latency of '
                            'YOUR actions from background/server work.')
+  parser.add_argument('--timing', action='store_true',
+                      help='Print a startup timing breakdown: how long each '
+                           'startup phase took (Python imports, Qt app + main '
+                           'window, history DB open, plugin/script loading, '
+                           'first paint) plus accumulated per-window history '
+                           'replay cost, slowest first. Use this to find what '
+                           'is actually making startup slow before optimising.')
   cli_args, qt_args = parser.parse_known_args()
+  _set_timing(cli_args.timing)
+  _mark('python imports + arg parsing')
+
+  # Start profiling here, not at the event loop: startup (building windows,
+  # opening the history DB, loading plugins) is usually the part you're
+  # profiling *because* it's slow, and a profiler that only switches on once
+  # startup has finished can never show you any of it.
+  profiler = None
+  if cli_args.profile is not None:
+    import cProfile
+    profiler = cProfile.Profile()
+    profiler.enable()
   # Error on unrecognized arguments (parse_known_args silently ignores them)
   unknown = [a for a in qt_args if a.startswith('-')]
   if unknown:
@@ -2043,6 +2175,8 @@ if __name__ == '__main__':
   config_dir = os.path.dirname(os.path.abspath(state.config.path))
   state.irclogger = IRCLogger(state.config, config_dir)
 
+  _mark('config load + logger')
+
   # --- History DB ---
   from history import HistoryDB, HistoryReader
   hf = state.config.history_file
@@ -2053,6 +2187,7 @@ if __name__ == '__main__':
   # replay drip-feed reads through this so its disk I/O never blocks the GUI
   # thread (WAL mode allows concurrent reader + writer connections).
   state.historyreader = HistoryReader(hf)
+  _mark('history DB open')
 
   # --- Pre-warm heavy lazy imports off the GUI thread ---
   # The URL/link-preview feature is imported lazily: the first message that
@@ -2070,6 +2205,17 @@ if __name__ == '__main__':
   # subclass, which should be done on the GUI thread; its cost is trivial anyway,
   # as it only re-imports already-loaded Qt. The multi-second cost is the stdlib
   # HTTP/email tree below.)
+  #
+  # Started only once the event loop is running, never during startup. Warming
+  # eagerly puts a thread doing hundreds of milliseconds of compiling and disk
+  # reads up against the GUI thread that is trying to build and paint the first
+  # window, competing for the GIL, the import lock and the disk during the one
+  # stretch where the user is actually waiting. (With everything in the OS file
+  # cache the difference is inside the run-to-run noise; the case it matters for
+  # is the cold one, which is also the slow one, where both threads are reading
+  # from the disk.) Nothing needs these modules before then: they are pulled in
+  # by an incoming message or a keystroke, neither of which can arrive before
+  # the event loop turns.
   import threading as _threading
   def _prewarm_imports():
     for _mod in ('urllib.request', 'http.client', 'email', 'json', 'html',
@@ -2078,8 +2224,9 @@ if __name__ == '__main__':
         __import__(_mod)
       except Exception:
         pass
-  _threading.Thread(target=_prewarm_imports, name='prewarm-imports',
-                    daemon=True).start()
+  def _start_prewarm_imports():
+    _threading.Thread(target=_prewarm_imports, name='prewarm-imports',
+                      daemon=True).start()
 
   # --- Headless mode ---
   if cli_args.headless:
@@ -2158,6 +2305,7 @@ if __name__ == '__main__':
       pass  # Windows — Ctrl+C handled via KeyboardInterrupt
 
     print('Running in headless mode. Ctrl+C or SIGTERM to quit.')
+    loop.call_soon(_start_prewarm_imports)
     try:
       loop.run_forever()
     except KeyboardInterrupt:
@@ -2182,11 +2330,34 @@ if __name__ == '__main__':
         print(path)
     sys.exit(0)
 
+  _mark('Qt app + main window construction')
+
+  # --- Freeze detection ---
+  # Must come *after* makeapp(): the watchdog's heartbeat is a QTimer, and Qt
+  # refuses to start a timer before a QApplication exists ("Timers can only be
+  # used with threads started with QThread"). A timer that never fires looks
+  # exactly like a permanently stalled GUI thread, so starting the watchdog too
+  # early turns it into a false-positive generator.
+  if state.config.hang_watchdog_enabled:
+    import hang_watchdog
+    hwf = state.config.hang_watchdog_file
+    if hwf and not os.path.isabs(hwf):
+      hwf = os.path.join(config_dir, hwf)
+    hang_watchdog.start(threshold=state.config.hang_watchdog_threshold,
+                        logfile=hwf)
+
   loop = qasync.QEventLoop(state.app)
   asyncio.set_event_loop(loop)
 
   # --- Font validation ---
-  _validate_font(state.config)
+  # Never blocks: if the configured font is missing we fall back to a working
+  # one now and offer the picker once the event loop is running, so startup
+  # can't be wedged behind a dialog the user may not even be able to see.
+  missing_font = _validate_font(state.config)
+  if missing_font:
+    QTimer.singleShot(
+      0, lambda: offer_font_replacement(state.config, missing_font))
+  _mark('font validation')
 
   # --- Apply plugin hooks to IRCClient ---
   apply_hooks()
@@ -2228,9 +2399,11 @@ if __name__ == '__main__':
     if not _icon.isNull():
       state.tray_icon.show()
   state.notifications.start_polling()
+  _mark('clients + notifications + tray')
 
   # --- Variables, popups, plugins, scripts ---
   _load_scripts_and_plugins(cli_args, config_dir)
+  _mark('scripts + plugins load')
   # CLI -e commands
   win = next(iter(state.clients)).window if state.clients else None
   if win and cli_args.exec_cmds:
@@ -2579,17 +2752,32 @@ if __name__ == '__main__':
     print('In-process stack sampler enabled — folded stacks -> %s on exit.'
           % sp_path, file=sys.stderr)
 
+  _mark('startup done, entering event loop')
+  if _TIMING:
+    # First paint: a 0ms singleShot runs after the current event batch, i.e.
+    # once the window is actually up on screen.
+    QTimer.singleShot(0, lambda: _mark('first event-loop turn (window visible)'))
+    # First actual paint of chat text, which can lag "window visible".
+    window.first_chat_paint_hook = lambda: _mark('first chat paint')
+    # Connecting, joining and replaying history all happen asynchronously after
+    # this point, so the interesting cost lands *after* the window appears.
+    # Report once that has settled; quit() also reports, whichever comes first.
+    QTimer.singleShot(15000, _timing_report)
+
+  # Warm the lazily-imported HTTP stack now that the window is up (see the note
+  # where _prewarm_imports is defined). A 0ms timer runs on the first turn of
+  # the event loop, i.e. after the window has been shown.
+  QTimer.singleShot(0, _start_prewarm_imports)
+
   try:
-    if cli_args.profile is not None:
-      import cProfile, pstats
+    if profiler is not None:
+      import pstats
       prof_path = cli_args.profile
       if not os.path.isabs(prof_path):
         prof_path = os.path.join(
           os.path.dirname(os.path.abspath(state.config.path)), prof_path)
-      print('Profiling enabled — stats will be written to %s on exit.' % prof_path,
-            file=sys.stderr)
-      profiler = cProfile.Profile()
-      profiler.enable()
+      print('Profiling (from startup) — stats will be written to %s on exit.'
+            % prof_path, file=sys.stderr)
       try:
         with loop:
           loop.run_forever()

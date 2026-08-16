@@ -126,8 +126,17 @@ def _find_or_create_query(conn, nick, ident, host):
   q = Query(conn.client, nick, ident)
   conn.queries[key] = q
   qhkey = _query_history_key(nick, ident)
-  _history_replay(q.window, conn.client.network,
-                  qhkey, limit=state.config.history_replay_queries)
+  # Defer the history replay exactly like a channel join does (see joined()).
+  # Rendering it synchronously here would block the GUI thread for every query
+  # window as it is created -- and at startup a bouncer replaying a couple of
+  # days of PMs creates many at once, each rendering hundreds of lines into a
+  # window the user cannot even see yet. The background drip-feed renders in
+  # small chunks instead, and _finish_pending_replay() completes it instantly if
+  # the user activates the window first.
+  q.window.begin_replay_queue()     # hold live messages until replay finishes
+  q.window._deferred_replay = (conn.client.network, qhkey, None)
+  from qtpyrc import _queue_bg_replay
+  _queue_bg_replay(q.window, conn.client.network, qhkey, None)
   return q, True
 
 
@@ -246,6 +255,21 @@ def _setup_history_more(window, network, channel_lower, oldest_id, loaded, cap):
   }
 
 
+def replay_limit_for(channel):
+  """Return the configured replay cap for a history key.
+
+  Channels and queries have separate caps (history_replay.channels /
+  history_replay.queries). Query keys are built by _query_history_key as
+  "=nick", so the leading '=' is what distinguishes them. Every replay path
+  (synchronous open, background drip, click-to-finish) derives the cap through
+  here so they can't disagree about how far back a window may scroll."""
+  cfg = state.config
+  if not cfg:
+    return 0
+  return (cfg.history_replay_queries if channel.startswith('=')
+          else cfg.history_replay_channels)
+
+
 def _history_replay(window, network, channel, limit=None, chan_obj=None):
   """Load saved history into a window (synchronous on-open replay).
 
@@ -254,20 +278,35 @@ def _history_replay(window, network, channel, limit=None, chan_obj=None):
   even for channels with a large backlog."""
   db = state.historydb
   if limit is None:
-    limit = state.config.history_replay_channels
+    limit = replay_limit_for(channel)
   if not db or limit <= 0:
     return
+  import qtpyrc
+  _timing = qtpyrc.timing_enabled()
+  _t0 = time.monotonic() if _timing else 0.0
   eager = min(state.config.history_replay_initial, limit)
   chlow = channel.lower()
-  rows = db.get_last(network, chlow, eager)
-  window._replay_queue = []  # queue live messages during replay
+  # Open the hold-back queue *before* reading, so the cutoff it snapshots can
+  # bound the read: anything saved from here on is a live line this window is
+  # now queuing, and replaying it as well would show it twice.
+  window.begin_replay_queue()  # hold live messages back during replay
+  cutoff = window._replay_cutoff_id
+  rows = db.get_last(network, chlow, eager, cutoff)
+  _t_query = time.monotonic() if _timing else 0.0
   if rows:
     render_history_rows(window, channel, rows, chan_obj)
-    bounds = db.replay_bounds(network, chlow, eager)
+    bounds = db.replay_bounds(network, chlow, eager, cutoff)
     oldest_id = bounds[0] if bounds else None
     _setup_history_more(window, network, chlow, oldest_id, len(rows), limit)
     window.add_separator(" End of saved history ")
   window._flush_replay_queue()
+  if _timing:
+    now = time.monotonic()
+    kind = 'query' if channel.startswith('=') else 'channel'
+    qtpyrc.timing_add('history replay: DB query (%s)' % kind, _t_query - _t0)
+    qtpyrc.timing_add('history replay: render (%s)' % kind, now - _t_query)
+    qtpyrc.timing_add('history replay: lines rendered (%s)' % kind, 0.0,
+                      count=len(rows) if rows else 0)
 
 
 class IRCClient(asyncirc.IRCClient):
@@ -1494,8 +1533,8 @@ class IRCClient(asyncirc.IRCClient):
         chan.key = pending_key
       self.channels[chnlower] = chan
       # Defer history replay — background drip-feed, or immediate on activation
-      # Queue live messages until replay finishes
-      chan.window._replay_queue = []
+      # Hold live messages back until replay finishes
+      chan.window.begin_replay_queue()
       chan.window._deferred_replay = (self._log_network, chname, chan)
       from qtpyrc import _queue_bg_replay
       _queue_bg_replay(chan.window, self._log_network, chname, chan)

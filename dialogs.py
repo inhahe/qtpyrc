@@ -1110,55 +1110,147 @@ _FALLBACK_FONTS = ('Consolas', 'DejaVu Sans Mono', 'Liberation Mono',
                     'Courier New', 'Monospace')
 
 
+def _pick_fallback_font(db_families):
+  """Return the first of _FALLBACK_FONTS present in *db_families*, or None."""
+  for fb in _FALLBACK_FONTS:
+    if fb.lower() in db_families:
+      return fb
+  return None
+
+
 def _validate_font(cfg):
-  """Check if the configured font exists.  If not, fall back or show a picker."""
+  """Ensure cfg.fontfamily names a font that actually exists.
+
+  Returns the *missing* family name if the user had explicitly configured a
+  font that isn't installed (so the caller can offer a replacement picker once
+  the UI is up), otherwise None.
+
+  This never shows a dialog. It runs before the qasync event loop is entered,
+  so a modal dialog here would stop the rest of startup dead -- no IRC
+  connections, no tray icon, no asyncio -- until it was dismissed. Worse, the
+  main window may be minimised (the launcher can minimise it to the tray), in
+  which case the modal dialog isn't visible either, and qtpyrc simply looks
+  hung with no way to unstick it. Falling back to a working font keeps the app
+  fully functional; choosing a nicer replacement can happen afterwards.
+  """
   db_families = {f.lower() for f in QFontDatabase.families()}
+  if not db_families:
+    # Font enumeration isn't available at all -- the offscreen platform plugin
+    # reports zero families, for instance. An empty database says nothing about
+    # the configured font, so treating it as "missing" would condemn every font
+    # on earth. Change nothing.
+    dbg(LOG_WARN, 'Font database is empty; skipping font validation')
+    return None
   if cfg.fontfamily.lower() in db_families:
-    return  # font found, all good
+    return None  # font found, all good
 
-  # If the user never explicitly set a font, silently fall back
+  missing = cfg.fontfamily
+  fallback = _pick_fallback_font(db_families)
+  if fallback:
+    cfg.fontfamily = fallback
+
   font_data = cfg._data.get('font') or {}
-  user_set = 'family' in font_data
+  # A new config.yaml is copied wholesale from config.defaults.yaml, so the
+  # key being *present* proves nothing -- every fresh install has one. It's
+  # only a deliberate choice if it differs from the shipped default.
+  from config import default_config_value
+  shipped = default_config_value('font.family')
+  configured = font_data.get('family')
+  user_set = (configured is not None and
+              (shipped is None or str(configured).lower() != str(shipped).lower()))
   if not user_set:
-    for fb in _FALLBACK_FONTS:
-      if fb.lower() in db_families:
-        cfg.fontfamily = fb
-        dbg(LOG_INFO, 'Default font not found, using %s' % fb)
-        return
-    # Nothing matched — just leave it, Qt will substitute
-    return
+    # The user never asked for this font -- it's just our built-in default not
+    # being present on this system. Substitute quietly.
+    if fallback:
+      dbg(LOG_INFO, 'Default font "%s" not found, using %s' % (missing, fallback))
+    return None
 
-  # User explicitly configured a missing font — show the picker dialog
+  dbg(LOG_WARN, 'Configured font "%s" not found, using %s'
+      % (missing, cfg.fontfamily))
+  return missing
+
+
+def _apply_font_choice(cfg, dlg, refresh=True):
+  """Write the picker's selection into *cfg* (and optionally the live UI)."""
+  new_family = dlg.selected_family
+  old_colors = None
+  if refresh:
+    from qtpyrc import _get_message_colors
+    old_colors = _get_message_colors()
+  cfg.fontfamily = new_family
+  cfg.fgcolor = dlg.selected_fg_color
+  cfg.bgcolor = dlg.selected_bg_color
+  font_data = cfg._data.get('font')
+  if font_data is None:
+    font_data = CommentedMap()
+    cfg._data['font'] = font_data
+  font_data['family'] = new_family
+  # Save colors under colors: section
+  colors_data = cfg._data.get('colors')
+  if colors_data is None:
+    colors_data = CommentedMap()
+    cfg._data['colors'] = colors_data
+  colors_data['foreground'] = _color_to_config(dlg.selected_fg_color)
+  colors_data['background'] = _color_to_config(dlg.selected_bg_color)
+  if dlg.should_save:
+    cfg.save()
+  dbg(LOG_INFO, 'Font changed to: %s' % new_family)
+  if refresh:
+    from qtpyrc import (_build_app_stylesheet, _apply_palette,
+                        _refresh_all_window_fonts, _recolor_chat_text)
+    from PySide6.QtWidgets import QApplication
+    from config import _update_text_formats
+    _update_text_formats(cfg)
+    QApplication.instance().setStyleSheet(_build_app_stylesheet())
+    _apply_palette()
+    _refresh_all_window_fonts()
+    _recolor_chat_text(old_colors, visible_only=False)
+
+
+def offer_font_replacement(cfg, missing_family):
+  """Tell the user their configured font is missing and offer a replacement.
+
+  Shown *non-modally*: the app is already running and usable with the fallback
+  font, so this must not block the main window (or any other dialog) while it
+  waits for an answer. Cancelling just keeps the fallback.
+  """
+  # Report it where the user will actually see it, in case the dialog itself
+  # ends up behind the main window or on another desktop.
+  msg = ('Font "%s" is not installed on this system - using "%s" instead. '
+         'Pick a replacement in the font dialog, or in Settings > Font.'
+         % (missing_family, cfg.fontfamily))
+  try:
+    from qtpyrc import _iter_windows
+    for client in (state.clients or []):
+      for win in _iter_windows(client):
+        win.redmessage(msg)
+  except Exception:
+    pass
+
   preview_pt = max(8, cfg.fontheight * 3 // 4)
   dlg = FontPickerDialog(
     cfg.fontfamily, preview_pt,
     fg_color=cfg.fgcolor, bg_color=cfg.bgcolor,
-    warn_text="The font \"%s\" was not found on this system.\nPlease select a replacement:" % cfg.fontfamily,
+    warn_text=('The font "%s" was not found on this system.\n'
+               '"%s" is being used instead - select a replacement if you like:'
+               % (missing_family, cfg.fontfamily)),
   )
-  if dlg.exec() == QDialog.DialogCode.Accepted:
-    new_family = dlg.selected_family
-    cfg.fontfamily = new_family
-    cfg.fgcolor = dlg.selected_fg_color
-    cfg.bgcolor = dlg.selected_bg_color
-    font_data = cfg._data.get('font')
-    if font_data is None:
-      font_data = {}
-      cfg._data['font'] = font_data
-    font_data['family'] = new_family
-    # Save colors under colors: section
-    colors_data = cfg._data.get('colors')
-    if colors_data is None:
-      colors_data = CommentedMap()
-      cfg._data['colors'] = colors_data
-    colors_data['foreground'] = _color_to_config(dlg.selected_fg_color)
-    colors_data['background'] = _color_to_config(dlg.selected_bg_color)
-    if dlg.should_save:
-      cfg.save()
-    dbg(LOG_INFO, 'Font changed to: %s' % new_family)
-  else:
-    # User cancelled — fall back to a safe default
-    cfg.fontfamily = 'Courier New'
-    dbg(LOG_WARN, 'Font "%s" not found, falling back to Courier New' % cfg.fontfamily)
+  # No parent, so it gets its own taskbar entry: if the main window is
+  # minimised to the tray, a parented dialog can be effectively invisible.
+  dlg.setModal(False)
+  # Keep a reference: a non-modal dialog is garbage collected the moment the
+  # last Python reference goes out of scope, which would close it instantly.
+  state._font_picker_dialog = dlg
+
+  def _finished(result):
+    state._font_picker_dialog = None
+    if result == QDialog.DialogCode.Accepted:
+      _apply_font_choice(cfg, dlg)
+
+  dlg.finished.connect(_finished)
+  dlg.show()
+  dlg.raise_()
+  dlg.activateWindow()
 
 
 def open_settings(page=None):

@@ -124,6 +124,42 @@ def mycommand(window, text):
 ```
 Dispatched automatically by name. Alias: `othername = mycommand`
 
+### Chat font (`window.py`)
+
+One shared `QFont` for every chat view, cached in `_chat_font_cache` and reached
+through `chat_font()` / `chat_line_height()`; `invalidate_chat_font()` drops it
+after a font config change.
+
+**The font names exactly one family, deliberately.** A `QFont` that names more
+than one family makes Qt populate the *entire* system font database before it can
+match anything (~0.5s warm, far worse cold), and that cost used to be paid inside
+the first window's constructor, before anything was on screen. Qt already falls
+back per glyph on its own; an explicit list only decides *which* stand-in wins.
+
+So the preference (`CHAT_FALLBACK_FAMILIES`) is registered lazily:
+`note_chat_text(text)` — called from every method that puts text in a chat view
+(`_render_text`, `addlinef`, `addline_msg`, `addline_nick`, `redmessage`,
+`add_separator`) — asks `QRawFont.supportsCharacter(ord(ch))` about each *new*
+character, memoises the answer in `_chat_covered_chars`, and on the first
+uncovered one calls `QFont.insertSubstitutions()` (deferred by a 0ms timer, since
+it re-lays-out every open document) and re-fonts open windows via
+`refresh_fonts_hook` (set by `qtpyrc._refresh_all_window_fonts`).
+
+Traps: `QRawFont.supportsCharacter(str)` is mis-bound and only answers correctly
+for Latin-1 — always pass `ord(ch)`. Prewarming the font database on a worker
+thread is a *net loss* (Qt has one global font lock; measured +0.35s of added
+startup latency). Covered by `tests/test_chat_font.py`.
+
+### Startup cost
+
+`--timing` prints a milestone breakdown (the last mark, `first chat paint`, is
+driven by `window.first_chat_paint_hook`, fired from `ChatOutput.paintEvent`).
+Rule of thumb: **nothing that isn't needed to put the window on screen should run
+before the event loop turns.** Two things were moved out on that basis — the
+multi-family chat font above, and `_prewarm_imports` (the HTTP/email stack warmed
+for link previews), which now starts from a 0ms timer instead of competing for
+the GIL and the disk with the GUI thread that is building the first window.
+
 ### Window display methods
 
 - `addline(text, fmt)` - plain text with mIRC color code rendering
@@ -181,3 +217,42 @@ Dispatched automatically by name. Alias: `othername = mycommand`
 - `Window.ACTIVITY_NONE`, `ACTIVITY_MESSAGE`, `ACTIVITY_HIGHLIGHT`
 - Tab/tree title color changes: `new_message` color for messages, `highlight` color for nick mentions
 - Cleared when window becomes active
+- **`set_activity()` is never gated on a pending history replay.** Only live IRC
+  events reach it — replayed history goes straight to the `addline_*` methods —
+  so a gate there marks nothing safe and instead drops the mark permanently
+  (nothing re-applies it when the replay ends). It cost every freshly opened
+  query window its red tab, since a query opened by an incoming PM is created
+  with a replay already pending. See `tests/test_activity_replay.py`.
+
+### Live-output hold-back during replay (`window.py`)
+
+A window whose backlog is still loading holds live output in `_replay_queue` and
+renders it afterwards:
+
+- `begin_replay_queue()` — opens the queue. **Idempotent, and must stay that
+  way**: the handler that creates the window opens it, and the drip-feed loop
+  opens it again when it reaches that window; assigning a fresh list in the
+  second call discards whatever arrived in between (for a PM-opened query, the
+  message itself). Called from `joined()`, `_find_or_create_query()`,
+  `_history_replay()` and `qtpyrc._bg_replay_loop()`.
+- `_queue_if_replaying()` / `queue_replay_callback()` — hold one call.
+- `_flush_replay_queue()` — render everything held, then reopen the window to
+  live output. **Every path that ends a replay must call it**, including
+  `qtpyrc._bg_replay_drop()`, which is reached when a window turns out to have
+  nothing to replay; leaving the queue open makes the window mute for good.
+- `headless.StubWindow` implements the same protocol as no-ops (headless prints
+  as lines arrive, so it never holds anything back).
+
+**The backlog must stop where the queue starts.** A held-back line is also
+written to the history table as it arrives, so a replay bounded only by "newest
+row" renders it *and* the flush renders it again. `begin_replay_queue()`
+snapshots `state.historydb.current_max_id()` into `Window._replay_cutoff_id`, and
+every replay read passes it as `cutoff_id` (`history._id_cap` turns it into
+`AND id <= ?`): `db.get_last` / `db.replay_bounds` on the synchronous path,
+`reader.replay_bounds` on the drip-feed path (whose resulting `bg['max_id']` then
+bounds every `get_chunk`). `HistoryDB` keeps `_max_id` current from `add()`, so
+reading the cutoff costs nothing. `_flush_replay_queue()` clears it so the next
+hold-back takes its own snapshot. Any new replay read needs the same treatment;
+the symptom of missing it is a doubled message, not a crash.
+
+Covered by `tests/test_activity_replay.py`.
