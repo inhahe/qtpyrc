@@ -504,20 +504,45 @@ def _modify_list_entry(list_key, mask, remove, network_key=None, channel=None):
 # Configuration  (ruamel.yaml round-trip for comment preservation)
 # ---------------------------------------------------------------------------
 
+_defaults_data = None
+
+
+def default_config_data():
+  """Parsed defaults/config.defaults.yaml, cached. {} if it can't be read.
+
+  This is the file _init_config copies to create a new config.yaml, so any
+  value still equal to what's in here was never chosen by the user -- it's
+  just the shipped default that came along for the ride.
+  """
+  global _defaults_data
+  if _defaults_data is None:
+    try:
+      path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          'defaults', 'config.defaults.yaml')
+      yaml = YAML()
+      yaml.preserve_quotes = True
+      with open(path, 'r', encoding='utf-8') as f:
+        _defaults_data = yaml.load(f) or {}
+    except Exception:
+      _defaults_data = {}
+  return _defaults_data
+
+
+def default_config_value(dotted_key, fallback=None):
+  """Look up a shipped default by dotted key, e.g. 'font.family'."""
+  node = default_config_data()
+  for part in dotted_key.split('.'):
+    if not isinstance(node, dict) or part not in node:
+      return fallback
+    node = node[part]
+  return node
+
+
 def _default_nick_palette():
   """Load default nick color palette from config.defaults.yaml."""
-  try:
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        'defaults', 'config.defaults.yaml')
-    yaml = YAML()
-    yaml.preserve_quotes = True
-    with open(path, 'r', encoding='utf-8') as f:
-      data = yaml.load(f)
-    palette = (data.get('nick_colors') or {}).get('palette')
-    if palette:
-      return list(palette)
-  except Exception:
-    pass
+  palette = default_config_value('nick_colors.palette')
+  if palette:
+    return list(palette)
   return ['#cc0000', '#0066cc', '#009900', '#9933cc', '#cc6600']
 
 
@@ -731,6 +756,13 @@ class AppConfig:
     self.log_separate_by_month = log.get('separate_by_month', False)
     self.log_debug = log.get('debug', False)
     self.log_timestamp_format = log.get('timestamp', 'YYYY-MM-DD HH:mm:SS')
+
+    # Hang watchdog: detects GUI-thread stalls (freezes) and records the stack
+    # the GUI thread was stuck in. See hang_watchdog.py.
+    hw = log.get('hang_watchdog') or {}
+    self.hang_watchdog_enabled = bool(hw.get('enabled', True))
+    self.hang_watchdog_threshold = float(hw.get('threshold', 2.0))
+    self.hang_watchdog_file = hw.get('file', 'hangs.log')
 
     self.history_file = data.get('history_file', 'history.db')
     self.backscroll_limit = data.get('backscroll_limit', 10000)

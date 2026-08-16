@@ -24,6 +24,7 @@ python qtpyrc.py [options]
 | `--init [PATH]` | Generate a new config file and exit. PATH can be a filename, directory, or dir/filename (default: `config.yaml` in current directory). Errors if file exists. Can combine with `-o` to seed values |
 | `--profile [PATH]` | Run under `cProfile` and write stats to PATH (default: `qtpyrc.prof` in the config directory) on exit. On exit, the top 30 functions by cumulative time and by total (self) time are printed to stderr. Open the saved file with `python -m pstats <file>` or `snakeviz <file>`. Use this to determine whether slowness is Python-side (per-line work) or Qt-side (little Python time accounted for the wall-clock spent) |
 | `--sample-profile [PATH]` | Low-overhead in-process **interaction** profiler. A background daemon thread samples the main (GUI) thread's Python stack ~200x/sec, *and* the QApplication times every event dispatch (`notify()`). Writes Brendan-Gregg *folded* stacks to PATH (default: `qtpyrc.folded` in the config directory) on exit, and prints to stderr: (1) a split of GUI-thread time into **idle / server-driven / UI**, (2) where UI-interaction time went (leaf frames), (3) a worst-first log of **slow interactions** (keypress/click/paint ≥ 30 ms), each correlated with the Python stacks sampled during it, (4) event-dispatch time by event type, and (5) **Qt self-time by (event × widget)** — exclusive time spent inside each widget's event handling, minus nested dispatch. Report (5) is the key one for deciding *toolkit* questions: because the Python sampler can't see into Qt's C++, expensive `QTextEdit`/`QTextDocument` layout+paint is invisible in the folded stacks but shows up here as `Paint`/`LayoutRequest`/`UpdateRequest` self-time on the chat-output widget. This isolates the latency of *your* actions (typing, clicks, scrolling) from background/server work, which is usually what you actually feel. Unlike `--profile` it barely slows the app, and unlike py-spy it needs no cross-process access, so it works reliably on Windows and on brand-new CPython builds. Render the folded file with `flamegraph.pl <file> > out.svg`, or inspect it directly |
+| `--timing` | Print a **startup** timing breakdown to the console: how long each startup phase took (Python imports, config load, history DB open, Qt app + main window construction, font validation, clients/notifications, script+plugin loading, window visible, first chat paint), followed by accumulated per-window history-replay cost split into DB query vs. render for channels and queries, slowest first. Startup work is split between synchronous setup and the asynchronous connect/join/replay that follows the window appearing, and this measures both, so use it to find what is actually slow before changing anything. The report prints 15 s after the event loop starts, or on quit, whichever comes first |
 
 Examples:
 
@@ -40,6 +41,7 @@ python qtpyrc.py -o font.size=18 -o font.family=Consolas  # override config at r
 python qtpyrc.py --profile                     # profile a session; stats printed on exit
 python qtpyrc.py --profile run1.prof           # write profile to run1.prof
 python qtpyrc.py --sample-profile              # low-overhead sampler; folded stacks on exit
+python qtpyrc.py --timing                      # why is startup slow? phase-by-phase breakdown
 python qtpyrc.py --sample-profile run1.folded  # write folded stacks to run1.folded
 python qtpyrc.py --init                        # create config.yaml in current dir
 python qtpyrc.py --init myconfig.yaml          # create myconfig.yaml in current dir
@@ -1052,3 +1054,86 @@ Channel history (`channel.history`) is a deque of these objects:
 | `user` | User or None | Who changed it |
 | `nick` | str | Nick of who changed it |
 | `topic` | str | The new topic text |
+
+## Freeze Detection (hang watchdog)
+
+qtpyrc runs its network code on the same thread that draws the window, so
+anything slow on that thread freezes the whole UI: keystrokes are ignored and
+the window won't repaint or restore from minimised. Windows only shows its grey
+"not responding" overlay after about 5 seconds, so shorter freezes normally
+leave no trace.
+
+The hang watchdog catches them. A background thread (independent of the frozen
+event loop) watches a heartbeat; if it goes stale, the watchdog records **the
+Python stack the GUI thread was stuck in** — which is what makes an
+intermittent freeze diagnosable after the fact.
+
+Reports go to `hangs.log` next to your config file, and are echoed to the
+console. A report looks like:
+
+```
+[2026-08-16 03:49:26.355] *** GUI STALL detected: no heartbeat for 1.16s (threshold 1.00s) ***
+  GUI thread stack at stall:
+    File "...", line 20, in <module>
+      app.exec()
+    File "...", line 16, in the_blocking_function
+      time.sleep(3.5)
+  Other threads:
+    ...
+[2026-08-16 03:49:28.765] *** GUI recovered after 3.52s ***
+```
+
+Read it bottom-up: the deepest frame is the call that was blocking. A freeze
+lasting longer than 5s is re-sampled, so you also get a second stack — if it
+matches the first, the thread is stuck on one call; if it keeps moving, it's
+slow-but-progressing work (e.g. rendering a huge backlog). The "Other threads"
+section matters when the GUI thread is blocked waiting on another thread (a
+lock, a queue, a database handle).
+
+The watchdog starts as soon as the Qt application exists, which is before the
+event loop is entered — so the tail end of startup is watched too. A report from
+that window carries the note *"heartbeat has not fired since the watchdog
+started"*, meaning the GUI thread was busy finishing startup rather than frozen
+mid-session.
+
+Configured under `logging.hang_watchdog` (also in Settings → Logging):
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `enabled` | `true` | Turn freeze detection on/off |
+| `threshold` | `2.0` | Seconds unresponsive before it counts as a freeze |
+| `file` | `hangs.log` | Report file, relative to the config file |
+
+## Missing fonts
+
+If the font in your config isn't installed, qtpyrc does **not** stop and ask
+what to do — it starts with a substitute (Consolas, DejaVu Sans Mono, Liberation
+Mono or Courier New, whichever exists) and then offers a font picker in a
+non-modal window, along with a message in your open windows saying which font
+was substituted. Closing the picker keeps the substitute; you can change it any
+time in Settings → Font.
+
+A font you never chose — one still set to the value shipped in
+`config.defaults.yaml` — is substituted silently, with only a line in the debug
+log. Only a font you actually picked yourself is worth interrupting you about.
+
+### Characters your chat font doesn't have
+
+Chat text is drawn in your chosen font alone. When a message contains a
+character that font has no glyph for, Qt borrows one from another installed
+font; qtpyrc steers that choice towards **Segoe UI** (for typographic
+punctuation — curly quotes, em dashes, ellipses) and then **Segoe UI Symbol**
+(for monochrome dingbats and the BMP symbol ranges), so symbols don't come out
+as oversized colour emoji or in a mismatched CJK face. Anything still unmatched
+falls through to the rest of your installed fonts, which is where real colour
+emoji get picked up.
+
+That preference is registered the first time such a character actually turns
+up, not at startup. Naming more than one font up front forces Qt to enumerate
+every installed font family before it can draw anything — around half a second
+with the font files already cached, considerably more without — and that used
+to be paid while the first window was still being built, before anything was on
+screen. Registering it on demand costs nothing extra, because a character your
+font lacks makes Qt search the font database anyway, and if your font covers
+everything you read it is never paid at all. When it does happen, open windows
+are re-rendered once so they all agree.

@@ -373,7 +373,10 @@ flood:
 #   Windows: right-click the .ttf file in defaults/ → Install
 #   Linux:   cp defaults/*.ttf ~/.local/share/fonts/ && fc-cache
 #   macOS:   double-click the .ttf file → Install Font
-# If the font is not installed, qtpyrc will prompt you to pick a replacement.
+# If the font is not installed, qtpyrc starts normally with a substitute
+# (Consolas / DejaVu Sans Mono / Courier New, whichever is available) and then
+# offers a picker so you can choose a different one.  The picker never blocks
+# startup, and closing it just keeps the substitute.
 
 font:
   family: Fixedsys         # chat font family name
@@ -553,6 +556,9 @@ history_replay:
   # Set to 0 to disable replaying past conversations when a query opens.
   # Query history is keyed by nick, so if a nick is later reused by a different
   # person you may see the previous person's conversation.
+  # Like channels, query history loads in the background after the window opens
+  # (see bg_enabled below), so raising this does not slow down startup even when
+  # a bouncer replays enough private messages to open many query windows at once.
   queries: 10000
   # How many of the most recent lines to render up front when a window opens.
   # Older lines (up to the channels/queries cap above) load lazily as you
@@ -580,6 +586,27 @@ logging:
   separate_by_month: false # create per-month log files
   debug: false             # enable debug-level logging
   timestamp: "YYYY-MM-DD HH:mm:SS"  # timestamp format in log files
+
+  # Hang watchdog: detects when the user interface freezes.
+  #
+  # qtpyrc runs its network code on the same thread that draws the window, so
+  # anything slow on that thread freezes the whole UI - keystrokes are ignored
+  # and the window won't repaint or restore from minimised. Windows only shows
+  # its grey "not responding" overlay after about 5 seconds, so shorter freezes
+  # normally leave no trace.
+  #
+  # When enabled, a background thread notices these freezes and writes a report
+  # naming the exact code the interface was stuck in, which is what makes an
+  # intermittent freeze diagnosable after the fact.
+  hang_watchdog:
+    # Turn freeze detection on or off.
+    enabled: true
+    # How many seconds the interface must be unresponsive before it counts as a
+    # freeze and gets reported. Lower catches briefer stutters but is noisier.
+    threshold: 2.0
+    # File the freeze reports are written to (relative to the config file).
+    # Reports are also echoed to the console.
+    file: hangs.log
 
 
 # ---------------------------------------------------------------------------

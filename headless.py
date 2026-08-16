@@ -143,6 +143,24 @@ class StubWindow:
         """In headless mode, callbacks always run immediately (no replay queue)."""
         return False
 
+    # Headless never holds output back: there is no window to render into
+    # later, lines go straight to the console as they arrive. The replay-queue
+    # protocol is still implemented so the shared join/query/replay code can
+    # call it unconditionally.
+    _replay_queue = None
+    # Never holding anything back means the replay never needs to stop short of
+    # the newest row either -- None reads the whole backlog (history._id_cap).
+    _replay_cutoff_id = None
+
+    def begin_replay_queue(self):
+        pass
+
+    def _queue_if_replaying(self, method_name, args, kwargs):
+        return False
+
+    def _flush_replay_queue(self):
+        pass
+
     def isActiveWindow(self):
         return False
 
