@@ -10,6 +10,8 @@ from PySide6.QtCore import *
 
 import state
 
+from contextlib import contextmanager
+
 
 class TabLabel(QLabel):
   """A single clickable tab label."""
@@ -135,6 +137,11 @@ class TabbedWorkspace(QWidget):
       self._tabbar_widget.setStyleSheet("background-color: %s;" % self._bar_bg.name())
     if hasattr(self, '_blank'):
       self._blank.setStyleSheet("background-color: %s;" % self._bar_bg.name())
+    if hasattr(self, '_mdi'):
+      # When tiled, the MDI area's background is what shows through where a
+      # window has been skipped -- it is standing in for _blank, so it has to
+      # look like it.
+      self._mdi.setBackground(QBrush(self._bar_bg))
 
   def set_max_rows(self, n):
     self._max_rows = n
@@ -149,7 +156,6 @@ class TabbedWorkspace(QWidget):
   def addSubWindow(self, widget):
     """Add a widget. Returns a _SubWindowProxy."""
     proxy = _SubWindowProxy(widget)
-    self._stack.addWidget(widget)
 
     title = widget.windowTitle()
     label = TabLabel('  ' + title + '  ', self)
@@ -164,6 +170,15 @@ class TabbedWorkspace(QWidget):
              'state': initial_state, 'activity_color': None,
              'title': title, 'disconnected': False}
     self._tabs.append(entry)
+    # Into whichever container is live: a window opened while tiled belongs in
+    # the MDI area, not in the QStackedWidget that is currently hidden behind
+    # it (where it would stay invisible until the next Maximize).
+    if self._tiled:
+      with self._suppress_activation():
+        self._place_in_mdi(entry)
+      self._sync_view()
+    else:
+      self._stack.addWidget(widget)
     label.clicked.connect(lambda e=entry: self._on_tab_clicked(e))
     label.rightClicked.connect(lambda pos, e=entry: self._on_tab_right_clicked(e, pos))
     self._group_tab(entry)
@@ -180,9 +195,9 @@ class TabbedWorkspace(QWidget):
         was_active = (t is self._active)
         t['label'].deleteLater()
         # Remove from whichever container it's in
-        if self._tiled and t['proxy']._mdi_sub:
-          self._mdi.removeSubWindow(t['widget'])
-          t['proxy']._mdi_sub = None
+        if t['proxy']._mdi_sub is not None:
+          with self._suppress_activation():
+            self._unplace_from_mdi(t)
         else:
           self._stack.removeWidget(t['widget'])
         self._tabs.pop(i)
@@ -199,12 +214,10 @@ class TabbedWorkspace(QWidget):
               self._activate(candidate)
             else:
               self._active = None
-              if not self._tiled:
-                self._stack.setCurrentWidget(self._blank)
+              self._sync_view()
           else:
             self._active = None
-            if not self._tiled:
-              self._stack.setCurrentWidget(self._blank)
+            self._sync_view()
         self._relayout()
         return
 
@@ -214,8 +227,7 @@ class TabbedWorkspace(QWidget):
       return
     for t in self._tabs:
       if t['proxy'] is proxy and t is not self._active:
-        t['state'] = self.NORMAL
-        self._activate(t)
+        self._activate(t)     # which sets the state; see _set_state
         return
 
   def activeSubWindow(self):
@@ -237,74 +249,172 @@ class TabbedWorkspace(QWidget):
 
   # --- MDI layout commands ---
 
+  def _place_in_mdi(self, entry):
+    """Give one window a subwindow in the MDI area.
+
+    Leaves it hidden -- a subwindow from addSubWindow() is not shown until it is
+    told to be, and whether it should be is _sync_view's to say.  Caller is
+    responsible for suppressing activation signals and for calling _sync_view
+    afterwards."""
+    sub = self._mdi.addSubWindow(entry['widget'])
+    entry['proxy']._mdi_sub = sub
+    sub.windowStateChanged.connect(
+      lambda old, new, e=entry: self._on_sub_state_changed(e, old, new))
+    entry['widget'].show()
+
+  def _unplace_from_mdi(self, entry):
+    """Take one window back out of the MDI area, frame and all.
+
+    removeSubWindow(widget) only lifts the chat window *out* of its subwindow;
+    the subwindow itself stays a child of the area, so without the second call
+    every trip through MDI mode leaves an empty frame behind -- and the next
+    tile lays those out alongside the real windows.  Caller is responsible for
+    suppressing activation signals."""
+    sub = entry['proxy']._mdi_sub
+    if sub is None:
+      return
+    sub.windowStateChanged.disconnect()
+    self._mdi.removeSubWindow(entry['widget'])
+    self._mdi.removeSubWindow(sub)
+    sub.deleteLater()
+    entry['proxy']._mdi_sub = None
+
   def _enter_mdi(self):
     """Switch all windows from QStackedWidget to QMdiArea."""
     if self._tiled:
       return
     self._tiled = True
     # Suppress MDI activation signals during bulk reparent
-    self._activating = True
-    try:
+    with self._suppress_activation():
       for t in self._tabs:
         self._stack.removeWidget(t['widget'])
-        sub = self._mdi.addSubWindow(t['widget'])
-        t['proxy']._mdi_sub = sub
-        t['widget'].show()
-        sub.show()
+        self._place_in_mdi(t)
       self._stack.hide()
       self._mdi.show()
-      # Activate the correct subwindow
-      if self._active and self._active['proxy']._mdi_sub:
-        self._mdi.setActiveSubWindow(self._active['proxy']._mdi_sub)
-    finally:
-      self._activating = False
+      self._sync_view()
 
   def _exit_mdi(self):
     """Switch all windows from QMdiArea back to QStackedWidget."""
     if not self._tiled:
       return
     self._tiled = False
-    self._activating = True
-    try:
+    with self._suppress_activation():
       for t in self._tabs:
-        if t['proxy']._mdi_sub:
-          self._mdi.removeSubWindow(t['widget'])
-          t['proxy']._mdi_sub = None
+        self._unplace_from_mdi(t)
         t['widget'].setParent(None)  # detach fully before re-adding
         self._stack.addWidget(t['widget'])
       self._mdi.hide()
       self._stack.show()
-      # Restore the active window in the stack
-      if self._active:
-        self._stack.setCurrentWidget(self._active['widget'])
-      else:
-        self._stack.setCurrentWidget(self._blank)
+      self._sync_view()
+
+  def _on_sub_state_changed(self, entry, _old, new):
+    """A tiled subwindow's own title bar, made to mean what the tab bar means.
+
+    Maximise is the tabbed look: a maximised QMdiSubWindow fills the workspace
+    exactly like the stack does, which otherwise leaves the user in MDI mode
+    with nothing on screen to say so -- and every tab operation then means
+    something subtly different (see _sync_view).  The application already
+    equates the two: the Window menu's Maximize is maximizeActive(), which is
+    _exit_mdi() and nothing else.
+
+    Minimise is skipping: taking this window off the screen and moving on, which
+    is what clicking its tab does.  Qt would instead park an iconified stub in
+    the corner of the workspace, which is a second, worse tab bar.
+
+    Both are deferred by a timer because Qt is still in the middle of the state
+    change it is telling us about -- and by the timer's context-object form, so
+    that a workspace torn down in between drops the callback rather than running
+    it against a deleted widget."""
+    if self._activating or not self._tiled:
+      return
+    if new & Qt.WindowState.WindowMaximized:
+      if entry is not self._active:
+        self._activate(entry)
+      QTimer.singleShot(0, self, self._exit_mdi)
+    elif new & Qt.WindowState.WindowMinimized:
+      QTimer.singleShot(0, self, lambda: self._minimize_to_tab(entry))
+
+  def _minimize_to_tab(self, entry):
+    """Turn a subwindow's minimise into the skip its tab would have done."""
+    if not self._tiled or entry['proxy']._mdi_sub is None:
+      return
+    with self._suppress_activation():
+      # Out of Qt's minimised state first: the tab bar is this window's stub,
+      # and a window restored later must come back full size, not as an icon.
+      entry['proxy']._mdi_sub.showNormal()
+    if entry is self._active:
+      self._on_tab_clicked(entry)     # skip it and move on to the next window
+    else:
+      self._set_state(entry, self.SKIPPED)
+
+  @contextmanager
+  def _suppress_activation(self):
+    """Ignore MDI activation signals for the duration.
+
+    Hiding, showing or reparenting a subwindow makes QMdiArea pick a new active
+    one and emit subWindowActivated for it, which would otherwise come back
+    through _on_mdi_activated and activate a tab the user did not ask for.
+    Nests: the flag is restored, not cleared, so an _activate() inside a bulk
+    operation does not re-open the door behind it."""
+    prev = self._activating
+    self._activating = True
+    try:
+      yield
     finally:
-      self._activating = False
+      self._activating = prev
+
+  @contextmanager
+  def _arranging(self):
+    """Hold repaints back while windows are reparented and moved into place.
+
+    _enter_mdi() shows every window at whatever geometry the MDI area first
+    gives it, and the arrangement that follows then moves and resizes them all
+    again.  Without this the user watches every intermediate geometry go by,
+    which is both ugly and wasted work: painting a chat view that is scrolled
+    to the bottom means laying its entire backscroll out, because the layout
+    has to walk down from the top to find the blocks under the viewport.
+
+    Not the cure for the 32s "Window -> Tile Side by Side" freeze in
+    me/hangs.log (2026-08-17 06:56:18) -- that was Window._doBottomAlign, see
+    window.py -- and offscreen it measures as nothing, there being no
+    compositor for it to skip work for.  On screen it is one repaint per
+    window instead of several.
+    """
+    self.setUpdatesEnabled(False)
+    try:
+      yield
+    finally:
+      self.setUpdatesEnabled(True)
 
   def tileSubWindows(self):
     """Tile all subwindows side by side."""
-    self._enter_mdi()
-    self._mdi.tileSubWindows()
+    with self._arranging():
+      self._enter_mdi()
+      self._mdi.tileSubWindows()
 
   def cascadeSubWindows(self):
     """Cascade all subwindows."""
-    self._enter_mdi()
-    self._mdi.cascadeSubWindows()
+    with self._arranging():
+      self._enter_mdi()
+      self._mdi.cascadeSubWindows()
 
   def tileVertically(self):
     """Tile all subwindows in stacked rows."""
-    self._enter_mdi()
-    subs = self._mdi.subWindowList()
-    if not subs:
-      return
-    vp = self._mdi.viewport()
-    w = vp.width()
-    h = vp.height()
-    n = len(subs)
-    row_h = h // n if n else h
-    for i, sub in enumerate(subs):
-      sub.setGeometry(0, i * row_h, w, row_h)
+    with self._arranging():
+      self._enter_mdi()
+      # Only the windows that are actually showing get a row: a skipped one is
+      # hidden, and giving it a share of the height would leave a gap.  Qt's own
+      # tiler (tileSubWindows/cascadeSubWindows) already skips hidden windows.
+      subs = [s for s in self._mdi.subWindowList() if s.isVisible()]
+      if not subs:
+        return
+      vp = self._mdi.viewport()
+      w = vp.width()
+      h = vp.height()
+      n = len(subs)
+      row_h = h // n if n else h
+      for i, sub in enumerate(subs):
+        sub.setGeometry(0, i * row_h, w, row_h)
 
   def maximizeActive(self):
     """Return to tabbed look (exit MDI mode)."""
@@ -346,16 +456,10 @@ class TabbedWorkspace(QWidget):
   # --- Tab cycling ---
 
   def skip_current(self):
+    """Skip the active window -- the same thing as clicking its own tab."""
     if not self._active:
       return
-    entry = self._active
-    entry['state'] = self.SKIPPED
-    self._style_tab(entry)
-    has_other = any(t['state'] != self.SKIPPED for t in self._tabs if t is not entry)
-    if has_other:
-      self._activate_next(entry)
-    else:
-      self._deactivate()
+    self._on_tab_clicked(self._active)
 
   def cycle_tab(self, forward=True):
     if not self._tabs or not self._active:
@@ -378,8 +482,7 @@ class TabbedWorkspace(QWidget):
     widget = sub.widget()
     for t in self._tabs:
       if t['widget'] is widget and t is not self._active:
-        t['state'] = self.NORMAL
-        self._activate(t)
+        self._activate(t)     # which sets the state; see _set_state
         return
 
   def _on_tab_right_clicked(self, entry, pos):
@@ -392,48 +495,67 @@ class TabbedWorkspace(QWidget):
     entry.pop('_ctx_highlight', None)
     self._style_tab(entry)
 
+  def _set_state(self, entry, new_state):
+    """Change a tab's state and redraw. The only place a state is assigned."""
+    entry['state'] = new_state
+    self._style_tab(entry)
+    self._sync_view()
+
+  def _sync_view(self):
+    """Put on screen whatever the tab states currently say should be there.
+
+    The single renderer, and the reason there is one: a tab's state says
+    whether its window is on screen, and each container says that its own way.
+    The QStackedWidget shows one window and hides the rest by construction, so
+    it expresses SKIPPED by showing something *else* -- the next window, or the
+    blank tab-bar-coloured widget when there is nothing left.  The MDI area
+    shows every window at once, so it has to express the same thing by hiding
+    that window's subwindow.  Only the stack half of that ever existed, so once
+    the user had tiled (or maximised a tile, which looks exactly like not
+    having tiled at all) clicking the active tab minimised nothing.
+    """
+    if self._tiled:
+      with self._suppress_activation():
+        for t in self._tabs:
+          sub = t['proxy']._mdi_sub
+          if sub is not None:
+            sub.setVisible(t['state'] != self.SKIPPED)
+        if self._active and self._active['proxy']._mdi_sub:
+          self._mdi.setActiveSubWindow(self._active['proxy']._mdi_sub)
+    else:
+      self._stack.setCurrentWidget(
+        self._active['widget'] if self._active else self._blank)
+
   def _on_tab_clicked(self, entry):
     if entry is self._active:
-      entry['state'] = self.SKIPPED
-      self._style_tab(entry)
+      self._set_state(entry, self.SKIPPED)
       has_other = any(t['state'] != self.SKIPPED for t in self._tabs if t is not entry)
       if has_other:
         self._activate_next(entry)
       else:
         self._deactivate()
     else:
-      entry['state'] = self.NORMAL
       self._activate(entry)
 
   def _activate(self, entry):
-    self._activating = True
-    try:
-      if self._active and self._active is not entry:
-        if self._active['state'] == self.ACTIVE:
-          self._active['state'] = self.NORMAL
-          self._style_tab(self._active)
-        elif self._active['state'] == self.SKIPPED:
-          self._style_tab(self._active)
-      entry['state'] = self.ACTIVE
+    with self._suppress_activation():
+      # _active first: _set_state renders, and rendering reads it.
+      prev = self._active
       self._active = entry
-      self._style_tab(entry)
-      if self._tiled:
-        if entry['proxy']._mdi_sub:
-          self._mdi.setActiveSubWindow(entry['proxy']._mdi_sub)
-      else:
-        self._stack.setCurrentWidget(entry['widget'])
+      if prev is not None and prev is not entry and prev['state'] == self.ACTIVE:
+        self._set_state(prev, self.NORMAL)
+      self._set_state(entry, self.ACTIVE)
       self.subWindowActivated.emit(entry['proxy'])
-    finally:
-      self._activating = False
 
   def _deactivate(self):
-    if self._active:
-      if self._active['state'] == self.ACTIVE:
-        self._active['state'] = self.NORMAL
-        self._style_tab(self._active)
-      self._active = None
-    if not self._tiled:
-      self._stack.setCurrentWidget(self._blank)
+    prev = self._active
+    self._active = None
+    if prev is not None and prev['state'] == self.ACTIVE:
+      self._set_state(prev, self.NORMAL)
+    else:
+      # Already SKIPPED -- which is how _on_tab_clicked gets here -- so no state
+      # changes and nothing has redrawn yet.
+      self._sync_view()
     self.subWindowActivated.emit(None)
 
   def _activate_next(self, skip_entry):

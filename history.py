@@ -2,6 +2,7 @@
 
 import asyncio
 import sqlite3
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -168,9 +169,26 @@ class HistoryReader:
 
 
 class HistoryDB:
-  """Persistent channel history stored in SQLite."""
+  """Persistent channel history stored in SQLite.
+
+  The GUI thread owns this connection and writes through it directly: a single
+  indexed INSERT plus a WAL commit is bounded work, and every caller of add()
+  reads back through the same connection (a replay bounded by current_max_id
+  must see the row that id names), so making the insert itself asynchronous
+  would trade a bounded cost for a visibility race.
+
+  What is *not* bounded -- pruning the tables and checkpointing the WAL -- runs
+  on the maintenance thread below instead.  Both used to run inline in add(),
+  and between them they account for 30 of the 39 history stall samples in
+  me/hangs.log (up to 33s of frozen GUI); see _maintain()."""
+
+  # Inserts between maintenance passes. Only a bound on how stale the prune may
+  # get: the pass itself costs one indexed probe per channel that received a
+  # line, and does nothing at all unless one is over the limit.
+  MAINT_INTERVAL = 500
 
   def __init__(self, db_path, keep_limit=10000):
+    self._db_path = db_path
     self._conn = sqlite3.connect(db_path)
     self._conn.execute("PRAGMA journal_mode=WAL")
     # synchronous=NORMAL: in WAL mode this is the SQLite-recommended setting.
@@ -180,6 +198,18 @@ class HistoryDB:
     # consistent; only the last transaction or two could be lost on an OS/power
     # crash -- fine for a replay cache. This was ~17% of GUI-thread time.
     self._conn.execute("PRAGMA synchronous=NORMAL")
+    # ...but synchronous=NORMAL only moves the fsync to the checkpoint, and by
+    # default SQLite runs that checkpoint inline in whichever commit() pushes
+    # the WAL past 1000 pages -- i.e. on the GUI thread, in the middle of a
+    # message arriving. That is 9 of the stall samples in me/hangs.log (2.5s to
+    # 9s each). Turn the automatic checkpoint off here and let the maintenance
+    # thread take it, where a multi-second fsync costs nothing.
+    self._conn.execute("PRAGMA wal_autocheckpoint=0")
+    # Two write connections now exist (this one and the maintenance thread's),
+    # and WAL allows only one writer at a time. The maintenance writes are short
+    # indexed range deletes, so waiting is far better than failing; without a
+    # timeout an overlap would raise "database is locked" and lose a line.
+    self._conn.execute("PRAGMA busy_timeout=15000")
     self._conn.execute("""
       CREATE TABLE IF NOT EXISTS history (
         id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -217,6 +247,18 @@ class HistoryDB:
     self._keep = keep_limit
     self._url_keep = 50000
     self._add_count = 0
+    # --- maintenance thread (pruning + WAL checkpoints) ---
+    self._maint = ThreadPoolExecutor(
+      max_workers=1, thread_name_prefix='history-maint')
+    self._maint_conn = None       # created lazily inside the worker thread
+    self._maint_lock = threading.Lock()
+    self._maint_busy = False      # a pass is queued or running
+    self._closed = False
+    # (network, channel) pairs that have had rows added since the last prune.
+    # A prune of anything else can only re-discover that it is still under the
+    # limit, which is what made the old "prune every channel every time" pass
+    # scan the whole table for nothing 188 channels at a time.
+    self._dirty = set()
     # Highest row id in the table, kept current by add() so current_max_id() is
     # free to call from the GUI thread (see _id_cap for what it is used for).
     # Read once here because the table is usually non-empty at startup and no
@@ -262,12 +304,11 @@ class HistoryDB:
         self._max_id = cur.lastrowid
     except sqlite3.ProgrammingError:
       return  # DB already closed during shutdown
-    # Prune every 500 inserts to keep the DB bounded
+    self._dirty.add((network or '', channel))
     self._add_count += 1
-    if self._add_count >= 500:
+    if self._add_count >= self.MAINT_INTERVAL:
       self._add_count = 0
-      self._prune_all()
-      self.prune_urls()
+      self._schedule_maintenance()
 
   def current_max_id(self):
     """Return the id the table currently ends at (0 when empty).
@@ -311,18 +352,107 @@ class HistoryDB:
     oldest first. Used by the lazy scroll-up loader to prepend older lines."""
     return _q_get_before(self._conn, network, channel, before_id, limit)
 
-  def _prune_all(self):
-    """Prune all channels to keep at most self._keep rows each."""
-    cur = self._conn.execute(
-      "SELECT DISTINCT network, channel FROM history")
-    pairs = cur.fetchall()
-    for network, channel in pairs:
-      self._conn.execute(
-        "DELETE FROM history WHERE network = ? AND channel = ? AND id NOT IN "
-        "(SELECT id FROM history WHERE network = ? AND channel = ? "
-        "ORDER BY id DESC LIMIT ?)",
-        (network, channel, network, channel, self._keep))
-    self._conn.commit()
+  # ------------------------------------------------------------------
+  # Maintenance: pruning and WAL checkpoints, on a background thread
+  # ------------------------------------------------------------------
+
+  def _schedule_maintenance(self):
+    """Queue a maintenance pass, unless one is already queued or running.
+
+    Called from the GUI thread. Never waits: if the previous pass is still
+    going, the rows this one would have pruned simply stay until the next
+    call, which is what the keep-limit already tolerates."""
+    if self._closed:
+      return
+    with self._maint_lock:
+      if self._maint_busy:
+        return
+      self._maint_busy = True
+      dirty = self._dirty
+      self._dirty = set()
+    try:
+      self._maint.submit(self._maintain, dirty)
+    except RuntimeError:      # executor shut down mid-flight
+      with self._maint_lock:
+        self._maint_busy = False
+
+  def _maint_get_conn(self):
+    """Return the maintenance thread's own write connection (created there)."""
+    if self._maint_conn is None:
+      conn = sqlite3.connect(self._db_path)
+      conn.execute("PRAGMA synchronous=NORMAL")
+      # This connection is the one allowed to checkpoint, and it is the one
+      # that can afford to: it is not the GUI thread.
+      conn.execute("PRAGMA busy_timeout=15000")
+      self._maint_conn = conn
+    return self._maint_conn
+
+  def _maintain(self, dirty):
+    """One maintenance pass. Runs on the maintenance thread.
+
+    Three things used to happen inline in add(), on the GUI thread, every 500
+    inserts, and all three are unbounded in the size of the database:
+
+      * Pruning every channel, discovered with a full index scan
+        (``SELECT DISTINCT network, channel``) and pruned with
+        ``DELETE ... WHERE id NOT IN (SELECT id ... LIMIT keep)`` -- which
+        materialises up to *keep* ids into an ephemeral index per channel.
+        Measured on the real history.db: 188 channels, none of them over the
+        limit, so the entire pass deleted nothing. It is 19 of the stall
+        samples in me/hangs.log, up to 33s.
+      * The same pattern over the urls table, with a 50000-row subquery
+        (8 more samples).
+      * The WAL checkpoint that commit() triggers -- see wal_autocheckpoint
+        in __init__ (9 more samples).
+
+    Here, each of the first two is one indexed probe for the id of the
+    keep-th newest row: if there is none the table is under the limit and
+    nothing is read, written or committed at all. If there is one, everything
+    at or below it goes in a single indexed range delete -- no subquery, no
+    ephemeral index, no scan of the rows being kept."""
+    try:
+      conn = self._maint_get_conn()
+      for network, channel in dirty:
+        self._prune_one(conn, network, channel)
+      self._prune_urls(conn)
+      # PASSIVE does as much of the WAL as it can without ever waiting for a
+      # reader or blocking a writer, so this cannot stall the GUI's inserts.
+      conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+    except sqlite3.Error:
+      pass                    # a prune that fails is retried by the next pass
+    finally:
+      with self._maint_lock:
+        self._maint_busy = False
+
+  def _prune_one(self, conn, network, channel):
+    """Trim one channel to at most self._keep rows. Maintenance thread only.
+
+    keep_limit comes from config.backscroll_limit, where 0 documented-ly means
+    "unlimited" -- so it must mean "never prune" here. Taking it literally
+    deletes the channel's entire history every 500 messages, which is what both
+    "keep the newest 0 rows" formulations do (the old
+    ``NOT IN (SELECT ... LIMIT 0)`` matched every row; an ``OFFSET 0`` probe
+    finds the newest row and deletes everything up to and including it)."""
+    if self._keep <= 0:
+      return
+    row = conn.execute(
+      "SELECT id FROM history WHERE network = ? AND channel = ? "
+      "ORDER BY id DESC LIMIT 1 OFFSET ?",
+      (network, channel, self._keep)).fetchone()
+    if row is None:
+      return                  # under the limit: nothing read, nothing written
+    conn.execute("DELETE FROM history WHERE network = ? AND channel = ? "
+                 "AND id <= ?", (network, channel, row[0]))
+    conn.commit()
+
+  def _prune_urls(self, conn):
+    """Trim the urls table to self._url_keep rows. Maintenance thread only."""
+    row = conn.execute("SELECT id FROM urls ORDER BY id DESC LIMIT 1 OFFSET ?",
+                       (self._url_keep,)).fetchone()
+    if row is None:
+      return
+    conn.execute("DELETE FROM urls WHERE id <= ?", (row[0],))
+    conn.commit()
 
   # -- URL catcher --
 
@@ -390,13 +520,37 @@ class HistoryDB:
         "SELECT DISTINCT channel FROM urls ORDER BY channel")
     return [r[0] for r in cur.fetchall()]
 
-  def prune_urls(self):
-    """Keep only the most recent urls."""
-    self._conn.execute(
-      "DELETE FROM urls WHERE id NOT IN "
-      "(SELECT id FROM urls ORDER BY id DESC LIMIT ?)",
-      (self._url_keep,))
-    self._conn.commit()
-
   def close(self):
+    """Stop maintenance, fold the WAL back into the DB, and close.
+
+    The WAL is only checkpointed by the maintenance thread now (see
+    wal_autocheckpoint in __init__), so shutdown is the one place that has to
+    make sure it does not grow without bound across runs. TRUNCATE empties it;
+    it is allowed to take its time here because the GUI is going away anyway.
+    Bounded by the executor's own wait, so a hung disk cannot hang the exit."""
+    self._closed = True
+
+    def _close_maint_conn():
+      # Must run on the maintenance thread: sqlite3 connections are
+      # thread-affine, so closing this one from here would only raise.
+      if self._maint_conn is not None:
+        try:
+          self._maint_conn.close()
+        except sqlite3.Error:
+          pass
+        self._maint_conn = None
+
+    try:
+      self._maint.submit(_close_maint_conn)
+    except RuntimeError:
+      pass
+    # Waits only for a pass already under way -- one indexed range delete and a
+    # PASSIVE checkpoint, both bounded -- because _closed now stops new ones and
+    # _maint_busy allows at most one outstanding. Not cancel_futures: that would
+    # cancel the close job queued just above and leak the connection.
+    self._maint.shutdown(wait=True)
+    try:
+      self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.Error:
+      pass
     self._conn.close()

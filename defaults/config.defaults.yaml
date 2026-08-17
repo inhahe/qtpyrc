@@ -109,7 +109,8 @@ tab_rows: 0
 # Initial state for new tabs:
 #   "active"  — switch to the new tab immediately (default)
 #   "normal"  — tab appears but doesn't become active
-#   "skipped" — tab appears in skipped state (Ctrl+Tab skips it)
+#   "skipped" — tab appears in skipped state: the window is not put on screen,
+#               and Ctrl+Tab passes over it
 new_tab_state: active
 
 # Navigation panel: "tabs" (tab bar only), "tree" (tree view only),
