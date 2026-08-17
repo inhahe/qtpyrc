@@ -351,9 +351,21 @@ Aliases are not persistent — add `/alias` commands to your startup script to r
 | `/title` | `/title [text]` | Set a custom window title format (no args to restore default). `-s` targets server window, `-a` targets app titlebar |
 | `/tabbed` | `/tabbed` | Switch to tabbed view mode |
 | `/mdi` | `/mdi` | Switch to MDI (multi-document) view mode |
-| `/tile` | `/tile [v]` | Tile windows horizontally, or vertically with `v` |
+| `/tile` | `/tile [v]` | Tile windows horizontally, or vertically with `v`. Skipped windows are left out |
 | `/cascade` | `/cascade` | Cascade windows (MDI mode) |
 | `/newserver` | `/newserver [args...]` | Alias for `/server -m` |
+
+The workspace shows its windows either one at a time (the tabbed look) or
+tiled/cascaded, and the tab bar means the same thing in both:
+
+- **Clicking the active window's tab skips it** — the window leaves the screen
+  and the next unskipped one takes its place. When the last one is skipped the
+  workspace is empty, in the tab bar's own colour. Clicking a skipped tab brings
+  its window back. `Ctrl+Tab` passes over skipped windows.
+- **A tiled window's own minimize button does the same thing** as clicking its
+  tab, rather than leaving an icon in the corner of the workspace.
+- **Maximizing a tiled window returns to the tabbed look**, which is what the
+  Window menu's Maximize does; a maximized window fills the workspace either way.
 
 ### /server switches
 

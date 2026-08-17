@@ -11,7 +11,7 @@ Entrypoint: `qtpyrc.py`
 **Always update docs when making changes:**
 - `docs/reference.md` — commands, variables, CLI options, scripting API
 - `config.defaults.yaml` — any new or changed config option (in `defaults/`)
-- `copy_to_github.bat` — add new files to the copy list
+- `update.bat` — add new files to the copy list
 
 ## File Map
 
@@ -196,11 +196,111 @@ the GIL and the disk with the GUI thread that is building the first window.
 - Replay inserts lines then `add_separator(" End of saved history ")`
 - Bouncer playback shows separate start/end separators
 
+**Three connections, and what may run on which thread.** `HistoryDB._conn`
+belongs to the GUI thread and does the writing; `HistoryReader` owns a
+`query_only` connection on its own thread for the drip-feed replay;
+`HistoryDB._maint_conn` belongs to the maintenance thread and does everything
+whose cost grows with the size of the database.
+
+**Nothing unbounded may run on the GUI-thread connection.** A single indexed
+INSERT plus a WAL commit is fine and has to stay synchronous — a replay bounded
+by `current_max_id()` must be able to see the row that id names — but pruning
+and WAL checkpoints are not, and both used to run inline in `add()` every 500
+inserts. Between them they are 30 of the 39 history stall samples in
+`me/hangs.log`, the worst 33s. Specifically:
+
+- `PRAGMA wal_autocheckpoint=0` on the GUI connection. Otherwise SQLite runs
+  the checkpoint — and its fsync — inside whichever `commit()` pushes the WAL
+  past 1000 pages, i.e. on the GUI thread mid-message. Measured at 0.96s per
+  500 inserts warm; seconds when cold. `_maintain()` takes the checkpoint
+  (`PASSIVE`, so it never waits for a reader or blocks the GUI's writes), and
+  `close()` does a final `TRUNCATE` so the WAL doesn't survive the session.
+- Pruning is **proportional**: `add()` records `(network, channel)` in
+  `_dirty`, and a pass looks only at those. Per channel it is one indexed probe
+  for the id of the keep-th newest row; if there is none the channel is under
+  the limit and nothing is read, written or committed. The old pass found
+  channels with `SELECT DISTINCT network, channel` (full index scan) and pruned
+  each with `DELETE ... WHERE id NOT IN (SELECT id ... LIMIT keep)`, which
+  materialises up to *keep* ids into an ephemeral index — on the real database
+  that was 188 channels, none of them over the limit, so the entire pass
+  deleted nothing.
+- Both write connections need `busy_timeout`: WAL allows one writer at a time,
+  and without it an overlap raises "database is locked" and loses a line.
+
+Net: 500 messages cost 1.12s of GUI thread before, 0.06s after. Covered by
+`tests/test_history_maint.py`.
+
+### Chat view layout: never force a full document layout per geometry change
+
+`QTextEdit` lays a document out lazily, so a width change is cheap until
+something asks a question that can only be answered by laying the whole
+backscroll out. Two such questions are one line of code each, and both used to
+be on paths that run once per window per geometry change:
+
+- `doc.size()` / `documentLayout().documentSize()` — ~130ms for 3000 lines.
+  `Window._doBottomAlign` asked it to top-pad a short document to the bottom of
+  the viewport, and `showEvent`/`resizeEvent` clear `_bottom_align_filled` so
+  every geometry change asked again. It answers from the block count now: a
+  document with more blocks than the viewport has lines cannot fit at any
+  width. This was the 32s "Window → Tile Side by Side" freeze
+  (`me/hangs.log`, 2026-08-17 06:56:18) — 4.62s → 1.88s in a 10-window ×
+  5000-line benchmark.
+- `moveCursor(End)` → `ensureCursorVisible()` needs the cursor's rectangle.
+  Gone from `_on_range_changed` / `_scroll_to_bottom`, though for the
+  *selection* bug rather than the cost (it dropped the anchor of a selection
+  the user was making). Measured A/B on a real tile: it made no difference to
+  the time — the layout is owed either way.
+
+What is left is `ChatOutput.paintEvent` (~100-170ms per window per width),
+which is inherent to `QTextEdit`: painting a view scrolled to the bottom
+requires laying out everything above the viewport. See `known-issues.md`.
+
+Covered by `tests/test_autoscroll.py`.
+
 ### View modes
 
 - **Tabbed**: TabbedWorkspace (tabbar.py) - multi-row tab bar + QStackedWidget
 - **MDI**: QMdiArea with free-floating subwindows
 - **Navigation**: tabs bar, tree sidebar, or both (configurable)
+
+### One workspace, two containers: `_sync_view` is the only renderer
+
+`TabbedWorkspace` holds its windows in a `QStackedWidget` (`_stack`, with
+`_blank` at index 0) when maximized, and moves every one of them into a
+`QMdiArea` (`_mdi`) on a tile or cascade — `_tiled` says which, `_enter_mdi()` /
+`_exit_mdi()` switch. The tab bar drives both, so **every tab state must mean
+the same thing in either container**, and the two say the same thing very
+differently:
+
+- The stack shows one widget, so `SKIPPED` is expressed by showing something
+  *else* — the next window, or `_blank` when there is none.
+- The MDI area shows every window at once, so the same thing has to be said by
+  hiding that window's subwindow. `_blank`'s stand-in there is the MDI
+  background, which `_load_colors` paints the tab-bar colour for that reason.
+
+Only the stack half ever existed, so after a tile, clicking the active tab
+cycled onward but minimized nothing, and an all-skipped workspace kept showing
+the last window. Hence: **`_sync_view()` is the single renderer** — it puts on
+screen whatever the states currently say — **`_set_state()` is the only place a
+state is assigned**, and it ends by calling `_sync_view()`. Nothing else touches
+`entry['state']` or a container. `_activate()` assigns `self._active` *before*
+calling `_set_state`, because rendering reads it.
+
+Three more consequences of there being two containers, all of them once bugs:
+
+- `addSubWindow` must put a new window in whichever container is *live*. Into
+  the stack while tiled means invisible until the next Maximize.
+- `_unplace_from_mdi` removes the subwindow as well as the widget:
+  `QMdiArea.removeSubWindow(widget)` only lifts the widget out of its frame, and
+  the orphaned frame is laid out by the next tile as an empty window.
+- A **maximized** `QMdiSubWindow` is indistinguishable from the stack, so the
+  workspace adopts the tabbed look instead (`_on_sub_state_changed` →
+  `_exit_mdi`, which is all `maximizeActive()` ever was). Without that the user
+  sits in MDI mode with no cue, which is how the skipping bug reached them.
+  A **minimized** one is routed to the same skip a tab click does, rather than
+  leaving an icon stub — the tab bar is already that.
+
+Covered by `tests/test_tab_skip.py`.
 
 ### Notifications (`notify.py`)
 

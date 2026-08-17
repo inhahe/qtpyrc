@@ -1044,6 +1044,20 @@ class Window(QWidget):
       root_frame = doc.rootFrame()
       fmt = root_frame.frameFormat()
       old_margin = fmt.topMargin()
+      # A document with more blocks than the viewport has lines cannot fit in
+      # the viewport at any width -- every block is at least one line tall, and
+      # wrapping only makes them taller -- so the margin is 0 and there is
+      # nothing to work out. Worth the special case because the exact answer
+      # below costs doc.size(), which lays the *entire* backscroll out
+      # synchronously: measured at 130ms per window for 3000 lines, and every
+      # geometry change asks again (showEvent/resizeEvent clear the flag). It
+      # was the largest single cost in "Window -> Tile Side by Side", which
+      # re-shows and re-sizes every open window at once.
+      if old_margin == 0:
+        line_h = max(1, self.output.fontMetrics().lineSpacing())
+        if doc.blockCount() * line_h >= viewport_height:
+          self._bottom_align_filled = True
+          return
       content_height = doc.size().height() - old_margin
       new_margin = max(0, viewport_height - content_height)
       if new_margin == 0 and old_margin == 0:
@@ -1179,10 +1193,24 @@ class Window(QWidget):
     return self.vs.maximum() - self.vs.value() <= font_height * 2
 
   def _on_range_changed(self, _min, new_max):
-    """Auto-scroll when the scrollbar range grows and we were at the bottom."""
+    """Auto-scroll when the scrollbar range grows and we were at the bottom.
+
+    Setting the scrollbar is all this may do.  Moving the *widget's* text
+    cursor to the end would look equivalent -- it scrolls too -- but it drops
+    the anchor of any selection the user is making, so text they had
+    highlighted was deselected the moment somebody spoke.  That is the reason
+    it is gone; ``new_max`` is the maximum the scrollbar has just computed, so
+    the scrollbar alone gets the view to the same place.
+
+    It also forces a synchronous layout of the whole backscroll (moveCursor ->
+    ensureCursorVisible needs the cursor's rectangle, which needs every block
+    above it laid out) -- but do not expect that back as speed.  Measured A/B
+    over a real "Window -> Tile Side by Side": 3.40s without the cursor move
+    against 2.60s with it.  The layout is owed either way, and forcing it here
+    only decides *when* it is paid.  See tests/test_autoscroll.py.
+    """
     if self._auto_scroll:
       self._programmatic_scroll = True
-      self.output.moveCursor(QTextCursor.MoveOperation.End)
       self.vs.setValue(new_max)
       self._programmatic_scroll = False
 
@@ -1197,10 +1225,15 @@ class Window(QWidget):
         self._load_older_history()
 
   def _scroll_to_bottom(self):
-    """Scroll the output to the very bottom."""
+    """Scroll the output to the very bottom.
+
+    Same rule as _on_range_changed: the scrollbar, not the text cursor.  Any
+    layout still owed is already reflected in vs.maximum() by the time this
+    runs, and re-forcing it here would only cost a full pass over the
+    backscroll and clear the user's selection.
+    """
     self._auto_scroll = True
     self._programmatic_scroll = True
-    self.output.moveCursor(QTextCursor.MoveOperation.End)
     self.vs.setValue(self.vs.maximum())
     self._programmatic_scroll = False
 
