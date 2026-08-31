@@ -173,6 +173,35 @@ def main():
   check(w5._replay_queue is None,
         '_bg_replay_drop left the window holding output forever')
 
+  # ---------------------------------------------------------------- 3b
+  # Same rule on the synchronous path. _history_replay() gives up before it
+  # renders anything when the window's replay cap is 0 (history_replay.queries:
+  # 0 is exactly that, and the settings dialog used to write it into every
+  # config that was opened) or when there is no history database at all -- and
+  # the queue is already open by then, because joined() and
+  # _find_or_create_query() open it when they create the window, long before
+  # anyone asks how much there is to replay. Returning without flushing leaves
+  # the window mute for the rest of the session.
+  import irc_client
+  for label, limit, db_present in (('a replay cap of 0', 0, True),
+                                   ('no history database', 10, False)):
+    w5b = make_window(Window)
+    w5b.begin_replay_queue()
+    freed = []
+    w5b._queue_if_replaying('_run_callback', (lambda: freed.append('line'),), {})
+    saved_db = state.historydb
+    if not db_present:
+      state.historydb = None
+    try:
+      irc_client._history_replay(w5b, 'net', '#chan', limit=limit)
+    finally:
+      state.historydb = saved_db
+    check(freed == ['line'],
+          '_history_replay with %s swallowed the window\'s held output' % label)
+    check(w5b._replay_queue is None,
+          '_history_replay with %s left the window holding output forever'
+          % label)
+
   # ---------------------------------------------------------------- 4
   # The property the old suppression was aiming at: replayed history must not
   # colour tabs. It never could -- render_history_rows() calls the addline_*
@@ -189,6 +218,7 @@ def main():
   # ---------------------------------------------------------------- 5
   # The backlog a window replays has to stop where its held-back queue starts,
   # or the message that opened the window is rendered by both.
+  import shutil
   import tempfile
   import history as history_mod
 
@@ -211,7 +241,7 @@ def main():
     w6._queue_if_replaying('_run_callback', (lambda: None,), {})
 
     rows = db.get_last(NET, KEY, 50, w6._replay_cutoff_id)
-    texts = [r[3] for r in rows]
+    texts = [r[4] for r in rows]   # (id, ts, type, nick, text, prefix)
     check('the live pm' not in texts,
           'the replay includes the held-back message; it would be shown twice')
     check(len(texts) == 3, 'the replay lost backlog rows (got %r)' % (texts,))
@@ -233,6 +263,8 @@ def main():
   finally:
     state.historydb = None
     db.close()
+    # close() first, or Windows keeps the .db file and the directory survives.
+    shutil.rmtree(tmpdir, ignore_errors=True)
 
   if failures:
     print('\nFAILED (%d):' % len(failures))

@@ -331,12 +331,14 @@ class IRCClient:
         self._flood_tokens = self.floodBurst  # available burst tokens
         self._flood_last = 0.0                # time.monotonic() of last token replenish
         self._casemapping = 'rfc1459'
+        self._chantypes = CHANNEL_PREFIXES  # updated by ISUPPORT CHANTYPES
         self._network_name = None        # set by ISUPPORT NETWORK=
         self._read_task = None
         self._prefix_modes = 'ohv'       # updated by ISUPPORT PREFIX
         self._prefix_symbols = '@%+'     # updated by ISUPPORT PREFIX
         self._monitor_supported = False  # set by ISUPPORT MONITOR
         self._monitor_limit = 0          # max targets (0 = unlimited)
+        self._registered_fired = False   # has registered() run?  see _fire_registered
         # Make a mutable copy so ISUPPORT can update per-connection
         self._modeAcceptsArg = dict(self.__class__._modeAcceptsArg)
         self._chanmodes_raw = ''  # CHANMODES=A,B,C,D from ISUPPORT
@@ -350,6 +352,20 @@ class IRCClient:
 
     def irclower(self, text):
         return irclower(text, self._casemapping)
+
+    def is_channel(self, name):
+        """Is *name* a channel rather than a nick, on *this* server?
+
+        The set of channel prefixes is per-network -- it is what ISUPPORT
+        CHANTYPES says, and the module-level CHANNEL_PREFIXES is only the
+        fallback for a server that has not said.  Callers that need to know
+        which kind of target they are talking to must ask here rather than test
+        for a leading '#': a target routed as a nick when it is a channel is
+        logged to the wrong file and saved under a history key no window ever
+        reads (`=#channel`), and neither mistake is visible until the backlog is
+        next replayed.
+        """
+        return bool(name) and name[0] in self._chantypes
 
     # --- Connection ---
 
@@ -748,6 +764,34 @@ class IRCClient:
     def signedOn(self, msg):
         pass
 
+    def registered(self):
+        """Called once per connection, after registration is complete.
+
+        This is the hook for anything that must happen exactly once and has an
+        effect outside this object -- autojoining channels, sending a NickServ
+        password, syncing a notify list.  `isupport()` is NOT that hook and must
+        not be used as one: a server splits ISUPPORT across as many 005 lines as
+        it needs to stay under 512 bytes, so `isupport()` fires two or three
+        times per connection, and every side effect in it happens two or three
+        times.  See `_fire_registered`.
+        """
+        pass
+
+    def _fire_registered(self):
+        """Run `registered()` if it has not run yet on this connection.
+
+        Called from the end of the MOTD, which every server terminates with
+        either RPL_ENDOFMOTD or ERR_NOMOTD and which always follows the 005
+        burst -- so by the time it runs, CASEMAPPING, PREFIX and NETWORK have
+        all been parsed.  A subclass with its own belt-and-braces timer (for a
+        server that sends neither terminator) can call this too; that is what
+        the guard is for.
+        """
+        if self._registered_fired:
+            return
+        self._registered_fired = True
+        self.registered()
+
     def joined(self, channel):
         pass
 
@@ -1021,7 +1065,12 @@ class IRCClient:
             if not m['normal']:
                 return
             message = ' '.join(m['normal'])
-        if dest == self.nickname:
+        # irclower, not ==: every other nick comparison in this codebase is
+        # case-insensitive, and this one decides whether a line is a private
+        # message or a channel one. A server that spells our nick back in a
+        # different case would route our own PMs to chanmsg(), where the name
+        # is in no channel list and the line is dropped without a trace.
+        if self.nickname and self.irclower(dest) == self.irclower(self.nickname):
             self.privmsg(prefix, message)
         else:
             self.chanmsg(prefix, dest, message)
@@ -1113,6 +1162,11 @@ class IRCClient:
     def irc_RPL_ENDOFMOTD(self, prefix, params):
         if isinstance(self.motd, list):
             self.receivedMOTD(self.motd)
+        self._fire_registered()
+
+    def irc_ERR_NOMOTD(self, prefix, params):
+        # A server with no MOTD ends registration with this instead of 376.
+        self._fire_registered()
 
     def irc_RPL_NAMREPLY(self, prefix, params):
         self.names(params[2], params[3].split())
@@ -1175,6 +1229,8 @@ class IRCClient:
                     key, value = arg.split('=', 1)
                     if key == 'CASEMAPPING' and value in _irclower_tables:
                         self._casemapping = value
+                    elif key == 'CHANTYPES' and value:
+                        self._chantypes = value
                     elif key == 'CHANMODES':
                         self._chanmodes_raw = value
                         self._parseChanModes(value)

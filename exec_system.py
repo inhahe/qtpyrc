@@ -10,7 +10,7 @@ import fnmatch as _fnmatch
 from PySide6.QtCore import QTimer
 
 import state
-from config import _mask_match, _expand_vars
+from config import _mask_match, _match_any, _expand_vars
 
 
 # --- Named timers (/timer) ---
@@ -293,11 +293,15 @@ def _dispatch_on_hooks(internal_event, conn, args):
       # Channel filter
       if hinfo.get('channel') and hinfo['channel'].lower() != chan.lower():
         continue
-      # Nick/hostmask filter
+      # Nick/hostmask filter.  Through _match_any rather than _mask_match, so
+      # a hook mask means the same thing as an /ignore or /aop mask: an omitted
+      # component is "anything" (`/on ... bob@their.host` matched nobody when
+      # compared flat), and a bare nick is matched as a nick rather than as a
+      # pattern that has to swallow the "!ident@host" itself.
       if hinfo.get('nick_mask'):
         # Match against full user string (nick!ident@host) or just nick
         match_against = user if '!' in user else nick
-        if not _mask_match(match_against, hinfo['nick_mask']):
+        if not _match_any(match_against, [hinfo['nick_mask']]):
           continue
       # Pattern filter
       pattern = hinfo.get('pattern', '*')

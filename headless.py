@@ -161,6 +161,19 @@ class StubWindow:
     def _flush_replay_queue(self):
         pass
 
+    # render_history_rows() -- the one renderer both the on-open replay and the
+    # background drip-feed go through -- turns auto-scroll off around a replay
+    # and puts it back afterwards, on whatever window it is handed. It *reads*
+    # the flag to save it, so leaving it off the stub is not a missing no-op
+    # but an AttributeError that kills the drip-feed task for every channel.
+    # A console is always at the bottom, so True is also the honest answer.
+    _auto_scroll = True
+    _in_replay = False
+    _history_more = None      # lazy scroll-up state; nothing here scrolls up
+
+    def _scroll_to_bottom(self):
+        pass
+
     def isActiveWindow(self):
         return False
 
@@ -203,6 +216,17 @@ class StubChannelWindow(StubWindow):
         pass
 
     def _update_nick_typing(self, nick, typing):
+        pass
+
+    # Called on a part/quit by someone who was typing. Nothing populates
+    # _typing_nicks here (set_nick_typing does nothing), so today the guard in
+    # userLeft/userQuit never lets these run -- but they are part of the window
+    # contract the shared handlers call unconditionally, and the cost of the
+    # stub being one no-op short is a crash in the middle of a QUIT.
+    def _clear_nick_typing(self, nick):
+        self._typing_nicks.pop(nick, None)
+
+    def _update_typing_bar(self):
         pass
 
 

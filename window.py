@@ -1262,9 +1262,8 @@ class Window(QWidget):
     self.output.setUpdatesEnabled(False)
     prepend_cur.beginEditBlock()
     try:
-      for ts, etype, nick, text, prefix in rows:
-        _render_history_row(self, channel, ts, etype, nick, text, prefix,
-                            show_prefix)
+      for row in rows:
+        _render_history_row(self, channel, row, show_prefix)
       # Separate the prepended block from the existing first line.
       prepend_cur.insertText('\n')
     finally:

@@ -238,8 +238,14 @@ dcc:
   # What to do when a received file already exists: ask, resume, rename, overwrite.
   on_exists: ask
 
-  # Trusted user hostmasks (nick!ident@host wildcards).
-  # Transfers from trusted users bypass the get dialog.
+  # Trusted user hostmasks (nick!ident@host, with * and ? as the wildcards).
+  # Transfers from trusted users bypass the get dialog, so an entry here is a
+  # standing "yes" to a file from whoever matches it.
+  #
+  # Any component you leave out means "anything", so "friend@trusted.host" is
+  # read as "friend!*@trusted.host".  A bare nick with no host at all trusts
+  # WHOEVER holds that nick -- a nick is released on quit and is free for the
+  # taking during a netsplit -- so always name a host here.
   #~ trusted_hosts:
   #~   - "friend!*@trusted.host"
 
@@ -580,7 +586,18 @@ history_replay:
 # Logging
 # ---------------------------------------------------------------------------
 
-# IRC chat logging to text files
+# IRC chat logging to text files.
+#
+# One file per conversation, named after the conversation partner: a channel's
+# traffic goes to that channel's file, private traffic to the other nick's file,
+# and anything from the server itself to the server file. Messages are written
+# as "<nick> text", actions as "* nick text", notices as "-nick- text" -- and
+# notices in both directions, so a notice you send is in the same file as the
+# reply it gets.
+#
+# Lines replayed by a bouncer (a znc.in/playback or chathistory batch after a
+# reconnect) are not written again: they are already in the file from when they
+# first arrived.
 logging:
   dir: logs                # directory for log files (relative to config file)
   use_subdirs: false       # create per-network and per-channel subdirectories
@@ -608,6 +625,41 @@ logging:
     # File the freeze reports are written to (relative to the config file).
     # Reports are also echoed to the console.
     file: hangs.log
+    # Also record a native (C/C++) stack for the freezes that Python cannot
+    # explain. Most freezes end at the event loop itself, meaning Qt is busy
+    # inside its own code and never called into Python - so the ordinary report
+    # can only say "the interface is busy". For those, and only those, the
+    # watchdog runs py-spy against qtpyrc to get the real Qt/Windows call.
+    #
+    # Requires py-spy (pip install py-spy); ignored if it isn't installed.
+    # Reading the native stack briefly suspends qtpyrc, which lengthens the very
+    # freeze being measured, so the report says how long that took.
+    native_stacks: true
+
+  # Duplicate-message detection: notices when the same line is drawn into the
+  # same window twice.
+  #
+  # A chat line can reach the screen by several routes - as it arrives, from
+  # the saved history that is replayed when a window opens, from the queue that
+  # holds live messages back while that replay is running, and from the older
+  # history that loads when you scroll up. If two of those ever cover the same
+  # message you see it twice, and because only one of the copies is a real
+  # incoming message, nothing appears twice in the logs or the history database
+  # to show what happened.
+  #
+  # When enabled, a duplicate line is reported along with where in qtpyrc each
+  # of the two copies came from, which is what makes it fixable.
+  render_audit:
+    # Turn duplicate detection on or off.
+    enabled: true
+    # How many seconds apart two identical lines may be and still count as a
+    # duplicate. Raise it if you see doubles only after scrolling back; lower it
+    # if ordinary repetition (the same join/part, the same short reply) is being
+    # reported.
+    window: 120
+    # File the duplicate reports are written to (relative to the config file).
+    # Reports are also echoed to the console.
+    file: renders.log
 
 
 # ---------------------------------------------------------------------------
@@ -624,6 +676,12 @@ plugins:
     # - myplugin           # plain name or wildcard pattern (*, ?, [abc])
     # - "*"                # load all .py plugins in the plugins dir
 
+# Command scripts run at startup.  Four things can ask for one -- "startup" and
+# "auto_load" below, plus --startup and --run on the command line -- and a file
+# named by more than one of them still runs only once.  So pointing "startup" at
+# startup.rc and also listing startup.rc in auto_load is harmless, and so is
+# "*.rc" in auto_load (which matches startup.rc too).  The check is on the file
+# each name resolves to, not on the spelling.
 scripts:
   dir: scripts             # directory for command scripts (relative to config file)
   startup: startup.rc      # startup commands file (runs first, gets quick-edit button)

@@ -7,7 +7,7 @@ import traceback
 from datetime import datetime
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
-import fnmatch as _fnmatch
+import re as _re
 
 import state
 import os
@@ -162,16 +162,97 @@ def _parse_color(value):
   return value
 
 
+_mask_re_cache = {}
+
+
+def _mask_regex(mask):
+  """Compile an IRC wildcard mask to an anchored regex. `*` and `?` only.
+
+  **Not `fnmatch`**, which additionally honours `[...]` character classes --
+  and `[`, `]`, `\\`, `^`, `_`, `{`, `|` and `}` are all legal IRC nick
+  characters, so a bracketed nick (`bob[away]`, the conventional away marker)
+  is ordinary rather than exotic.  Under `fnmatch`, `/ignore bob[away]!*@*` did
+  not match `bob[away]` at all and *did* match `boba`, `bobw` and `boby`: the
+  entry silently pointed at four people, none of them the one named in it.
+  """
+  r = _mask_re_cache.get(mask)
+  if r is None:
+    out = []
+    for ch in mask:
+      out.append('.*' if ch == '*' else '.' if ch == '?' else _re.escape(ch))
+    r = _re.compile(''.join(out) + r'\Z', _re.DOTALL)
+    _mask_re_cache[mask] = r
+  return r
+
+
 def _mask_match(s, mask):
-  """Simple IRC wildcard mask match (* and ? only)."""
-  return _fnmatch.fnmatch(s.lower(), mask.lower())
+  """IRC wildcard mask match, case-insensitive. `*` and `?` are the wildcards."""
+  return _mask_regex(mask.lower()).match(s.lower()) is not None
+
+
+def split_mask(mask):
+  """Split an IRC mask into `(nick, ident, host)`, filling omissions with `*`.
+
+  A mask is `nick!ident@host`, and every component the user leaves out means
+  "anything".  Matching the mask as one flat string instead -- which is what
+  this replaces -- makes an *omitted* component behave as an *impossible* one,
+  because there is no wildcard in the pattern to absorb the separator and the
+  text around it.  `hegemon@lakitu.undernet.org` was matched against
+  `hegemon!~heg@lakitu.undernet.org` and could not match, so the entry was
+  dead: it opped nobody, including the person it named.  Filling the ident in
+  gives `hegemon!*@lakitu.undernet.org`, which grants exactly what was asked
+  for -- that nick, from that host, and from nowhere else.
+
+  **`x@y` is `nick@host`, never `ident@host`**, and that is the one spelling a
+  user cannot resolve by looking at it: the same text in a `/whois` line
+  (`hegemon is ~heg@lakitu.undernet.org`) is the *ident*.  Taking the leftmost
+  component as the nick whether or not a `!` is present is the only reading
+  under which `hegemon`, `hegemon!~heg` and `hegemon@host` all say something
+  about the same person.  Do not "fix" this by guessing from the text -- an
+  ident and a nick are frequently the same string, so any such rule resolves
+  the ambiguity differently for different users of the same command.  The
+  reading is asserted in `tests/test_aop_list.py` section 7 in both directions,
+  and every add echoes the expansion so a user can see which reading they got
+  without having to know any of the above.
+
+  Returns `(None, None, None)` for a nick-only mask (no `!` and no `@`), which
+  is a different kind of entry and is matched differently; see `_match_any`.
+  """
+  if '!' in mask:
+    nick, _, rest = mask.partition('!')
+    if '@' in rest:
+      ident, _, host = rest.partition('@')
+    else:
+      ident, host = rest, '*'
+  elif '@' in mask:
+    nick, _, host = mask.partition('@')
+    ident = '*'
+  else:
+    return None, None, None
+  return (nick or '*'), (ident or '*'), (host or '*')
+
+
+def expand_mask(mask):
+  """Return *mask* as a full `nick!ident@host`, or unchanged if nick-only."""
+  nick, ident, host = split_mask(mask)
+  if nick is None:
+    return mask
+  return '%s!%s@%s' % (nick, ident, host)
+
 
 def _match_any(user, masks):
-  """Return True if *user* matches any entry in *masks*."""
+  """Return True if *user* matches any entry in *masks*.
+
+  *user* is normally a full `nick!ident@host`.  A bare nick is also accepted,
+  and then a mask that asserts anything about the ident or the host cannot
+  match it: we do not know those, and for an auto-op list guessing in favour of
+  a match would hand out operator status on the strength of a nick alone.
+  """
   if not masks:
     return False
   ulow = user.lower()
   nick = ulow.split('!', 1)[0]
+  nick_only_user = '!' not in ulow and '@' not in ulow
   for m in masks:
     ml = m.lower()
     # Plain nick entry (no ! or @): wildcard-match against the nick if it
@@ -183,8 +264,12 @@ def _match_any(user, masks):
           return True
       elif nick == ml:
         return True
+    elif nick_only_user:
+      mnick, mident, mhost = split_mask(ml)
+      if set(mident) <= {'*'} and set(mhost) <= {'*'} and _mask_match(nick, mnick):
+        return True
     else:
-      if _mask_match(ulow, ml):
+      if _mask_match(ulow, expand_mask(ml)):
         return True
   return False
 
@@ -275,8 +360,9 @@ def get_notify_list(network_key=None):
 
 
 def modify_notify_entry(nick, remove, network_key=None):
-  """Add or remove a nick from the notify list. Saves config."""
-  _modify_list_entry('notify', nick, remove, network_key=network_key)
+  """Add or remove a nick from the notify list. Saves config.
+  Returns a LIST_* code -- see _modify_list_entry."""
+  return _modify_list_entry('notify', nick, remove, network_key=network_key)
 
 
 def get_highlights(network_key=None, channel=None):
@@ -313,8 +399,6 @@ def get_highlight_notify(network_key=None, channel=None):
       return v.get('highlight_notify', True)
   return True
 
-
-import re as _re
 
 _NAME_RE = _re.compile(
   r'\\\\|\\\{|\\\}'
@@ -454,51 +538,138 @@ def is_highlight(message, my_nick, network_key=None, channel=None):
 
 
 def modify_highlight_entry(pattern, remove, network_key=None, channel=None):
-  """Add or remove a highlight pattern. Saves config."""
-  _modify_list_entry('highlights', pattern, remove, network_key, channel)
+  """Add or remove a highlight pattern. Saves config.
+  Returns a LIST_* code -- see _modify_list_entry."""
+  return _modify_list_entry('highlights', pattern, remove, network_key, channel)
+
+
+# Outcomes of _modify_list_entry.  It used to return nothing, and its callers
+# printed "Removed <mask>" unconditionally -- so a remove that matched nothing,
+# or that was aimed at the wrong scope, or that fell down the silent
+# do-nothing path below, was indistinguishable from one that worked.  Someone
+# ran `/aop -r <nick>` repeatedly, was told each time that it had been removed,
+# and was auto-opped by the entry anyway.  Anything that reports the result of
+# one of these edits must report what actually happened.
+LIST_ADDED = 'added'
+LIST_ALREADY = 'already'        # add: the mask was already there
+LIST_REMOVED = 'removed'
+LIST_NOT_FOUND = 'not_found'    # remove: nothing at this scope matched
+LIST_NO_NETWORK = 'no_network'  # the network key is not in the config at all
+
+
+def _list_container(list_key, network_key=None, channel=None, create=False):
+  """Return the map holding *list_key* for exactly one scope, or None.
+
+  The three scopes -- global, per-network, per-channel -- are the same three
+  that `get_ignores` / `get_auto_ops` read *additively*.  Reading is additive
+  and writing is not, which is the asymmetry every bug in this area comes from:
+  a caller that picks one scope to write to has to be told when the entry it
+  cares about lives in a different one.
+  """
+  if not network_key:
+    return state.config._data
+  nets = state.config._data.get('networks')
+  if not nets or network_key not in nets:
+    return None
+  net = nets[network_key]
+  if net is None:
+    if not create:
+      return None
+    nets[network_key] = CommentedMap()
+    net = nets[network_key]
+  if not channel:
+    return net
+  if create:
+    return _ensure_channels_map(net, channel)
+  chans = net.get('channels') or {}
+  for k, v in chans.items():
+    if k.lower() == channel.lower():
+      return v if isinstance(v, dict) else None
+  return None
 
 
 def _modify_list_entry(list_key, mask, remove, network_key=None, channel=None):
-  """Add or remove a mask from ignores/auto_ops at the right level. Saves config."""
+  """Add or remove *mask* from one scope's *list_key*.  Saves config.
+
+  Returns one of the LIST_* codes above.  Callers must report that code rather
+  than assume success -- see the comment on LIST_ADDED.
+  """
+  data = _list_container(list_key, network_key, channel, create=not remove)
+  if data is None:
+    return LIST_NOT_FOUND if remove else LIST_NO_NETWORK
   mask_low = mask.lower()
-  if channel and network_key:
-    nets = state.config._data.get('networks')
-    if nets and network_key in nets:
-      net = nets[network_key]
-      if net is None:
-        nets[network_key] = CommentedMap()
-        net = nets[network_key]
-      ch_data = _ensure_channels_map(net, channel)
-      lst = _get_list_key(ch_data, list_key)
-      existing = [m for m in lst if m.lower() == mask_low]
-      if remove:
-        lst = [m for m in lst if m.lower() != mask_low]
-      elif not existing:
-        lst.append(mask)
-      _set_list_key(ch_data, list_key, lst)
-  elif network_key:
-    nets = state.config._data.get('networks')
-    if nets and network_key in nets:
-      net = nets[network_key]
-      if net is None:
-        nets[network_key] = CommentedMap()
-        net = nets[network_key]
-      lst = _get_list_key(net, list_key)
-      existing = [m for m in lst if m.lower() == mask_low]
-      if remove:
-        lst = [m for m in lst if m.lower() != mask_low]
-      elif not existing:
-        lst.append(mask)
-      _set_list_key(net, list_key, lst)
+  lst = _get_list_key(data, list_key)
+  existing = [m for m in lst if m.lower() == mask_low]
+  if remove:
+    if not existing:
+      return LIST_NOT_FOUND
+    lst = [m for m in lst if m.lower() != mask_low]
   else:
-    lst = _get_list_key(state.config._data, list_key)
-    existing = [m for m in lst if m.lower() == mask_low]
-    if remove:
-      lst = [m for m in lst if m.lower() != mask_low]
-    elif not existing:
-      lst.append(mask)
-    _set_list_key(state.config._data, list_key, lst)
+    if existing:
+      return LIST_ALREADY
+    lst.append(mask)
+  _set_list_key(data, list_key, lst)
   state.config.save()
+  return LIST_REMOVED if remove else LIST_ADDED
+
+
+def list_all_entries(list_key):
+  """Every entry for *list_key* anywhere in the config, with its scope.
+
+  Returns `[(network_key or None, channel or None, mask), ...]` in the order
+  global, per-network, per-channel.
+
+  **A list command must use this, not `get_*()`, and must not narrow on a
+  flag.** The `get_*` collectors take a context and return what applies *in
+  that context*, so a list command built on one shows only the scopes reachable
+  from the window the user happened to type in: from a server window it cannot
+  see a channel-scoped entry at all. Worse, the old `/aop -l` also passed
+  `network_key=None` for `-w`, which narrows the collector to the *global*
+  scope rather than widening it -- so `/aop -lw`, the obvious spelling of "show
+  me everything", answered "empty" from every window while four entries were
+  live and opping people. An entry that can fire must be visible from
+  everywhere, under every spelling.
+  """
+  out = [(None, None, m) for m in _get_list_key(state.config._data, list_key)]
+  nets = state.config._data.get('networks') or {}
+  for nk, net in nets.items():
+    if not isinstance(net, dict):
+      continue
+    out += [(nk, None, m) for m in _get_list_key(net, list_key)]
+    chans = net.get('channels') or {}
+    for ch, cd in chans.items():
+      if isinstance(cd, dict):
+        out += [(nk, ch, m) for m in _get_list_key(cd, list_key)]
+  return out
+
+
+def remove_entry_everywhere(list_key, mask):
+  """Remove *mask* from every scope it appears in.
+
+  Returns the list of `(network_key, channel)` scopes it was removed from,
+  empty if it was nowhere.
+
+  Removing from every scope rather than from one guessed scope is deliberate.
+  The two ways to be wrong are not symmetric: removing an entry the user still
+  wanted is visible immediately and is one command to undo, while leaving one
+  behind is silent and is how a stale auto-op entry survived being "removed"
+  and handed out channel operator status.
+  """
+  mask_low = mask.lower()
+  hits = [(nk, ch) for nk, ch, m in list_all_entries(list_key)
+          if m.lower() == mask_low]
+  for nk, ch in hits:
+    _modify_list_entry(list_key, mask, True, nk, ch)
+  return hits
+
+
+def scope_label(network_key, channel):
+  """Human-readable name for a scope from `list_all_entries`."""
+  if channel:
+    return '%s %s' % (network_key, channel)
+  if network_key:
+    return 'network %s' % network_key
+  return 'global'
 
 # ---------------------------------------------------------------------------
 # Configuration  (ruamel.yaml round-trip for comment preservation)
@@ -763,6 +934,14 @@ class AppConfig:
     self.hang_watchdog_enabled = bool(hw.get('enabled', True))
     self.hang_watchdog_threshold = float(hw.get('threshold', 2.0))
     self.hang_watchdog_file = hw.get('file', 'hangs.log')
+    self.hang_watchdog_native = bool(hw.get('native_stacks', True))
+
+    # Render audit: catches the same line being drawn into a chat view twice,
+    # and records the stack of both renders. See render_audit.py.
+    ra = log.get('render_audit') or {}
+    self.render_audit_enabled = bool(ra.get('enabled', True))
+    self.render_audit_file = ra.get('file', 'renders.log')
+    self.render_audit_window = float(ra.get('window', 120.0))
 
     self.history_file = data.get('history_file', 'history.db')
     self.backscroll_limit = data.get('backscroll_limit', 10000)

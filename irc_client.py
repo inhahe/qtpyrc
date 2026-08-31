@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import asyncirc
 from PySide6.QtCore import QTimer
 
+import render_audit
 import state
 from config import is_ignored, is_auto_op, is_highlight, get_highlight_notify
 from models import (User, Channel, HistoryMessage, HistoryModeChange,
@@ -103,6 +104,79 @@ def _query_history_key(nick, ident=None):
   return '=%s' % nick.lower()
 
 
+class SelfEchoTracker(object):
+  """Messages we sent, held so a bouncer's echo of them can be suppressed.
+
+  qtpyrc draws its own messages locally as it sends them, so an echo coming back
+  from a bouncer would draw them a second time. This records what to expect; the
+  incoming handler asks `claim()` and drops the line when it matches.
+
+  **The match is not byte-exact, on purpose.** The echo is the *server's* copy of
+  the line -- what everyone else on the channel saw -- and a server may normalise
+  it on the way through. Two transformations are routine and neither is visible
+  by eye:
+
+    * **Trailing whitespace is stripped.** Libera does this, so a message the
+      user ended with a space comes back one character shorter. This was a real,
+      long-lived duplicate-message bug: the echo matched nothing, so it was drawn
+      and saved on top of the local copy. It took so long to find because a
+      trailing space is invisible in a log, in a paste, and to every duplicate
+      scan that compares text for equality -- which is why the database looked
+      clean when it was not.
+    * **The line is truncated** to fit the 512-byte protocol limit, computed by
+      the server from its own idea of our hostmask. A client cannot know that
+      length exactly, so it can only be conservative and must tolerate a
+      shortened echo.
+
+  The entries also expire. The old plain lists did not: on a network that never
+  echoes -- the ordinary case -- every message the user sent was appended and
+  never removed, so the list grew without bound for the whole session.
+  """
+
+  # Long enough to cover the round trip through a bouncer and the upstream's
+  # rate-limiter queue, which can be seconds deep during a flood.
+  WAIT_SECS = 120
+  MAX_ENTRIES = 200
+  # Shortest echo accepted as a truncation of what we sent. A real truncation
+  # cuts near the 512-byte limit and so keeps nearly all of the text; requiring a
+  # healthy prefix stops a short common line ("ok", "yes") matching an unrelated
+  # longer one that happens to start the same way.
+  MIN_TRUNCATED = 40
+
+  def __init__(self):
+    self._entries = []            # [(target_lower, text, monotonic_time)]
+
+  def _prune(self, now):
+    horizon = now - self.WAIT_SECS
+    entries = [e for e in self._entries if e[2] >= horizon]
+    if len(entries) > self.MAX_ENTRIES:
+      del entries[:len(entries) - self.MAX_ENTRIES]
+    self._entries = entries
+
+  def record(self, target_lower, text):
+    """Note that we sent *text* to *target_lower* and expect it to echo."""
+    now = time.monotonic()
+    self._entries.append((target_lower, text, now))
+    self._prune(now)
+
+  def claim(self, target_lower, text):
+    """Is this incoming line the echo of something we sent? Consumes the match."""
+    now = time.monotonic()
+    self._prune(now)
+    stripped = text.rstrip()
+    for i, (tgt, sent, _ts) in enumerate(self._entries):
+      if tgt != target_lower:
+        continue
+      sent_stripped = sent.rstrip()
+      if sent_stripped == stripped or (
+          len(stripped) >= self.MIN_TRUNCATED
+          and len(stripped) < len(sent_stripped)
+          and sent_stripped.startswith(stripped)):
+        del self._entries[i]
+        return True
+    return False
+
+
 def _find_or_create_query(conn, nick, ident, host):
   """Find an existing query for *nick* or create a new one.
 
@@ -140,6 +214,23 @@ def _find_or_create_query(conn, nick, ident, host):
   return q, True
 
 
+def notice_log_line(nick, message):
+  """The one spelling of a NOTICE in a log file: ``-nick- message``.
+
+  Shared with `commands.Commands.notice` on purpose. Incoming and outgoing
+  notices are written to the *same* file -- the conversation partner's, see
+  `IRCClient._log_chat` -- so if the two directions formatted the line
+  differently the two halves of one conversation would be distinguishable only
+  by eye. That is the shape of the `/msg` bug: two copies of "how a sent line is
+  recorded", drifting apart where nothing checks them against each other.
+
+  Matches what is drawn on screen (`addline_nick(["-", (nick,), "- %s" % msg])`),
+  and is distinguishable from a PRIVMSG (`<nick> msg`) and an action
+  (`* nick msg`), which is the point of not just reusing one of those.
+  """
+  return '-%s- %s' % (nick, message)
+
+
 def _history_save(network, channel, event_type, nick=None, text=None, prefix=''):
   """Save an event to the history database if available."""
   db = state.historydb
@@ -147,52 +238,63 @@ def _history_save(network, channel, event_type, nick=None, text=None, prefix='')
     db.add(network, channel.lower(), event_type, nick, text, prefix)
 
 
-def _render_history_row(window, channel, ts, etype, nick, text, prefix, show_prefix):
+def _render_history_row(window, channel, row, show_prefix):
   """Turn one history row into a visible line at the window's current cursor.
 
-  Shared by the append replay (render_history_rows) and the lazy scroll-up
-  prepend path so both render identically. Does NOT touch the channel history
-  buffer, edit blocks, or scrolling -- the caller manages those."""
-  ts_short = ts[11:16]  # HH:MM from "YYYY-MM-DD HH:MM:SS"
-  pn = (prefix + nick) if (show_prefix and prefix and nick) else nick
-  if etype == 'message':
-    window.addline_msg(pn, text, timestamp_override=ts_short)
-  elif etype == 'action':
-    window.addline_nick(["* ", (pn,), " %s" % text], state.actionformat,
-                        timestamp_override=ts_short)
-  elif etype == 'notice':
-    window.addline_nick(["-", (pn,), "- %s" % text], state.noticeformat,
-                        timestamp_override=ts_short)
-  elif etype == 'join':
-    window.addline_nick(["* ", (pn,), " has joined %s" % (text or channel)],
-                        state.infoformat, timestamp_override=ts_short)
-  elif etype == 'part':
-    window.addline_nick(["* ", (pn,), " has left %s" % (text or channel)],
-                        state.infoformat, timestamp_override=ts_short)
-  elif etype == 'quit':
-    window.addline_nick(["* ", (pn,), " has quit (%s)" % (text or "")],
-                        state.infoformat, timestamp_override=ts_short)
-  elif etype == 'kick':
-    window.addline(text or '', state.infoformat, timestamp_override=ts_short)
-  elif etype == 'nick':
-    old, new = (nick, text) if text else (nick, '?')
-    pold = (prefix + old) if (show_prefix and prefix) else old
-    window.addline_nick(["* ", (pold,), " is now known as ", (new,)],
-                        state.infoformat, timestamp_override=ts_short)
-  elif etype == 'mode':
-    window.addline_nick(["* ", (pn,), " %s" % (text or '')],
-                        state.infoformat, timestamp_override=ts_short)
-  elif etype == 'topic':
-    window.addline_nick(["* ", (pn,), " changed the topic to: %s" % (text or '')],
-                        state.infoformat, timestamp_override=ts_short)
+  *row* is a 6-tuple ``(id, ts, type, nick, text, prefix)`` straight from
+  history.py. Shared by the append replay (render_history_rows) and the lazy
+  scroll-up prepend path so both render identically. Does NOT touch the channel
+  history buffer, edit blocks, or scrolling -- the caller manages those.
+
+  The whole body runs inside ``render_audit.source_id(row_id)`` so that a
+  duplicate-render report can say *which stored row* was drawn twice. Nothing
+  else it could compare on is exact: the timestamp it puts on screen is HH:MM,
+  so an identical line said at the same minute on a different day is
+  indistinguishable from a genuine double render, and the text is what it is
+  searching by. This costs two dict stores per row and is why the row id is
+  carried out of the SQL at all."""
+  row_id, ts, etype, nick, text, prefix = row
+  with render_audit.source_id(row_id):
+    ts_short = ts[11:16]  # HH:MM from "YYYY-MM-DD HH:MM:SS"
+    pn = (prefix + nick) if (show_prefix and prefix and nick) else nick
+    if etype == 'message':
+      window.addline_msg(pn, text, timestamp_override=ts_short)
+    elif etype == 'action':
+      window.addline_nick(["* ", (pn,), " %s" % text], state.actionformat,
+                          timestamp_override=ts_short)
+    elif etype == 'notice':
+      window.addline_nick(["-", (pn,), "- %s" % text], state.noticeformat,
+                          timestamp_override=ts_short)
+    elif etype == 'join':
+      window.addline_nick(["* ", (pn,), " has joined %s" % (text or channel)],
+                          state.infoformat, timestamp_override=ts_short)
+    elif etype == 'part':
+      window.addline_nick(["* ", (pn,), " has left %s" % (text or channel)],
+                          state.infoformat, timestamp_override=ts_short)
+    elif etype == 'quit':
+      window.addline_nick(["* ", (pn,), " has quit (%s)" % (text or "")],
+                          state.infoformat, timestamp_override=ts_short)
+    elif etype == 'kick':
+      window.addline(text or '', state.infoformat, timestamp_override=ts_short)
+    elif etype == 'nick':
+      old, new = (nick, text) if text else (nick, '?')
+      pold = (prefix + old) if (show_prefix and prefix) else old
+      window.addline_nick(["* ", (pold,), " is now known as ", (new,)],
+                          state.infoformat, timestamp_override=ts_short)
+    elif etype == 'mode':
+      window.addline_nick(["* ", (pn,), " %s" % (text or '')],
+                          state.infoformat, timestamp_override=ts_short)
+    elif etype == 'topic':
+      window.addline_nick(["* ", (pn,), " changed the topic to: %s" % (text or '')],
+                          state.infoformat, timestamp_override=ts_short)
 
 
 def render_history_rows(window, channel, rows, chan_obj=None):
   """Render a list of history rows into *window*, wrapped in a single edit block
   with updates suppressed and auto-scroll restored once at the end.
 
-  *rows* is a list of (ts, type, nick, text, prefix) tuples (oldest first). This
-  is the one place history rows are turned into visible lines -- the synchronous
+  *rows* is a list of (id, ts, type, nick, text, prefix) tuples (oldest first).
+  This is the one place history rows are turned into visible lines -- the synchronous
   on-open replay and the background drip-feed both call it. It does NOT add the
   'End of saved history' separator or flush the replay queue; the caller decides
   when replay is complete (the drip-feed spans many chunks). Safe to call with
@@ -207,8 +309,9 @@ def render_history_rows(window, channel, rows, chan_obj=None):
   window.output.setUpdatesEnabled(False)
   window.cur.beginEditBlock()
   try:
-    for ts, etype, nick, text, prefix in rows:
-      _render_history_row(window, channel, ts, etype, nick, text, prefix, show_prefix)
+    for row in rows:
+      _render_history_row(window, channel, row, show_prefix)
+      _, ts, etype, nick, text, prefix = row
       # Populate channel history buffer from DB rows
       if history is not None and nick and etype in (
           'message', 'action', 'notice', 'join', 'part', 'quit', 'kick'):
@@ -280,6 +383,17 @@ def _history_replay(window, network, channel, limit=None, chan_obj=None):
   if limit is None:
     limit = replay_limit_for(channel)
   if not db or limit <= 0:
+    # No replay is coming, so anything the window is holding back waiting for
+    # one has to be released -- otherwise _queue_if_replaying swallows every
+    # line for the rest of the window's life and the window is mute for good.
+    # The queue is already open by the time we get here: joined() and
+    # _find_or_create_query() both open it when they create the window, well
+    # before anyone asks how much history there is to replay. The drip-feed
+    # path has the same case and handles it (_bg_replay_drop); this is the
+    # synchronous one. Reached whenever the cap for this kind of window is 0 --
+    # which is what history_replay.queries: 0 means, and what the settings
+    # dialog used to write into every config that was opened.
+    window._flush_replay_queue()
     return
   import qtpyrc
   _timing = qtpyrc.timing_enabled()
@@ -295,8 +409,12 @@ def _history_replay(window, network, channel, limit=None, chan_obj=None):
   _t_query = time.monotonic() if _timing else 0.0
   if rows:
     render_history_rows(window, channel, rows, chan_obj)
-    bounds = db.replay_bounds(network, chlow, eager, cutoff)
-    oldest_id = bounds[0] if bounds else None
+    # The oldest id we just rendered, which is where lazy scroll-up resumes.
+    # It used to be a second query (replay_bounds), which is now redundant: the
+    # rows carry their ids. Same answer, including the "fewer rows exist than we
+    # asked for" case -- replay_bounds reports 0 there, meaning the whole
+    # backlog is on screen and there is nothing left to scroll up to.
+    oldest_id = rows[0][0] if len(rows) >= eager else 0
     _setup_history_more(window, network, chlow, oldest_id, len(rows), limit)
     window.add_separator(" End of saved history ")
   window._flush_replay_queue()
@@ -384,8 +502,8 @@ class IRCClient(asyncirc.IRCClient):
     self._user_parts = set()  # irclower(channel) names from explicit /part
     self._activate_on_join = set()  # irclower(channel) names to activate when joined
     self._hopping = set()     # irclower(channel) names currently being /hopped
-    self._own_messages = []   # dedup: [(irclower(target), text)] for own msgs awaiting echo
-    self._own_actions = []    # dedup: [(irclower(target), text)] for own actions awaiting echo
+    self._own_messages = SelfEchoTracker()  # own msgs awaiting a bouncer echo
+    self._own_actions = SelfEchoTracker()   # own actions awaiting a bouncer echo
 
     rl = state.config.resolve(nk, 'rate_limit')
     self.lineRate = rl if rl and rl > 0 else None
@@ -635,6 +753,43 @@ class IRCClient(asyncirc.IRCClient):
     or hostname so logs never land in 'unknown'."""
     return self.client.network or self.client.network_key or self.client.hostname or 'unknown'
 
+  def _log_chat(self, target, line):
+    """Write one incoming chat line to *target*'s log file.
+
+    **Every incoming chat line goes through here, and the reason is the playback
+    gate.** A bouncer replays the tail of each channel on every reconnect, and
+    those lines are already in the log from when they first arrived, so writing
+    them again appends a duplicate copy of the last N lines of every channel
+    per reconnect. History saves have been gated on `_in_playback_batch()` since
+    they were written; the log calls sat right beside them, ungated, and were
+    not.
+
+    *target* is the **conversation partner**, which is what names a log file
+    everywhere in qtpyrc: the channel for channel traffic, the other nick for
+    private traffic. Get it wrong and the line is not lost -- it is filed
+    somewhere the conversation is not, which is only noticed much later, if at
+    all. (See `_log_chat_server` for the third case, where there is no partner.)
+    """
+    if self._in_playback_batch():
+      return
+    state.irclogger.log(self._log_network, target, line)
+
+  def _log_chat_server(self, line):
+    """`_log_chat` for a line whose partner is the server itself.
+
+    A NOTICE straight from the server, or to a `$*`-style mask, has no user
+    behind it to file under -- `usersplit` does not match its prefix -- so it
+    belongs in the server log, which is also the window it is shown in. Same
+    for the numerics that are printed as text (MOTD and friends).
+
+    Not to be confused with `irclogger.log_server` used directly for connection
+    events (`connectionMade` / `connectionLost`): those are not chat, cannot
+    arrive inside a batch, and must be recorded even mid-playback.
+    """
+    if self._in_playback_batch():
+      return
+    state.irclogger.log_server(self._log_network, line)
+
   def _net_label(self):
     """Return the display label for this network, using the same fallback
     chain as channel titles: network_key -> network name -> hostname."""
@@ -651,11 +806,20 @@ class IRCClient(asyncirc.IRCClient):
       query.update_title()
 
   def _ensure_connected(self):
-    """Fallback for servers that send no 005 — mark connected after a delay."""
-    if not self.client.connected and self.client.conn is self:
+    """Fallback for servers that send no 005 — mark connected after a delay.
+
+    Also the backstop for `registered()`, which normally runs at the end of the
+    MOTD: a server that sends neither RPL_ENDOFMOTD nor ERR_NOMOTD would
+    otherwise never autojoin.  `_fire_registered` is guarded, so on every
+    ordinary server this call has already happened and does nothing.
+    """
+    if self.client.conn is not self:
+      return
+    if not self.client.connected:
       self.client.connected = True
       from qtpyrc import _update_all_titles
       _update_all_titles()
+    self._fire_registered()
 
   def connectionLost(self, reason):
     self.client.connected = False
@@ -975,16 +1139,22 @@ class IRCClient(asyncirc.IRCClient):
     return False
 
   def _is_trusted_host(self, hostmask):
-    """Check if a hostmask matches any trusted_hosts pattern."""
-    import fnmatch as _fnmatch
+    """Check if a hostmask matches any `dcc.trusted_hosts` pattern.
+
+    Goes through `config._match_any`, like every other mask list, rather than
+    calling `fnmatch` directly.  This is a security gate -- a match here skips
+    the "do you want this file?" dialog -- and matching flat got it wrong in
+    both directions: `friend@their.host` could not match `friend!~f@their.host`
+    at all, so the entry silently trusted nobody, while `[` and `]`, ordinary
+    characters in an IRC nick, were read as an fnmatch character class and
+    matched people the entry does not name.  See the "Masks" section of
+    `CLAUDE.md`.
+    """
+    from config import _match_any
     trusted = state.config.dcc_trusted_hosts
     if not trusted:
       return False
-    hostmask_lower = hostmask.lower()
-    for pattern in trusted:
-      if _fnmatch.fnmatch(hostmask_lower, pattern.lower()):
-        return True
-    return False
+    return _match_any(hostmask, trusted)
 
   def irc_ERR_NICKNAMEINUSE(self, prefix, params):
     # Try alt_nicks first, then fall back to appending _
@@ -1324,15 +1494,41 @@ class IRCClient(asyncirc.IRCClient):
       if tree:
         tree.update_client_label(self.client)
 
+    # Mark connected after ISUPPORT so NETWORK= is resolved before titlebar
+    # update.  This one belongs here rather than in registered(): it is an
+    # idempotent state assignment, it puts nothing on the wire, and it wants to
+    # happen as soon as the network has a name rather than after the MOTD.
+    # Everything that *does* put something on the wire moved to registered().
+    if not self.client.connected:
+      self.client.connected = True
+      from qtpyrc import _update_all_titles
+      _update_all_titles()
+
+  def registered(self):
+    """Once-per-connection work: autojoin, NickServ login, MONITOR sync.
+
+    All three of these used to sit in `isupport()`, which fires once per 005
+    line -- two or three times on every real server, because ISUPPORT does not
+    fit in one 512-byte message.  So every autojoin channel was JOINed two or
+    three times and the NickServ password was sent two or three times.
+
+    The JOIN duplication was invisible for channels that could be joined: the
+    first JOIN succeeds, `joined()` strips the still-queued copies, and a JOIN
+    to a channel you are already in is a no-op.  It showed up only on channels
+    that *cannot* be joined, where there is no `joined()` to clean up and each
+    JOIN earns its own error -- the doubled "#ops Cannot join channel (+b)" and
+    "#life Cannot join channel (+k)" in `me/renders.log`.  It also meant
+    `_autojoin_pending` was rebuilt from scratch on each 005, discarding what
+    `joined()` had already removed from it, and that the join burst handed to
+    flood control was two to three times longer than it needed to be.
+    """
     # Autojoin channels (skip if -o flag was used)
+    self._autojoin_pending = set()
     if not self._skip_autojoin:
-      self._autojoin_pending = set()
       autojoins = state.config.get_autojoins(self.client.network_key)
       for channel, key in autojoins.items():
         self._autojoin_pending.add(self.irclower(channel))
         self.join(channel, key)
-    else:
-      self._autojoin_pending = set()
 
     # NickServ/MSG login method (post-registration, non-SASL)
     if self._login_method in ('nickserv', 'msg') and self._login_password:
@@ -1341,16 +1537,9 @@ class IRCClient(asyncirc.IRCClient):
       else:
         self.msg('NickServ', 'IDENTIFY %s' % self._login_password)
 
-    # If MONITOR just became available, send the notify list
-    if self._monitor_supported and not getattr(self, '_monitor_synced', False) and state.notifications:
-      self._monitor_synced = True
+    # If MONITOR is available, send the notify list
+    if self._monitor_supported and state.notifications:
       state.notifications.sync_monitor(self)
-
-    # Mark connected after ISUPPORT so NETWORK= is resolved before titlebar update
-    if not self.client.connected:
-      self.client.connected = True
-      from qtpyrc import _update_all_titles
-      _update_all_titles()
 
   _SASL_NUMERICS = frozenset({
     'RPL_LOGGEDIN', 'RPL_LOGGEDOUT', 'ERR_NICKLOCKED',
@@ -1411,7 +1600,7 @@ class IRCClient(asyncirc.IRCClient):
       if not text.strip():
         return  # don't show empty timestamp-only lines
       self.window.addline(text)
-      state.irclogger.log_server(self._log_network, text)
+      self._log_chat_server(text)
       if not self._in_playback_batch():
         from link_preview import check_and_preview
         check_and_preview(self.window, text)
@@ -1433,6 +1622,7 @@ class IRCClient(asyncirc.IRCClient):
       target_win.addline_nick(["-", (pn,), "- %s" % message], state.noticeformat,
                               timestamp_override=ts)
       self._hook_activity(target_win, Window.ACTIVITY_MESSAGE)
+      self._log_chat(channel, notice_log_line(nick, message))
       if not self._in_playback_batch():
         _history_save(self._log_network, channel, 'notice', nick, message,
                       prefix=self._nick_prefix(nick, channel))
@@ -1447,6 +1637,15 @@ class IRCClient(asyncirc.IRCClient):
           target_win = aw
       target_win.addline_nick(["-", (nick,), "- %s" % message], state.noticeformat,
                               timestamp_override=ts)
+      # File it under whoever sent it, not under the window it happened to be
+      # shown in: that window is "whichever one was active", so it is not a
+      # stable place and two notices from the same person would land in
+      # different files.  A notice from the server itself has no sender to file
+      # under -- usersplit() only matches a nick!ident@host prefix.
+      if m:
+        self._log_chat(nick, notice_log_line(nick, message))
+      else:
+        self._log_chat_server(notice_log_line(nick or self._log_network, message))
     if not self._in_playback_batch() and not target_win._is_active_window():
       self._hook_notify('notice', 'Notice from %s' % nick, message)
     # Link previews for notices (defer during replay)
@@ -1467,9 +1666,7 @@ class IRCClient(asyncirc.IRCClient):
       chan = self.client.channels[chnlower]
       # Bouncer echo dedup for actions (same as chanmsg)
       if self.irclower(nick) == self.irclower(self.nickname):
-        dedup_key = (chnlower, data)
-        if dedup_key in self._own_actions:
-          self._own_actions.remove(dedup_key)
+        if self._own_actions.claim(chnlower, data):
           return
       if nick in chan.window._typing_nicks:
         chan.window.set_nick_typing(nick, False)
@@ -1477,8 +1674,7 @@ class IRCClient(asyncirc.IRCClient):
       chan.history.append(HistoryMessage(uobj, nick, data, 'action', prefix=pfx))
       chan.window.addline_nick(["* ", (self._pnick(nick, channel),), " %s" % data], state.actionformat,
                               timestamp_override=ts)
-      state.irclogger.log_channel(self._log_network, channel,
-                            "* %s %s" % (nick, data))
+      self._log_chat(channel, "* %s %s" % (nick, data))
       if not playback:
         _history_save(self._log_network, channel, 'action', nick, data,
                       prefix=pfx)
@@ -1497,8 +1693,7 @@ class IRCClient(asyncirc.IRCClient):
       q, _ = _find_or_create_query(self, nick, ident, host)
       q.window.addline_nick(["* ", (nick,), " %s" % data], state.actionformat,
                                                     timestamp_override=ts)
-      state.irclogger.log(self._log_network, nick,
-                          "* %s %s" % (nick, data))
+      self._log_chat(nick, "* %s %s" % (nick, data))
       self._hook_activity(q.window, Window.ACTIVITY_HIGHLIGHT)
       if not playback:
         _history_save(self._log_network, _query_history_key(nick, ident), 'action', nick, data)
@@ -1601,8 +1796,7 @@ class IRCClient(asyncirc.IRCClient):
     chan = self.channels.get(chnlower)
     if chan:
       chan.window.redmessage('[Kicked from %s by %s (%s)]' % (channel, self._pnick(kicker, channel), message))
-      state.irclogger.log_channel(self._log_network, channel,
-                            'Kicked by %s (%s)' % (kicker, message))
+      self._log_chat(channel, 'Kicked by %s (%s)' % (kicker, message))
       if not self._in_playback_batch():
         _history_save(self._log_network, channel, 'kick', kicker,
                       'Kicked from %s by %s (%s)' % (channel, kicker, message),
@@ -1643,8 +1837,7 @@ class IRCClient(asyncirc.IRCClient):
     self._hook_activity(qwin, Window.ACTIVITY_HIGHLIGHT)
     if hasattr(qwin, '_typing_timer') and qwin._typing_timer is not None:
       qwin.set_nick_typing(nick, False)
-    state.irclogger.log(self._log_network, nick,
-                        "<%s> %s" % (nick, message))
+    self._log_chat(nick, "<%s> %s" % (nick, message))
     if not self._in_playback_batch():
       _history_save(self._log_network, _query_history_key(nick, ident), 'message', nick, message)
       _save_urls(self._log_network, _query_history_key(nick, ident),
@@ -1670,9 +1863,7 @@ class IRCClient(asyncirc.IRCClient):
       # Bouncer echo dedup: if this is our own nick echoing back a message
       # we already displayed and saved in Commands.say, suppress the echo.
       if self.irclower(nick) == self.irclower(self.nickname):
-        dedup_key = (chnlower, message)
-        if dedup_key in self._own_messages:
-          self._own_messages.remove(dedup_key)
+        if self._own_messages.claim(chnlower, message):
           return
       # Clear typing indicator when they send a message
       if nick in chan.window._typing_nicks:
@@ -1680,8 +1871,7 @@ class IRCClient(asyncirc.IRCClient):
       pfx = self._nick_prefix(nick, channel)
       chan.history.append(HistoryMessage(uobj, nick, message, 'message', prefix=pfx))
       chan.window.addline_msg(self._pnick(nick, channel), message, timestamp_override=ts)
-      state.irclogger.log_channel(self._log_network, channel,
-                            "<%s> %s" % (nick, message))
+      self._log_chat(channel, "<%s> %s" % (nick, message))
       if not self._in_playback_batch():
         _history_save(self._log_network, channel, 'message', nick, message,
                       prefix=pfx)

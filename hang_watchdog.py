@@ -24,8 +24,27 @@
 # A long stall is re-sampled periodically, so a stack that keeps changing points
 # at slow-but-progressing work (e.g. rendering thousands of lines), while a
 # stack frozen on one frame points at a single blocking call.
+#
+# When the Python stack has nothing to say
+# ---------------------------------------
+# Most of the stalls recorded so far end at the event loop itself -- the deepest
+# Python frame is qasync's run_forever(), i.e. QApplication::exec(). That means
+# Qt is inside its own C++ event processing and never called into Python at all,
+# so there is no Python frame that could name the blocker; the report says only
+# "the GUI thread is busy", which is what we already knew. Out of the first 315
+# samples in me/hangs.log, 239 look like that.
+#
+# For exactly those, the watchdog shells out to py-spy (`py-spy dump --native`)
+# against its own pid and records the *native* stack, which names the Qt/Win32
+# call: QTextDocument layout, a DirectWrite font enumeration, a Shell_NotifyIcon
+# balloon, a blocking MessageBeep, and so on. py-spy suspends the process while
+# it samples, which lengthens the very stall being measured -- acceptable only
+# because it is limited to the case where the cheap Python sample is useless.
+# Controlled by logging.hang_watchdog.native_stacks.
 
 import os
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -39,6 +58,15 @@ _POLL_INTERVAL = 0.25
 # While a stall is ongoing, re-capture the stack this often (seconds) so we can
 # tell "stuck on one call" from "slowly grinding through work".
 _RESAMPLE_INTERVAL = 5.0
+# How long to let py-spy run before giving up on it. Measured against a running
+# qtpyrc: 0.6s warm, 2.5s on the first call of a session (loading symbols for
+# every module). Anything past this is a py-spy that has wedged, and waiting on
+# it would hold the watchdog thread -- and the process it has suspended.
+_NATIVE_TIMEOUT = 10.0
+# Don't take native samples faster than this. Each one suspends the process, so
+# a run of back-to-back stalls would otherwise spend more time being measured
+# than running. Every stall still gets its (free) Python stack.
+_NATIVE_MIN_INTERVAL = 30.0
 
 _state = {
   'last_beat': 0.0,
@@ -49,6 +77,9 @@ _state = {
   'timer': None,
   'thread': None,
   'stop': None,
+  'native': False,     # capture native stacks when Python has nothing to say
+  'py_spy': None,      # resolved py-spy path, '' if looked for and not found
+  'last_native': 0.0,  # monotonic time of the last native sample
 }
 
 
@@ -91,6 +122,111 @@ def _capture_stack(thread_id):
     return '  <could not format stack: %s>' % e
 
 
+def _stopped_in_the_event_loop(thread_id):
+  """True when *thread_id*'s innermost Python frame is the event loop itself.
+
+  sys._current_frames() hands back the innermost frame, so this is asking: has
+  Qt called into Python at all? If the answer is no -- the thread is still
+  sitting in the run_forever() that entered QApplication::exec() -- then the
+  Python stack cannot name what is blocking, because whatever it is was never
+  reached through Python. That is the case a native stack is for."""
+  try:
+    frame = sys._current_frames().get(thread_id)
+  except Exception:
+    return False
+  if frame is None:
+    return False
+  code = frame.f_code
+  if code.co_name not in ('run_forever', 'exec', 'exec_'):
+    return False
+  # Guard against a same-named function of our own: the event-loop entry lives
+  # in qasync (or asyncio, if the loop is ever run without the Qt integration).
+  path = (code.co_filename or '').replace('\\', '/').lower()
+  return '/qasync/' in path or '/asyncio/' in path
+
+
+def _find_py_spy():
+  """Locate the py-spy executable, or '' if it isn't installed.
+
+  Resolved once and remembered (including the failure), so a stall storm doesn't
+  pay for a filesystem search each time."""
+  found = _state.get('py_spy')
+  if found is not None:
+    return found
+  cand = shutil.which('py-spy') or ''
+  if not cand:
+    # A pip-installed py-spy lands beside the interpreter that owns it, which
+    # need not be on PATH -- and it is that interpreter's process we're
+    # sampling, so its own Scripts/bin directory is the right place to look.
+    base = os.path.dirname(os.path.abspath(sys.executable))
+    for sub, name in (('Scripts', 'py-spy.exe'), ('bin', 'py-spy'), ('', 'py-spy')):
+      p = os.path.join(base, sub, name) if sub else os.path.join(base, name)
+      if os.path.isfile(p):
+        cand = p
+        break
+  _state['py_spy'] = cand
+  return cand
+
+
+def _native_stack(thread_id):
+  """Return the native (C/C++) stack of *thread_id*, sampled with py-spy.
+
+  Returns (text, seconds_spent). py-spy attaches to this very process and
+  suspends it to walk the stacks, so the seconds are added to the stall and the
+  caller reports them -- otherwise the recorded stall length silently includes
+  the cost of measuring it."""
+  exe = _find_py_spy()
+  if not exe:
+    return ('  <no native stack: py-spy is not installed (pip install py-spy)>', 0.0)
+  cmd = [exe, 'dump', '--native', '--pid', str(os.getpid())]
+  t0 = time.monotonic()
+  try:
+    proc = subprocess.run(cmd, capture_output=True, text=True,
+                          errors='replace', timeout=_NATIVE_TIMEOUT,
+                          creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+  except subprocess.TimeoutExpired:
+    return ('  <no native stack: py-spy timed out after %.0fs>' % _NATIVE_TIMEOUT,
+            time.monotonic() - t0)
+  except Exception as e:
+    return ('  <no native stack: could not run py-spy: %s>' % e,
+            time.monotonic() - t0)
+  spent = time.monotonic() - t0
+  if proc.returncode != 0:
+    err = (proc.stderr or proc.stdout or '').strip().splitlines()
+    return ('  <no native stack: py-spy exited %s: %s>'
+            % (proc.returncode, err[-1] if err else '(no output)'), spent)
+  block = _extract_thread_block(proc.stdout or '', thread_id)
+  return (block, spent)
+
+
+def _extract_thread_block(dump, thread_id):
+  """Pull one thread's frames out of a `py-spy dump` report.
+
+  py-spy prints `Thread <os-tid> (state)` followed by indented frames, and on
+  Windows that id is GetCurrentThreadId() -- the same number threading.get_ident()
+  returns, so the GUI thread can be picked out by id rather than guessed at."""
+  want = 'Thread %s ' % thread_id
+  lines = (dump or '').splitlines()
+  out = []
+  taking = False
+  for line in lines:
+    if line.startswith('Thread '):
+      if taking:
+        break
+      taking = line.startswith(want)
+      if taking:
+        out.append('  ' + line.rstrip())
+      continue
+    if taking:
+      out.append('  ' + line.rstrip())
+  if out:
+    return '\n'.join(out).rstrip()
+  # No block for that id: report everything rather than nothing, since a dump we
+  # cannot index is still the only record of where the process was.
+  body = '\n'.join('  ' + l for l in lines).rstrip()
+  return body or '  <py-spy produced no output>'
+
+
 def _all_thread_stacks():
   """Formatted stacks for every thread -- useful when the GUI thread is blocked
   waiting on another thread (a lock, a queue, a DB handle)."""
@@ -114,6 +250,34 @@ def _all_thread_stacks():
 def _beat():
   _state['last_beat'] = time.monotonic()
   _state['beats'] += 1
+
+
+def _maybe_write_native(gui_tid):
+  """Record a native stack if the Python one couldn't name the blocker.
+
+  Deliberately not done for every stall: py-spy freezes this process to read it,
+  so it makes the stall it is measuring worse. When there *is* a Python frame
+  below the event loop, that frame already names the culprit and paying for a
+  native dump on top of it buys nothing."""
+  if not _state.get('native'):
+    return
+  if not _stopped_in_the_event_loop(gui_tid):
+    return
+  now = time.monotonic()
+  since = now - _state['last_native']
+  if _state['last_native'] and since < _NATIVE_MIN_INTERVAL:
+    _write('  (no Python frame below the event loop; skipping the native sample '
+           '-- one was taken %.0fs ago, minimum interval %.0fs)'
+           % (since, _NATIVE_MIN_INTERVAL))
+    return
+  _state['last_native'] = now
+  _write('  (no Python frame below the event loop -- the GUI thread is inside '
+         'Qt/Win32. Sampling native stack with py-spy...)')
+  text, spent = _native_stack(gui_tid)
+  _state['last_native'] = time.monotonic()
+  _write('  GUI thread native stack (py-spy, %.2fs -- this process was '
+         'suspended for that long, so it is part of the stall above):' % spent)
+  _write(text)
 
 
 def _watch_loop():
@@ -152,11 +316,15 @@ def _watch_loop():
         _write(_capture_stack(gui_tid))
         _write('  Other threads:')
         _write(_all_thread_stacks())
+        _maybe_write_native(gui_tid)
+        last_sample = time.monotonic()   # the native dump can take seconds
       elif now - last_sample >= _RESAMPLE_INTERVAL:
         last_sample = now
         _write('[%s]   ... still stalled (%.1fs). GUI thread stack now:'
                % (_stamp(), behind))
         _write(_capture_stack(gui_tid))
+        _maybe_write_native(gui_tid)
+        last_sample = time.monotonic()
     else:
       if stalling:
         stalling = False
@@ -164,12 +332,14 @@ def _watch_loop():
         _write('[%s] *** GUI recovered after %.2fs ***\n' % (_stamp(), total))
 
 
-def start(threshold=2.0, logfile=None):
+def start(threshold=2.0, logfile=None, native=False):
   """Begin watching the GUI thread for stalls.
 
   Must be called from the GUI thread (it installs a QTimer there).
   *threshold* is the number of seconds without a heartbeat that counts as a
-  stall. Returns True if the watchdog started."""
+  stall. *native* allows py-spy to be used for the stalls whose Python stack
+  ends at the event loop (see _maybe_write_native). Returns True if the watchdog
+  started."""
   if _state.get('thread') is not None:
     return True  # already running
   try:
@@ -189,6 +359,9 @@ def start(threshold=2.0, logfile=None):
 
   _state['threshold'] = float(threshold)
   _state['logfile'] = logfile
+  _state['native'] = bool(native)
+  _state['py_spy'] = None
+  _state['last_native'] = 0.0
   _state['gui_thread_id'] = threading.get_ident()
   _state['last_beat'] = time.monotonic()
   _state['beats'] = 0
@@ -209,8 +382,15 @@ def start(threshold=2.0, logfile=None):
   t.start()
   _state['thread'] = t
 
-  _write('[%s] hang watchdog started (threshold %.2fs, log %s)'
-         % (_stamp(), _state['threshold'], logfile or '<console only>'))
+  native_note = ''
+  if _state['native']:
+    exe = _find_py_spy()
+    native_note = (', native stacks via %s' % exe) if exe else \
+                  (', native stacks requested but py-spy is not installed '
+                   '(pip install py-spy)')
+  _write('[%s] hang watchdog started (threshold %.2fs, log %s%s)'
+         % (_stamp(), _state['threshold'], logfile or '<console only>',
+            native_note))
   return True
 
 

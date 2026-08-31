@@ -379,11 +379,30 @@ class TabbedWorkspace(QWidget):
     window.py -- and offscreen it measures as nothing, there being no
     compositor for it to skip work for.  On screen it is one repaint per
     window instead of several.
+
+    It also pins the scroll bars off, which is a correctness fix rather than a
+    cosmetic one.  Every arranger measures the *viewport* and then lays out a
+    geometry that decides whether a scroll bar is needed -- so with the policy
+    at AsNeeded, a bar left up by the previous arrangement (a cascade, say,
+    which deliberately overflows) shrinks the viewport that the next tile
+    measures, and the tile then removes the very bar it made room for.  The
+    rows come out one scroll bar extent short and a strip of dead background is
+    left along the edge.  Pinning them off makes the measured domain the one
+    the arrangement actually lands in; restoring the policy afterwards lets
+    AsNeeded recompute against the finished layout, so a cascade still gets its
+    bars back.
     """
     self.setUpdatesEnabled(False)
+    hpol = self._mdi.horizontalScrollBarPolicy()
+    vpol = self._mdi.verticalScrollBarPolicy()
+    off = Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    self._mdi.setHorizontalScrollBarPolicy(off)
+    self._mdi.setVerticalScrollBarPolicy(off)
     try:
       yield
     finally:
+      self._mdi.setHorizontalScrollBarPolicy(hpol)
+      self._mdi.setVerticalScrollBarPolicy(vpol)
       self.setUpdatesEnabled(True)
 
   def tileSubWindows(self):

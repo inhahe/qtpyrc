@@ -3,8 +3,237 @@
 import traceback
 
 import state
-from config import (get_ignores, get_auto_ops,
-                    _modify_list_entry, _match_any)
+from config import (_modify_list_entry, split_mask, expand_mask,
+                    list_all_entries, remove_entry_everywhere, scope_label,
+                    LIST_ADDED, LIST_ALREADY, LIST_REMOVED, LIST_NOT_FOUND,
+                    LIST_NO_NETWORK)
+
+
+def _parse_list_flags(text, known):
+  """Split *text* into `(flags, positional)`.
+
+  Raises `ValueError(token)` if a `-`-prefixed token is not made up entirely of
+  known flag letters.  `--` ends the flags; everything after it is positional,
+  which is how a value that really does begin with `-` is passed.
+
+  **An unrecognised flag is an error, never a value.** The parser this replaces
+  kept any `-x` whose letters were not all alphabetic as a *positional*
+  argument, so `/aop -?` -- someone looking for a usage line -- was read as
+  "add an auto-op entry for the mask `-?`", written to the config, and answered
+  with `[Added auto-op (network undernet): -?]`. It is still in the config that
+  prompted this fix. Because `?` is a wildcard, that entry then auto-opped
+  every two-character nick beginning with `-`.
+  """
+  flags = set()
+  positional = []
+  end_of_flags = False
+  for a in text.split():
+    if end_of_flags or not a.startswith('-') or a == '-':
+      positional.append(a)
+      continue
+    if a == '--':
+      end_of_flags = True
+      continue
+    body = a[1:]
+    if [c for c in body if c not in known]:
+      raise ValueError(a)
+    flags.update(body)
+  return flags, positional
+
+
+def _breadth_warning(mask, cmd):
+  """What does *mask* actually grant, if that is broader than it looks? Or None.
+
+  Used only where the list confers a *privilege* -- i.e. `/aop` -- because
+  there the gap between what a mask appears to say and what it matches is the
+  difference between naming one person and naming a set you did not choose.
+  Two gaps are worth naming, and they want different advice:
+
+  - **Every component pure `*`.** `*!*@*` ops the entire channel.  Deliberately
+    not triggered by a mask that is merely broad in the *host*: `bob!*@*` is
+    the ordinary way to write "bob, wherever he connects from", and a warning
+    that fires on the ordinary case stops being read.
+  - **No host component at all** (`hegemon`, `bob*`).  A nick is not an
+    identity: it is released on quit, is free for the taking during a
+    netsplit, and belongs to whoever grabs it first if it is not registered.
+    So a nick-only auto-op means "op whoever holds this name", which is not
+    what it looks like it means -- the user who prompted this fix read exactly
+    such an entry as "hegemon, from hegemon's host".
+  """
+  def anything(part):
+    return part != '' and set(part) <= set('*')
+  nick, ident, host = split_mask(mask)
+  everyone = ('%s matches EVERY user. Every person who joins will be opped. '
+              'Remove it with: /%s -r %s' % (mask, cmd, mask))
+  if nick is None:
+    if anything(mask):
+      return everyone
+    return ('%s is a nick with no host, so it ops whoever holds the nick "%s" '
+            'from ANY host -- including someone who takes it during a netsplit '
+            'or after a quit. Anchor it to a host: /%s %s!*@<host>'
+            % (mask, mask, cmd, mask))
+  if anything(nick) and anything(ident) and anything(host):
+    return everyone
+  return None
+
+
+def _show_all_entries(window, list_key, title, annotate=None, expand=True):
+  """Print every entry for *list_key* at every scope, labelled with its scope.
+
+  **Deliberately ignores the current window, and has no narrowing flag.** The
+  list this replaces called `get_auto_ops(network_key, channel)` -- the same
+  context-sensitive collector the auto-op *check* uses -- and additionally
+  honoured `-w`, which does not mean "all networks" but "the global scope
+  only". So `/aop -lw`, the natural way to spell "show me everything", answered
+  "[Auto-op list is empty]" from *every* window, including the channel window
+  of the channel whose three live entries were opping people. A list you cannot
+  trust to be complete is worse than no list, because it is used to conclude
+  that something is *not* configured.
+
+  Every list command in this file goes through here, `/notify` included, so
+  that the fix cannot be half-applied -- `/notify -l` had exactly the `-w` bug
+  above, still live, after `/aop -l` was fixed.
+
+  `annotate(network_key, channel, entry)` adds trailing text per entry (used
+  for `/notify`'s online/offline state).  `expand=False` turns off the
+  `nick!ident@host` expansion note for lists whose entries are not masks.
+  """
+  entries = list_all_entries(list_key)
+  if not entries:
+    window.redmessage('[%s is empty (checked every network and channel)]' % title)
+    return
+  window.redmessage('[%s -- %d entr%s across all scopes:]'
+                    % (title, len(entries), 'y' if len(entries) == 1 else 'ies'))
+  width = max(len(scope_label(nk, ch)) for nk, ch, _ in entries)
+  mwidth = max(len(m) for _, _, m in entries)
+  for nk, ch, mask in entries:
+    note = ''
+    if expand:
+      full = expand_mask(mask)
+      if full != mask:
+        note = '  (matches %s)' % full
+    if annotate:
+      note += annotate(nk, ch, mask)
+    window.redmessage('[    %-*s  %-*s%s]'
+                      % (width, scope_label(nk, ch), mwidth if note else 0,
+                         mask, note))
+
+
+def _mask_list_command(window, text, list_key, title, noun, warn_broad=False):
+  """The shared body of /ignore and /aop.
+
+  Both manage a wildcard-mask list that exists at three scopes and is *read*
+  additively across all three, so both had the same three bugs: a list that
+  showed only the scopes visible from the current window, a remove aimed at one
+  guessed scope, and a success message printed without asking whether anything
+  had changed. Keeping one implementation is what stops them diverging again --
+  and `/aop` is the one where the consequence of a stale entry is someone else
+  holding operator status in your channel.
+  """
+  try:
+    flags, positional = _parse_list_flags(text, 'lrw')
+  except ValueError as e:
+    window.redmessage('[Unknown option %s. Options: -l list, -r remove, '
+                      '-w global. Use -- before a value starting with "-".]'
+                      % e.args[0])
+    return
+
+  # List mode: everything, everywhere.  There is no narrowing flag on purpose;
+  # the whole failure this replaces was a list that showed a subset.  `-w` used
+  # to narrow it to the global scope, which is how the reported "[Auto-op list
+  # is empty]" was produced while four entries were live -- so it is now
+  # inert here, and *says* it is inert.  Silently ignoring a flag the user
+  # typed would reproduce the original fault in the other direction: an answer
+  # given to a question other than the one asked, without saying so.
+  if 'l' in flags or not positional:
+    if 'w' in flags:
+      window.redmessage('[-w does not narrow the list; every scope is shown, '
+                        'each labelled with where it is configured]')
+    _show_all_entries(window, list_key, title)
+    return
+
+  mask = positional[0]
+  remove = 'r' in flags
+
+  # Explicit scope, if the user named one.
+  chan_arg = None
+  net_arg = None
+  for p in positional[1:]:
+    if p.startswith('#'):
+      chan_arg = p.split(',')[0]
+    elif state.config.networks and p in state.config.networks:
+      net_arg = p
+  explicit_scope = bool(chan_arg) or 'w' in flags or bool(net_arg)
+
+  if remove:
+    if not explicit_scope:
+      # No scope named: take it out of every scope it is in.  See
+      # config.remove_entry_everywhere for why that is the safe default.
+      hits = remove_entry_everywhere(list_key, mask)
+      if not hits:
+        window.redmessage('[No %s entry matching %s anywhere -- nothing removed]'
+                          % (noun, mask))
+        return
+      for nk, ch in hits:
+        window.redmessage('[Removed %s (%s): %s]'
+                          % (noun, scope_label(nk, ch), mask))
+      return
+    nk = None if 'w' in flags else (net_arg or _net_key(window))
+    ch = None if 'w' in flags else chan_arg
+    res = _modify_list_entry(list_key, mask, True, nk, ch)
+    if res == LIST_REMOVED:
+      window.redmessage('[Removed %s (%s): %s]'
+                        % (noun, scope_label(nk, ch), mask))
+    else:
+      window.redmessage('[No %s entry %s at %s -- nothing removed]'
+                        % (noun, mask, scope_label(nk, ch)))
+    # Whatever happened, say where else it still lives: a remove that leaves a
+    # live copy behind is the exact failure this command is being fixed for.
+    left = [(n, c) for n, c, m in list_all_entries(list_key)
+            if m.lower() == mask.lower()]
+    for n, c in left:
+      window.redmessage('[  still %s at %s -- remove it with: /%s -r %s]'
+                        % (noun, scope_label(n, c), _cmd_for(list_key), mask))
+    return
+
+  # Add.
+  if 'w' in flags:
+    nk = ch = None
+  else:
+    nk = net_arg or _net_key(window)
+    ch = chan_arg or (window.channel.name if window.type == 'channel' else None)
+
+  res = _modify_list_entry(list_key, mask, False, nk, ch)
+  if res == LIST_NO_NETWORK:
+    window.redmessage('[Cannot add %s: network %r is not in the config. '
+                      'Use -w to add it globally.]' % (noun, nk))
+    return
+  if res == LIST_ALREADY:
+    window.redmessage('[%s already listed at %s: %s]'
+                      % (noun.capitalize(), scope_label(nk, ch), mask))
+  else:
+    window.redmessage('[Added %s (%s): %s]' % (noun, scope_label(nk, ch), mask))
+  # Echo the expansion whenever it differs from what was typed.  `-l` shows it
+  # too, but the moment a user forms their idea of what an entry means is the
+  # moment they add it, and a two-component mask is genuinely ambiguous on
+  # sight: `hegemon@host` is read as *nick*@host, while the same text in a
+  # /whois line means *ident*@host.  Saying "matches hegemon!*@host" answers
+  # which of the two it was without the user having to go and ask.
+  full = expand_mask(mask)
+  if full != mask:
+    window.redmessage('[  matches %s]' % full)
+  if warn_broad:
+    warning = _breadth_warning(mask, _cmd_for(list_key))
+    if warning:
+      window.redmessage('[WARNING: %s]' % warning)
+
+
+def _cmd_for(list_key):
+  return {'auto_ops': 'aop', 'ignores': 'ignore'}.get(list_key, list_key)
+
+
+def _net_key(window):
+  return window.client.network_key if window.client else None
 
 
 class Commands:
@@ -95,49 +324,16 @@ class Commands:
     # named arguments.
     if window.type == "server":
       window.redmessage("[Error: Can't talk in a server window]")
-    elif window.type == "channel":
-      conn = window.client.conn
-      target = window.channel.name
-      pnick = conn._pnick(conn.nickname, target)
-      pfx = conn._nick_prefix(conn.nickname, target)
-      chnlower = conn.irclower(target)
-      chunks = conn.split_message(target, text)
-      for chunk in chunks:
-        conn.say(target, chunk)
-        # Mark for dedup so the bouncer echo doesn't double-display/save
-        conn._own_messages.append((chnlower, chunk))
-        window.addline_msg(pnick, chunk)
-        state.irclogger.log_channel(conn._log_network, target,
-                              "<%s> %s" % (conn.nickname, chunk))
-        if state.historydb:
-          state.historydb.add(conn._log_network, target.lower(),
-                              'message', conn.nickname, chunk, prefix=pfx)
-      from link_preview import check_and_preview
-      check_and_preview(window, text)
-      # Dispatch to plugin chanmsg hooks for own messages
-      from plugins import _dispatch_to_plugins
-      user = '%s!%s@%s' % (conn.nickname, conn.username or '', '')
-      _dispatch_to_plugins('chanmsg', conn, (user, target, text), {})
-    elif window.type == "query":
+    elif window.type in ("channel", "query"):
       conn = window.client.conn if window.client else None
       if not conn:
         window.redmessage('[Not connected]')
         return
-      target = window.remotenick
-      chunks = conn.split_message(target, text)
-      for chunk in chunks:
-        conn.msg(target, chunk)
-        conn._msg_windows[conn.irclower(target)] = window
-        window.addline_msg(conn.nickname, chunk)
-        state.irclogger.log(conn._log_network, target,
-                            "<%s> %s" % (conn.nickname, chunk))
-        if state.historydb and window.query:
-          from irc_client import _query_history_key
-          state.historydb.add(conn._log_network,
-                              _query_history_key(window.query.nick, window.query.ident),
-                              'message', conn.nickname, chunk)
-      from link_preview import check_and_preview
-      check_and_preview(window, text)
+      target = window.channel.name if window.type == "channel" else window.remotenick
+      # display_window is this window explicitly: the user typed here, so the
+      # echo belongs here even in the odd case where the target resolves to some
+      # other window.
+      send_message(window, conn, target, text, display_window=window)
 
   def amsg(window, text):
     """Send a message to all open channels on the current network."""
@@ -149,18 +345,8 @@ class Commands:
     if not text:
       window.redmessage('[Usage: /amsg <message>]')
       return
-    for chan in window.client.channels.values():
-      pnick = conn._pnick(conn.nickname, chan.name)
-      pfx = conn._nick_prefix(conn.nickname, chan.name)
-      chunks = conn.split_message(chan.name, text)
-      for chunk in chunks:
-        conn.say(chan.name, chunk)
-        chan.window.addline_msg(pnick, chunk)
-        state.irclogger.log_channel(conn._log_network, chan.name,
-                              "<%s> %s" % (conn.nickname, chunk))
-        if state.historydb:
-          state.historydb.add(conn._log_network, chan.name.lower(),
-                              'message', conn.nickname, chunk, prefix=pfx)
+    for chan in list(window.client.channels.values()):
+      send_message(window, conn, chan.name, text, display_window=chan.window)
 
   def msg(window, text):
     parts = text.split(" ", 1)
@@ -174,15 +360,7 @@ class Commands:
     if not conn:
       window.redmessage('[Not connected]')
       return
-    conn._msg_windows[conn.irclower(recip)] = window
-    _, existing = _find_query(window.client, recip)
-    chunks = conn.split_message(recip, text)
-    for chunk in chunks:
-      conn.msg(recip, chunk)
-      if existing and existing.window:
-        existing.window.addline_msg(conn.nickname, chunk)
-      else:
-        window.redmessage('[-> %s] %s' % (recip, chunk))
+    send_message(window, conn, recip, text)
 
   def me(window, text):
     """/me <action> — send a CTCP ACTION to the current channel or query."""
@@ -203,7 +381,7 @@ class Commands:
       chunks = conn.split_message(target, text, extra_overhead=9)
       for chunk in chunks:
         conn.me(target, chunk)
-        conn._own_actions.append((chnlower, chunk))
+        conn._own_actions.record(chnlower, chunk)
         window.addline_nick(["* ", (pnick,), " %s" % chunk], state.actionformat)
         state.irclogger.log_channel(conn._log_network, target,
                               "* %s %s" % (conn.nickname, chunk))
@@ -239,10 +417,19 @@ class Commands:
     if not conn:
       window.redmessage('[Not connected]')
       return
+    from irc_client import notice_log_line
     chunks = conn.split_message(target, msg_text)
     for chunk in chunks:
       conn.notice(target, chunk)
       window.addline_nick(["-", (conn.nickname,), "- %s" % chunk], state.noticeformat)
+      # Logged under *target*, which is the same file the reply will land in
+      # (irc_client.noticed files an incoming notice under its sender).  Both
+      # directions of one notice conversation therefore end up in one file, in
+      # order -- the thing the /msg bug got wrong.  Note this is deliberately
+      # NOT the window the line was drawn in: /notice echoes into whatever
+      # window you typed it in, which is not a stable place to file anything.
+      state.irclogger.log(conn._log_network, target,
+                          notice_log_line(conn.nickname, chunk))
 
   def quit(window, text):
     conn = window.client.conn
@@ -621,82 +808,33 @@ class Commands:
 
   def ignore(window, text):
     """Toggle or list ignores.  /ignore [-lrw] [mask] [#channel] [network]
-    -l list  -r remove  -w top-level (any network)
-    Without flags, adds to the current network level (or channel if in one)."""
-    args = text.split()
-    flags = set()
-    positional = []
-    for a in args:
-      if a.startswith('-') and len(a) > 1 and a[1:].isalpha():
-        flags.update(a[1:])
-      else:
-        positional.append(a)
-
-    # List mode
-    if 'l' in flags or not positional:
-      nk = None if 'w' in flags else window.client.network_key
-      ch = None
-      if positional and positional[0].startswith('#'):
-        ch = positional[0]
-      elif window.type == "channel":
-        ch = window.channel.name
-      items = get_ignores(nk, ch)
-      if items:
-        window.redmessage("[Ignore list: %s]" % ', '.join(items))
-      else:
-        window.redmessage("[Ignore list is empty]")
-      return
-
-    mask = positional[0]
-    remove = 'r' in flags
-
-    # Determine level
-    if 'w' in flags:
-      nk = ch = None
-    else:
-      nk = window.client.network_key
-      ch_arg = positional[1] if len(positional) > 1 and positional[1].startswith('#') else None
-      if ch_arg:
-        ch = ch_arg
-      elif window.type == "channel":
-        ch = window.channel.name
-      else:
-        ch = None
-
-    _modify_list_entry('ignores', mask, remove, nk, ch)
-    if remove:
-      window.redmessage("[Removed ignore: %s]" % mask)
-    else:
-      window.redmessage("[Added ignore: %s]" % mask)
+    -l list (every scope)  -r remove  -w global (any network)
+    Without flags, adds to the current channel if in one, else the network.
+    -r with no scope removes the mask from every scope it is in."""
+    _mask_list_command(window, text, 'ignores', 'Ignore list', 'ignore')
 
   def highlight(window, text):
     """Manage highlight patterns.  /highlight [-lrw] [pattern]
     -l list  -r remove  -w top-level (any network)
     Without flags, adds to the current network (or channel if in one).
     Plain strings are case-insensitive. Use /regex/ or /regex/i for regex."""
-    from config import get_highlights, modify_highlight_entry
-    args = text.split()
-    flags = set()
-    positional = []
-    for a in args:
-      if a.startswith('-') and len(a) > 1 and a[1:].isalpha():
-        flags.update(a[1:])
-      else:
-        positional.append(a)
+    from config import modify_highlight_entry
+    try:
+      flags, positional = _parse_list_flags(text, 'lrw')
+    except ValueError as e:
+      window.redmessage('[Unknown option %s. Options: -l list, -r remove, '
+                        '-w global. Use -- before a pattern starting with "-".]'
+                        % e.args[0])
+      return
 
-    # List mode
+    # List mode: every scope, for the same reason /aop -l does.  expand=False
+    # because a highlight is a substring or a /regex/, not a hostmask -- one
+    # containing '@' must not be reported as matching some `nick!ident@host`.
     if 'l' in flags or not positional:
-      nk = None if 'w' in flags else (window.client.network_key if window.client else None)
-      ch = None
-      if positional and positional[0].startswith('#'):
-        ch = positional[0]
-      elif window.type == "channel":
-        ch = window.channel.name
-      items = get_highlights(nk, ch)
-      if items:
-        window.redmessage("[Highlights: %s]" % ', '.join(items))
-      else:
-        window.redmessage("[Highlight list is empty]")
+      if 'w' in flags:
+        window.redmessage('[-w does not narrow the list; every scope is shown, '
+                          'each labelled with where it is configured]')
+      _show_all_entries(window, 'highlights', 'Highlights', expand=False)
       return
 
     # The pattern may contain spaces (e.g. /multi word regex/)
@@ -704,69 +842,113 @@ class Commands:
     pattern = ' '.join(positional)
     remove = 'r' in flags
 
+    if remove:
+      hits = remove_entry_everywhere('highlights', pattern)
+      if not hits:
+        window.redmessage('[No highlight matching %s anywhere -- nothing '
+                          'removed]' % pattern)
+        return
+      for nk, ch in hits:
+        window.redmessage('[Removed highlight (%s): %s]'
+                          % (scope_label(nk, ch), pattern))
+      return
+
     if 'w' in flags:
       nk = ch = None
     else:
-      nk = window.client.network_key if window.client else None
+      nk = _net_key(window)
       ch = window.channel.name if window.type == "channel" else None
 
-    modify_highlight_entry(pattern, remove, nk, ch)
-    if remove:
-      window.redmessage("[Removed highlight: %s]" % pattern)
+    res = modify_highlight_entry(pattern, remove, nk, ch)
+    if res == LIST_NO_NETWORK:
+      window.redmessage('[Cannot add highlight: network %r is not in the '
+                        'config. Use -w to add it globally.]' % nk)
+    elif res == LIST_ALREADY:
+      window.redmessage('[Highlight already listed at %s: %s]'
+                        % (scope_label(nk, ch), pattern))
     else:
-      window.redmessage("[Added highlight: %s]" % pattern)
+      window.redmessage('[Added highlight (%s): %s]'
+                        % (scope_label(nk, ch), pattern))
 
   def notify(window, text):
     """Manage the nick watch list.  /notify [-lrw] [nick]
     -l list  -r remove  -w global (any network)
     Without flags, adds nick to the current network's notify list."""
-    from config import get_notify_list, modify_notify_entry
-    args = text.split()
-    flags = set()
-    positional = []
-    for a in args:
-      if a.startswith('-') and len(a) > 1 and a[1:].isalpha():
-        flags.update(a[1:])
-      else:
-        positional.append(a)
+    from config import modify_notify_entry
+    try:
+      flags, positional = _parse_list_flags(text, 'lrw')
+    except ValueError as e:
+      window.redmessage('[Unknown option %s. Options: -l list, -r remove, '
+                        '-w global.]' % e.args[0])
+      return
 
-    nk = None if 'w' in flags else (window.client.network_key if window.client else None)
+    nk = None if 'w' in flags else _net_key(window)
 
-    # List mode
+    # List mode: every scope, for the same reason /aop -l does.  This used to
+    # be `get_notify_list(nk)` with `nk = None` for -w, so `/notify -lw` showed
+    # only the (usually empty) global list -- the identical bug to the one
+    # `/aop -l` was fixed for, still live afterwards because the two commands
+    # listed separately.  Hence: one lister, no exceptions.
     if 'l' in flags or not positional:
-      nicks = get_notify_list(nk)
-      if not nicks:
-        window.redmessage("[Notify list is empty]")
-        return
-      if state.notifications:
-        online_state = state.notifications.get_state(nk) if nk else {}
-        parts = []
-        for n in nicks:
-          s = online_state.get(n.lower())
-          if s is True:
-            parts.append('%s (online)' % n)
-          elif s is False:
-            parts.append('%s (offline)' % n)
-          else:
-            parts.append(n)
-        window.redmessage("[Notify list: %s]" % ', '.join(parts))
-      else:
-        window.redmessage("[Notify list: %s]" % ', '.join(nicks))
+      if 'w' in flags:
+        window.redmessage('[-w does not narrow the list; every scope is shown, '
+                          'each labelled with where it is configured]')
+
+      def status(entry_nk, _ch, nick):
+        if not state.notifications:
+          return ''
+        s = state.notifications.get_state(entry_nk).get(nick.lower()) \
+            if entry_nk else None
+        return '  (online)' if s is True else '  (offline)' if s is False else ''
+
+      _show_all_entries(window, 'notify', 'Notify list',
+                        annotate=status, expand=False)
       return
 
     nick = positional[0]
     remove = 'r' in flags
-    modify_notify_entry(nick, remove, network_key=nk)
-    if state.notifications:
+
+    def resync():
+      if not state.notifications:
+        return
       conn = window.client.conn if window.client else None
       state.notifications.sync_list(nk, conn)
       # Trigger immediate ISON check for non-MONITOR servers
       if not remove and conn and not getattr(conn, '_monitor_supported', False):
         state.notifications._poll_ison()
-    if remove:
-      window.redmessage("[Removed from notify: %s]" % nick)
+
+    # An unscoped remove takes the nick out of every scope, as /aop -r and
+    # /highlight -r do: removing from one guessed scope leaves a live copy
+    # behind and reports success, which is the failure all of these share.
+    if remove and 'w' not in flags:
+      hits = remove_entry_everywhere('notify', nick)
+      resync()
+      if not hits:
+        window.redmessage('[%s is not on the notify list anywhere -- nothing '
+                          'removed]' % nick)
+        return
+      for hnk, hch in hits:
+        window.redmessage('[Removed from notify (%s): %s]'
+                          % (scope_label(hnk, hch), nick))
+      return
+
+    res = modify_notify_entry(nick, remove, network_key=nk)
+    resync()
+    if res == LIST_NO_NETWORK:
+      window.redmessage("[Cannot change notify: network %r is not in the "
+                        "config. Use -w for the global list.]" % nk)
+    elif res == LIST_NOT_FOUND:
+      window.redmessage("[%s is not on the notify list (%s) -- nothing removed]"
+                        % (nick, scope_label(nk, None)))
+    elif res == LIST_ALREADY:
+      window.redmessage("[%s is already on the notify list (%s)]"
+                        % (nick, scope_label(nk, None)))
+    elif res == LIST_REMOVED:
+      window.redmessage("[Removed from notify (%s): %s]"
+                        % (scope_label(nk, None), nick))
     else:
-      window.redmessage("[Added to notify: %s]" % nick)
+      window.redmessage("[Added to notify (%s): %s]"
+                        % (scope_label(nk, None), nick))
 
   def kick(window, text):
     if window.type != "channel":
@@ -960,83 +1142,19 @@ class Commands:
   def aop(window, text):
     """/aop [-lrw] <nick|mask> [#chan1,#chan2,...] [network]
     Auto-op users matching a nick or hostmask when they join.
-    -l list  -r remove  -w global (all networks)
+    -l list (every scope)  -r remove  -w global (all networks)
     With no channel given in a channel window, the current channel is used.
-    (Legacy: `on`/`off` and a trailing `type` arg are accepted but ignored.)"""
-    args = text.split()
-    flags = set()
-    positional = []
-    for a in args:
-      if a.startswith('-') and len(a) > 1 and a[1:].isalpha():
-        flags.update(a[1:])
-      else:
-        positional.append(a)
-
-    # List mode
-    if 'l' in flags or not positional:
-      nk = None if 'w' in flags else window.client.network_key
-      ch = None
-      if positional and positional[0].startswith('#'):
-        ch = positional[0].split(',')[0]
-      elif window.type == "channel":
-        ch = window.channel.name
-      items = get_auto_ops(nk, ch)
-      if items:
-        window.redmessage("[Auto-op list: %s]" % ', '.join(items))
-      else:
-        window.redmessage("[Auto-op list is empty]")
-      return
-
-    action = positional[0]
-
-    # on/off — enable/disable auto-op globally (just informational)
-    if action.lower() == 'on':
+    -r with no scope removes the mask from every scope it is in.
+    (Legacy: `on`/`off` are accepted and just print an explanation.)"""
+    action = text.split()[0].lower() if text.split() else ''
+    if action == 'on':
       window.redmessage("[Auto-op is always active when entries exist]")
       return
-    if action.lower() == 'off':
+    if action == 'off':
       window.redmessage("[Remove entries with -r to disable auto-op for specific masks]")
       return
-
-    mask = action
-    remove = 'r' in flags
-
-    # Parse optional channels and network
-    channels = []
-    network_override = None
-    for p in positional[1:]:
-      if p.startswith('#'):
-        channels.extend(p.split(','))
-      elif not network_override:
-        # Could be "type" (ignored for compat) or network key
-        # If it matches a known network key, use it
-        if state.config.networks and p in state.config.networks:
-          network_override = p
-
-    if 'w' in flags:
-      # Top-level — applies to any network
-      _modify_list_entry('auto_ops', mask, remove)
-      label = "Removed" if remove else "Added"
-      window.redmessage("[%s auto-op (global): %s]" % (label, mask))
-      return
-
-    nk = network_override or window.client.network_key
-
-    if not channels:
-      if window.type == "channel":
-        channels = [window.channel.name]
-
-    if channels:
-      for ch in channels:
-        ch = ch.strip()
-        if ch:
-          _modify_list_entry('auto_ops', mask, remove, nk, ch)
-      label = "Removed" if remove else "Added"
-      window.redmessage("[%s auto-op on %s: %s]" % (label, ','.join(channels), mask))
-    else:
-      # Network level
-      _modify_list_entry('auto_ops', mask, remove, nk)
-      label = "Removed" if remove else "Added"
-      window.redmessage("[%s auto-op (network %s): %s]" % (label, nk or '?', mask))
+    _mask_list_command(window, text, 'auto_ops', 'Auto-op list', 'auto-op',
+                       warn_broad=True)
 
   # --- /exec: evaluate arbitrary Python ---
   def exec_(window, text):
@@ -1503,12 +1621,11 @@ class Commands:
     if not no_activate:
       ws = state.app.mainwin.workspace
       ws.setActiveSubWindow(qwin.subwindow)
-    # Send a message if provided
+    # Send a message if provided.  qwin is passed explicitly because it was
+    # just created if it did not exist -- send_message's own lookup would find
+    # it anyway, but saying so here keeps the two independent of each other.
     if len(parts) > 1:
-      msg = _unquote(parts[1])
-      conn.msg(nick, msg)
-      conn._msg_windows[conn.irclower(nick)] = qwin
-      qwin.addline_msg(conn.nickname, msg)
+      send_message(window, conn, nick, _unquote(parts[1]), display_window=qwin)
 
   def log(window, text):
     """Write a line to the log file for a window.  /log [-w target] "text" """
@@ -2606,6 +2723,117 @@ def _show_event_help(window, ref, event_name, re):
   if var_m:
     window.addline('  variables: %s' % var_m.group(1).strip())
   window.addline('  (all events also have {network} and {me})')
+
+
+def send_message(window, conn, target, text, display_window=None):
+  """Send *text* to *target*, and do everything else that goes with sending it.
+
+  **Every path that sends a PRIVMSG on the user's behalf must call this.**
+  There used to be five, and they had drifted into five different answers about
+  what sending a message means:
+
+    * `say`'s channel branch (typing in a channel window) chunked the text,
+      recorded it for self-echo suppression, displayed it with the mode prefix,
+      logged it, saved it with that prefix, previewed links in it and dispatched
+      it to plugin `chanmsg` hooks.
+    * `say`'s query branch did all of that bar the self-echo record and the
+      plugin dispatch, neither of which applies to a PM.
+    * `/msg` sent it and displayed it. No log line, no history row -- so a
+      conversation held partly in a query window and partly through `/msg` came
+      back after a reload with the `/msg` half missing. That is the bug this
+      consolidation was written for. It also routed a channel target down the
+      query path, so `/msg #chan hi` would have been logged as a PM and saved
+      under `=#chan`, a key no window ever reads.
+    * `/query <nick> <message>` did the same as `/msg`, and additionally never
+      split long messages, so anything over the 512-byte line limit was silently
+      truncated by the server.
+    * `/amsg` chunked, displayed, logged and saved per channel, but recorded
+      nothing for self-echo suppression -- so on a bouncer that echoes, every
+      `/amsg` line came back and was drawn and stored a second time in every
+      channel -- and previewed no links and dispatched to no plugin.
+
+  None of those differences was intended; they are just what happens when one
+  operation is written five times. Link previews show the shape of it: they were
+  added to `say` and to nothing else, so a URL sent by `/msg` or `/amsg` was the
+  only URL qtpyrc declined to preview.
+
+  Which of the two shapes a target has is decided by `conn.is_channel()`, i.e.
+  by ISUPPORT CHANTYPES, and never by testing for a leading '#'.
+
+  The PM path deliberately does *not* record the message with
+  `conn._own_messages`. That is correct only as long as an echoed PM never
+  reaches a window -- see the "PMs sent from another client attached to the same
+  bouncer" entry in `known-issues.md`. Whoever fixes that routing adds the
+  `record()` here, in the same change, or turns a missing message into a doubled
+  one.
+
+  *display_window* is where the message is echoed to the user. When it is None
+  the window for *target* is used if one is open -- the channel's window, or the
+  query window for the nick -- and otherwise the line goes to *window* as
+  `[-> target] text`, which is what `/msg` to a nick with no open window has
+  always done.
+  """
+  is_chan = conn.is_channel(target)
+  tlower = conn.irclower(target)
+
+  if display_window is None:
+    if is_chan:
+      chan = window.client.channels.get(tlower) if window.client else None
+      display_window = chan.window if (chan and chan.window) else None
+    else:
+      _, q = _find_query(window.client, target)
+      display_window = q.window if (q and q.window) else None
+
+  if is_chan:
+    # The displayed nick carries the mode prefix; the stored one is the prefix
+    # on its own, in the history row's `prefix` column, so a replay can
+    # reconstruct it without consulting live state that may have changed since.
+    shown_nick = conn._pnick(conn.nickname, target)
+    prefix = conn._nick_prefix(conn.nickname, target)
+    hist_key = target.lower()
+  else:
+    shown_nick = conn.nickname
+    prefix = None
+    # Keyed on the nick alone -- _query_history_key ignores the ident it is
+    # handed -- so a PM sent to someone with no open query window, and therefore
+    # no known ident, still lands under the key the window will read when it is
+    # next opened.  This is what makes the /msg half of a conversation show up
+    # in the replay.
+    from irc_client import _query_history_key
+    hist_key = _query_history_key(target)
+
+  for chunk in conn.split_message(target, text):
+    conn.msg(target, chunk)
+    if is_chan:
+      # Mark for dedup so a bouncer echo doesn't double-display/save it.
+      conn._own_messages.record(tlower, chunk)
+    # Route any error about this target (ERR_NOSUCHNICK, ERR_CANNOTSENDTOCHAN)
+    # back to whoever is showing the message.
+    conn._msg_windows[tlower] = display_window or window
+    if display_window:
+      display_window.addline_msg(shown_nick, chunk)
+    else:
+      window.redmessage('[-> %s] %s' % (target, chunk))
+    if is_chan:
+      state.irclogger.log_channel(conn._log_network, target,
+                                  "<%s> %s" % (conn.nickname, chunk))
+    else:
+      state.irclogger.log(conn._log_network, target,
+                          "<%s> %s" % (conn.nickname, chunk))
+    if state.historydb:
+      state.historydb.add(conn._log_network, hist_key,
+                          'message', conn.nickname, chunk, prefix=prefix)
+
+  from link_preview import check_and_preview
+  check_and_preview(display_window or window, text)
+
+  if is_chan:
+    # Plugins see our own channel messages the same way they see everyone
+    # else's.  Once per message, not once per chunk: a plugin reacting to what
+    # was said should see what was said, not how the protocol had to break it up.
+    from plugins import _dispatch_to_plugins
+    user = '%s!%s@%s' % (conn.nickname, conn.username or '', '')
+    _dispatch_to_plugins('chanmsg', conn, (user, target, text), {})
 
 
 def _find_query(client, nick):

@@ -52,6 +52,25 @@ python qtpyrc.py --ui menu.tools.colorpicker     # launch app and open color pic
 python qtpyrc.py --ui-list                        # print all /ui paths and exit
 ```
 
+### Startup command scripts
+
+Four things can ask for a command script to run at startup, and they run in this
+order:
+
+1. `--startup FILE`, or failing that the file named by `scripts.startup` in the
+   config — unless `--no-startup` is given.
+2. Everything matched by `scripts.auto_load`, minus anything matching a
+   `--no-scripts` pattern.
+3. Everything matched by `--run`.
+
+**A given file runs at most once per startup, however many of them name it.**
+Pointing `scripts.startup` at `startup.rc` *and* listing `startup.rc` in
+`scripts.auto_load` is a normal thing to write and runs the script once, not
+twice. The check is on the file the name resolves to, so the same file named as
+`startup`, as `startup.rc` and by an absolute path is still recognised as one
+file. The first request to name a file is the one that runs it, so the ordering
+above decides where in the sequence it happens.
+
 ## Slash Commands
 
 All commands are prefixed with the configured command prefix (default `/`).
@@ -88,6 +107,33 @@ Parameters that accept arbitrary text (messages, reasons, titles) must be quoted
 | `/invite` | `/invite <nick> [#channel]` | Invite a user to a channel (defaults to current) |
 | `/raw` | `/raw <line>` | Send a raw IRC command to the server |
 | `/openurl` | `/openurl <url>` | Open a URL in the system browser |
+
+**Sending a message does the same thing whichever command sends it.** `/msg`,
+`/query <nick> <message>`, `/say`, `/amsg` and simply typing in a window all
+write the same log line, save the same history row, split messages longer than
+the protocol's 512-byte line limit into as many messages as it takes, and
+generate link previews. Before 2026-08-31 they did not: `/msg` and `/query`
+wrote no log line and no history row, so the half of a conversation you held
+through `/msg` was missing when the query window was next opened; `/query
+<nick> <message>` did not split, so a long message was truncated by the server;
+and only text typed into a window generated a link preview.
+
+`/msg` accepts either a nick or a channel. A message to a channel is shown in
+that channel's window and recorded in the channel's log and history — the same
+as if you had typed it there — and one to a nick is shown in the query window if
+one is open, or as `[-> nick] message` in the current window if not.
+
+`/notice` is partly the exception. It **is** written to the log file — into the
+log of the target you sent it to, which is also where an incoming notice *from*
+that target is logged, so both halves of a notice conversation end up in one
+file. But it is still **shown in the window you typed it in** rather than the
+target's window, and it is **not saved to the history database**, so it does not
+come back when a window's backlog replays. See `known-issues.md`.
+
+Notices are logged as `-nick- message`, distinct from a message (`<nick> msg`)
+and an action (`* nick msg`). An incoming notice is filed under whoever sent it
+— the channel for a channel notice, the sender's nick for a private one, and the
+server log for a notice from the server itself, which has no user behind it.
 | `/clipboard` | `/clipboard <text>` | Copy text to the system clipboard |
 | `/quote` | `/quote <line>` | Alias for `/raw` |
 | `/echo` | `/echo [-w target] [-s] [-a] <text>` | Print text to current window, target (`-w`), server (`-s`), or active (`-a`) window |
@@ -150,13 +196,38 @@ Not all servers support all ELIST parameters. The `>N` filter is the most widely
 
 #### /ignore and /aop details
 
-Both commands take a **nick or a hostmask** as the target. A bare nick (e.g. `spammer`) matches that nickname exactly. If a bare nick contains `*` or `?` wildcards (e.g. `bob*`), it matches any nick fitting the pattern (`bob`, `bob123`, …). A hostmask matches `nick!ident@host` with `*` and `?` wildcards (e.g. `trusted!*@*.example.com`, `*!*@somehost`). `/aop` gives `+o` automatically to anyone matching an entry when they join a channel the entry applies to.
+Both commands take a **nick or a hostmask** as the target. `/aop` gives `+o` automatically to anyone matching an entry when they join a channel the entry applies to.
+
+**How a mask matches.** A hostmask is `nick!ident@host`, and `*` and `?` are the only wildcards (`?` = one character, `*` = any run of characters). Nothing else is special — brackets and braces are ordinary characters, so `bob[away]!*@*` means the nick `bob[away]` and nothing else.
+
+**Any component you leave out means "anything".** Write as much of the mask as you want to pin down and the rest is filled in with `*`:
+
+| You write | It means | It matches |
+|---|---|---|
+| `hegemon@lakitu.example.org` | `hegemon!*@lakitu.example.org` | that nick, from that host only |
+| `hegemon!~heg` | `hegemon!~heg@*` | that nick with that ident, from anywhere |
+| `@lakitu.example.org` | `*!*@lakitu.example.org` | **anyone** on that host |
+| `*@lakitu.example.org` | `*!*@lakitu.example.org` | **anyone** on that host |
+
+**`something@host` is read as *nick*@host, not *ident*@host.** This is the one
+place the short form is genuinely ambiguous on sight, because the same text in a
+`/whois` line (`hegemon is ~heg@lakitu.example.org`) is the *ident*. qtpyrc reads
+the part left of `@` as the nick, so `hegemon_@1.2.3.4` matches the nick
+`hegemon_` on that host **whatever its ident is**, and does *not* match someone
+whose ident happens to be `hegemon_`. That keeps the leftmost component meaning
+the same thing whether or not a `!` is present. To pin the ident, write it:
+`hegemon_!~heg@1.2.3.4`. Adding an entry echoes what it expands to, so you can
+see which reading you got at the moment you add it.
+
+**A bare nick is a different kind of entry, and it is much broader than it looks.** A nick with no `!` and no `@` (e.g. `spammer`) matches on nickname alone, from any host — exactly, or as a wildcard pattern if it contains `*` or `?` (`bob*` matches `bob`, `bob123`, …). Since a nick is released when its owner quits and is free for the taking during a netsplit, a bare-nick **auto-op** means "op whoever holds this name", so `/aop` warns when you add one and suggests anchoring it: `/aop hegemon!*@lakitu.example.org`. For `/ignore` a bare nick is perfectly ordinary and is not warned about.
 
 **Flags** (shared by `/ignore`, `/aop`, `/highlight` and `/notify`):
 
-- **`-l`** — List current entries (shows all scopes: global, network, channel). `/ignore -l`, `/aop -l`, etc. `-l` is also the default when you give no target.
-- **`-r`** — Remove an entry instead of adding it. E.g. `/aop -r trusted!*@*`.
-- **`-w`** — Operate at the global (top-level) scope, so the entry applies on every network. Without `-w`, entries are scoped to the current network.
+- **`-l`** — List current entries. **Always lists every entry at every scope — global, network and channel — regardless of which window you run it from and regardless of any other flag**, and labels each one with the scope it lives at. Where an entry's written form differs from what it actually matches, the expansion is shown beside it. `-l` is also the default when you give no target.
+- **`-r`** — Remove an entry instead of adding it. E.g. `/aop -r trusted!*@*`. See "Removing" below.
+- **`-w`** — Operate at the global (top-level) scope, so the entry applies on every network. Without `-w`, entries are scoped to the current network. **`-w` does not widen a listing** — it never did; it used to *narrow* `-l` to the global scope alone, which is how `/aop -lw` could report an empty list while entries were live. In list mode it now does nothing and says so.
+
+Anything else beginning with `-` is **rejected as an unknown option** rather than being taken as a mask. To pass a value that genuinely begins with `-`, put `--` before it: `/aop -- -weirdnick`.
 
 **Scopes** (broadest to narrowest):
 
@@ -164,7 +235,13 @@ Both commands take a **nick or a hostmask** as the target. A bare nick (e.g. `sp
 - **Network** (default) — applies on the current network. To target a different network, pass its network key as the last argument.
 - **Channel** — pass one or more channels (comma-separated, **no spaces**) to scope the entry to just those channels, e.g. `/aop trusted!*@* #chan1,#chan2`. If you give no channel while in a channel window, the current channel is used.
 
-Lists are **additive**: channel-level entries add to network-level, which add to global. A user matching at any level is ignored / auto-opped.
+Lists are **additive**: channel-level entries add to network-level, which add to global. A user matching at any level is ignored / auto-opped. This is why `-l` never narrows, by window or by flag — an entry at *any* scope can act, so a list that showed only some scopes could report "empty" while entries were live.
+
+**Removing.** `-r` with **no** scope given (no `-w`, no channel, no network key) removes the mask from **every** scope it appears at, and names each one it removed from. That is the safe default: leaving a copy behind at a scope you weren't looking at is how a stale auto-op entry keeps opping someone after you believe you've removed it.
+
+`-r` **with** an explicit scope touches only that scope — and then tells you every other scope where the mask is still live, with the command to remove it there. Either way, if nothing matched, it says `nothing removed` rather than reporting a success.
+
+Adding reports whether the entry was newly added or was already present at that scope. `/aop` additionally prints a **warning** when the mask is broader than it looks: if it would match every user (`*`, `*!*@*`, and the like), or if it is a bare nick with no host. An ordinary broad-in-the-host mask such as `bob!*@*` is not warned about.
 
 Examples:
 
@@ -172,12 +249,15 @@ Examples:
 /ignore spammer!*@*              Ignore on the current network
 /ignore -w spammer!*@*           Ignore globally (all networks)
 /ignore spammer #channel         Ignore only in #channel
-/ignore -r spammer               Remove ignore on the current network
-/ignore -l                       List all ignores
-/aop trusted                     Auto-op the nick "trusted" on this network
+/ignore -r spammer               Remove ignore from every scope it's in
+/ignore -w -r spammer            Remove only the global entry
+/ignore -l                       List all ignores, every scope
+/aop trusted!*@host.example      Auto-op that nick from that host only
+/aop trusted@host.example        The same thing -- the ident is filled in
+/aop trusted                     Auto-op WHOEVER holds the nick (warns)
 /aop trusted!*@* #chan1,#chan2   Auto-op a hostmask in specific channels
-/aop -r trusted!*@*              Remove an auto-op entry
-/aop -l                          List all auto-op entries
+/aop -r trusted!*@*              Remove an auto-op entry from every scope
+/aop -l                          List all auto-op entries, every scope
 ```
 
 ### Highlights
@@ -188,7 +268,7 @@ Examples:
 
 #### /highlight details
 
-**Flags:** same as `/ignore` — `-l` list, `-r` remove, `-w` global scope (no `-w` = current network).
+**Flags:** same as `/ignore` — `-l` list, `-r` remove, `-w` global scope (no `-w` = current network). `-l` lists every pattern at every scope, labelled, regardless of the window or any other flag (`-w` does not narrow it); `-r` without `-w` removes the pattern from every scope it appears at and names each; an unknown `-x` option is an error, and `--` ends the options.
 
 **Patterns:** plain strings are case-insensitive substring matches. Use `/regex/` for a regex with optional trailing flags: `i` (case-insensitive), `m` (multiline — `^`/`$` match line boundaries), `s` (dotall — `.` matches newlines). Example: `/regex/i`, `/regex/ims`. Use `{nick}` to refer to your current nickname (escaped properly inside the regex). The default config includes `{nick}`; removing it disables nick-mention highlighting. Unknown `{name}` references produce a one-time warning. Use `\{` and `\}` for literal braces, `\\` for a literal backslash (so a literal `\{` requires `\\{`). Regex quantifiers like `{3}` and `{1,5}` are unaffected.
 
@@ -204,9 +284,11 @@ Highlights are **additive** (global + network + channel). Set `highlights: false
 
 **Flags:**
 
-- **`-l`** — List notify nicks with their online/offline status.
-- **`-r`** — Remove a nick from the list.
-- **`-w`** — Operate on the global list instead of the current network's list.
+- **`-l`** — List notify nicks with their online/offline status. Lists every scope, labelled, regardless of the current window and of any other flag.
+- **`-r`** — Remove a nick from the list. Without `-w`, removes it from every scope it appears at and names each; reports `nothing removed` if it was nowhere.
+- **`-w`** — Operate on the global list instead of the current network's list. It does not narrow `-l`.
+
+An unknown `-x` option is rejected rather than treated as a nick; `--` ends the options.
 
 Nicks are checked via server-side MONITOR when supported (instant push notifications), falling back to periodic ISON polling. When a watched nick signs on or off, a notification is shown in the server window (and optionally a sound/desktop alert per config). Use `/on notify_online` and `/on notify_offline` for custom per-nick actions.
 
@@ -412,6 +494,15 @@ Examples:
 
 DCC supports both normal and reverse (passive) mode. When behind NAT, enable
 passive DCC in config or qtpyrc will automatically attempt UPnP port forwarding.
+
+`dcc.trusted_hosts` is a list of hostmasks whose transfers skip the get dialog —
+an entry there is a standing "yes" to a file from whoever matches it. The masks
+work exactly like `/ignore` and `/aop` masks (see
+"[/ignore and /aop details](#ignore-and-aop-details)"): `*` and `?` are the only
+wildcards, and a component you leave out means "anything", so
+`friend@trusted.host` is read as `friend!*@trusted.host`. Always name a host —
+a bare nick trusts *whoever* holds that nick, and a nick is released on quit and
+free for the taking during a netsplit.
 
 ---
 
@@ -1115,6 +1206,92 @@ Configured under `logging.hang_watchdog` (also in Settings → Logging):
 | `enabled` | `true` | Turn freeze detection on/off |
 | `threshold` | `2.0` | Seconds unresponsive before it counts as a freeze |
 | `file` | `hangs.log` | Report file, relative to the config file |
+| `native_stacks` | `true` | Use py-spy for the freezes Python can't explain (below) |
+
+### Freezes with no Python stack
+
+Most freezes turn out to have *no* Python frame below the event loop: the
+deepest frame is qasync's `run_forever()`, i.e. `QApplication::exec()`. That
+means Qt was busy inside its own C++ code and never called into qtpyrc at all,
+so there is no Python frame that could name the culprit and the report can only
+say "the interface is busy". 239 of the first 315 recorded freezes looked like
+that.
+
+For those — and only those — the watchdog runs
+[py-spy](https://github.com/benfred/py-spy) (`py-spy dump --native`) against
+qtpyrc's own process and records the **native** stack, which names the actual
+Qt/Windows call:
+
+```
+  (no Python frame below the event loop -- the GUI thread is inside Qt/Win32. Sampling native stack with py-spy...)
+  GUI thread native stack (py-spy, 1.42s -- this process was suspended for that long, so it is part of the stall above):
+  Thread 40368 (active)
+      NtGdiGetGlyphIndicesW (win32u.dll)
+      QWindowsFontDatabase::populateFamily (PySide6\Qt6Gui.dll)
+      ...
+```
+
+Install it with `pip install py-spy`; without it the report says so once and
+carries on as before. Reading a native stack suspends qtpyrc for a second or
+two, so the line says how long that took — that time is part of the freeze
+duration reported above it, not on top of it.
+
+## Duplicate-message detection (render audit)
+
+A chat line can reach the screen by several different routes: as it arrives,
+from the saved history that is replayed when a window opens, from the queue that
+holds live messages back while that replay is still running, and from the older
+history that loads when you scroll up. If two of those ever cover the same
+message, you see it twice.
+
+That kind of duplicate is invisible everywhere except on screen — only one of
+the two copies is a real incoming message, so the log files and the history
+database each contain exactly one. There is nothing to go on after the fact.
+
+The render audit fixes that. It watches every line drawn into a chat view, and
+when the same line is drawn into the same window twice within the look-back
+window it writes a report naming **where in qtpyrc each of the two copies came
+from**:
+
+```
+[2026-08-26 12:54:31.526] *** DUPLICATE RENDER #2 in #channel (Channelwindow) -- 0.312s apart ***
+  method: addline_msg
+  text:   'inhahe the message in question'
+  first  render (timestamp_override=None):
+      commands.py:109 say
+      commands.py:2954 docommand
+      window.py:1712 lineinput
+  second render (timestamp_override='11:02'):
+      irc_client.py:159 _render_history_row
+      irc_client.py:211 render_history_rows
+      qtpyrc.py:638 _bg_replay_loop
+```
+
+Read each stack top-down: the first line is the call that drew the text, and the
+ones below it say who asked for it. The pair above says the message was drawn
+once by the user typing it and once by the background history replay — which
+names the bug precisely.
+
+Two copies of a line are matched on their **text only**. The timestamp is
+ignored (the live copy is stamped from the server's time, the replayed copy from
+the stored row, which is often how you notice the duplicate in the first place),
+as are colours and the `@`/`+` mode prefix. A line that was merely *queued* by
+the hold-back mechanism is not counted, so an ordinary held-back message is
+never reported against its own flush.
+
+Reports go to `renders.log` next to your config file, and are echoed to the
+console. Configured under `logging.render_audit` (also in Settings → Logging):
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `enabled` | `true` | Turn duplicate detection on/off |
+| `window` | `120` | Seconds two identical lines may be apart and still count |
+| `file` | `renders.log` | Report file, relative to the config file |
+
+Raise `window` if you only notice doubles after scrolling back; lower it if
+ordinary repetition (the same join/part, the same short reply) is being
+reported. The cost is one dictionary lookup per line drawn, so leaving it on is
+cheap.
 
 ## Missing fonts
 

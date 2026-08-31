@@ -53,11 +53,18 @@ class IdentityPage(QWidget):
         self.auto_connect.setVisible(False)
 
     def load_from_data(self, data):
-        self.nick.setText(str(data.get('nick', '')))
+        # Show what is actually in effect, resolving exactly as config.py does
+        # (nick <- nickname <- 'qtpyrc_user'; user and realname <- nick). These
+        # boxes are written back verbatim on save, so displaying a blank where
+        # config.py would have supplied the nick did not merely mislead -- it
+        # wrote user: "" and realname: "" over that fallback, and a config with
+        # no explicit nick came back from the dialog with none at all.
+        nick = str(data.get('nick', data.get('nickname', 'qtpyrc_user')) or '')
+        self.nick.setText(nick)
         alts = data.get('alt_nicks') or []
         self.alt_nicks.setPlainText('\n'.join(str(a) for a in alts))
-        self.user.setText(str(data.get('user', '')))
-        self.realname.setText(str(data.get('realname', '')))
+        self.user.setText(str(data.get('user', nick) or ''))
+        self.realname.setText(str(data.get('realname', nick) or ''))
         self.realname.setCursorPosition(0)
         ctcp = data.get('ctcp') or {}
         self.ctcp_version.setText(str(ctcp.get('version', '')))
