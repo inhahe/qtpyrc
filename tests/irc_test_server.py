@@ -14,7 +14,13 @@ The control socket accepts one-line text commands:
   CHANMSG <nick> <channel> <text>     — channel message from <nick>
   PRIVMSG <nick> <text>               — private message from <nick>
   ACTION <nick> <channel> <text>      — CTCP ACTION (/me) in channel
-  NOTICE <nick> <channel> <text>      — NOTICE to channel
+  NOTICE <nick> <channel> <text>      — NOTICE to a channel or to the client
+  SERVERNOTICE <text>                 — NOTICE from the server itself (no
+                                        nick!ident@host prefix)
+  BATCH <ref> [type] [params]         — open a batch (default type
+                                        znc.in/playback); every line sent until
+                                        ENDBATCH is tagged as part of it
+  ENDBATCH [ref]                      — close the open batch
   JOIN <nick> <channel>               — <nick> joins channel
   PART <nick> <channel> [reason]      — <nick> parts channel
   QUIT <nick> [reason]                — <nick> quits
@@ -26,6 +32,12 @@ The control socket accepts one-line text commands:
   CTCPREPLY <nick> <tag> [data]       — CTCP reply from nick
   RAWCMD <prefix> <command> <params>  — raw unknown command
   NUMERIC <num> <params>              — raw numeric to client
+  RECEIVED [command]                  — every line the client has sent, " | "
+                                        separated; optionally only those with
+                                        the given first word (e.g. "JOIN")
+  REJECT <channel> [num] [text]       — refuse JOINs to <channel> with that
+                                        numeric (default 474, +b) instead of
+                                        letting the client in
   DISCONNECT                          — drop the client connection
   SHUTDOWN                            — stop the server
 """
@@ -37,6 +49,11 @@ import time
 SERVER_NAME = "test.irc.local"
 SERVER_VERSION = "qtpyrc-test-0.1"
 NETWORK_NAME = "TestNet"
+
+# Capabilities this server advertises in CAP LS and will ACK.  `batch` is the
+# one that matters: without it the client never enters a playback batch, and
+# everything qtpyrc suppresses during playback is unreachable from a test.
+OFFERED_CAPS = ("batch", "server-time")
 
 # Fake users in the test environment
 FAKE_USERS = {
@@ -56,6 +73,27 @@ class IRCTestServer:
         self._reader = None
         self._running = True
         self._registered = asyncio.Event()
+        # Every line the client has sent, in order.  A test can then assert on
+        # what actually went out on the wire rather than on the client's own
+        # account of it -- which is the only way to catch a message being sent
+        # twice, since the second copy usually leaves no trace on the client
+        # side.  Read it with the RECEIVED control command.
+        self.received = []
+        # Channels this server refuses to let the client into: lowercase name ->
+        # (numeric, text).  A channel you *cannot* join behaves very differently
+        # from one you can -- no JOIN echo ever comes back, so none of the
+        # client's join bookkeeping is cleaned up -- and several qtpyrc bugs
+        # live only on that path.  Set with the REJECT control command, before
+        # the client connects if it is to apply to an autojoin.
+        self.rejected = {}
+        # Reference of the batch currently open, or None.  While one is open
+        # every line sent to the client carries `@batch=<ref>` -- see
+        # _send_from.  A bouncer replaying your backlog is the ordinary way a
+        # client meets a batch, and code that runs "once per incoming message"
+        # behaves differently inside one (history saves and log writes are
+        # suppressed, notifications are not fired), so a server that can never
+        # open one cannot test any of it.
+        self._batch_ref = None
 
     # ------------------------------------------------------------------
     # Sending helpers
@@ -67,8 +105,15 @@ class IRCTestServer:
             self._writer.write((line + "\r\n").encode("utf-8"))
 
     def _send_from(self, prefix, command, *params):
-        """Send a prefixed IRC message."""
+        """Send a prefixed IRC message.
+
+        While a batch is open every message is tagged as part of it, except the
+        BATCH delimiters themselves -- which is what a real server does, and is
+        why the rule lives here rather than in each control command.
+        """
         parts = [":%s" % prefix, command]
+        if self._batch_ref and command != "BATCH":
+            parts.insert(0, "@batch=%s" % self._batch_ref)
         for i, p in enumerate(params):
             if i == len(params) - 1 and (" " in p or p.startswith(":")):
                 parts.append(":%s" % p)
@@ -100,18 +145,33 @@ class IRCTestServer:
                 line = data.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
+                self.received.append(line)
 
                 parts = line.split()
                 cmd = parts[0].upper()
 
                 if cmd == "CAP":
-                    # Minimal CAP handling: respond to LS with empty list
+                    # Offer the capabilities qtpyrc asks for and ACK them, the
+                    # way a real server does.  This used to advertise nothing
+                    # and NAK everything, which meant `batch` was never
+                    # negotiated -- so no test could ever put the client inside
+                    # a playback batch, and every "suppressed during playback"
+                    # rule in irc_client.py was untestable.
                     if len(parts) >= 2:
                         sub = parts[1].upper()
                         if sub == "LS":
-                            self._send_from(SERVER_NAME, "CAP", nick or "*", "LS", "")
+                            self._send_from(SERVER_NAME, "CAP", nick or "*",
+                                            "LS", " ".join(OFFERED_CAPS))
                         elif sub == "REQ":
-                            self._send_from(SERVER_NAME, "CAP", nick or "*", "NAK", " ".join(parts[2:]))
+                            asked = " ".join(parts[2:]).lstrip(":").split()
+                            ok = [c for c in asked if c in OFFERED_CAPS]
+                            bad = [c for c in asked if c not in OFFERED_CAPS]
+                            if ok:
+                                self._send_from(SERVER_NAME, "CAP", nick or "*",
+                                                "ACK", " ".join(ok))
+                            if bad:
+                                self._send_from(SERVER_NAME, "CAP", nick or "*",
+                                                "NAK", " ".join(bad))
                         elif sub == "END":
                             pass  # nothing to do
 
@@ -133,7 +193,12 @@ class IRCTestServer:
 
                 elif cmd == "JOIN":
                     channel = parts[1] if len(parts) > 1 else "#test"
-                    self._do_client_join(nick, channel)
+                    reject = self.rejected.get(channel.lower())
+                    if reject:
+                        num, text = reject
+                        self._send_numeric(num, channel, text)
+                    else:
+                        self._do_client_join(nick, channel)
 
                 elif cmd == "PART":
                     channel = parts[1] if len(parts) > 1 else "#test"
@@ -183,8 +248,18 @@ class IRCTestServer:
         self._send_numeric(2, "Your host is %s, running version %s" % (SERVER_NAME, SERVER_VERSION))
         self._send_numeric(3, "This server was created just now")
         self._send_numeric(4, SERVER_NAME, SERVER_VERSION, "iowghraAsORTVSxNCWqBzvdHtGpI", "lvhopsmntikrRcaqOALQbSeIKVfMCuzNTGjZ")
-        self._send_numeric(5, "NETWORK=%s" % NETWORK_NAME, "CHANTYPES=#", "PREFIX=(ohv)@%%+",
-                           "CHANMODES=eIbq,k,flj,CFLMPQScgimnprstuz", "are supported by this server")
+        # ISUPPORT, deliberately split across two 005 lines.  Real servers do
+        # this -- the token list does not fit in 512 bytes -- and a client that
+        # treats `isupport()` as a once-per-connection hook does everything in
+        # it twice.  Sending one tidy 005 here hid exactly that bug (autojoin
+        # and the NickServ password were both sent per-005) for as long as this
+        # server was better behaved than the real thing.
+        self._send_numeric(5, "CHANTYPES=#", "PREFIX=(ohv)@%%+",
+                           "CHANMODES=eIbq,k,flj,CFLMPQScgimnprstuz",
+                           "are supported by this server")
+        self._send_numeric(5, "NETWORK=%s" % NETWORK_NAME, "CASEMAPPING=rfc1459",
+                           "NICKLEN=30", "CHANNELLEN=50", "TOPICLEN=390",
+                           "are supported by this server")
         # MOTD
         self._send_numeric(375, "- %s Message of the day -" % SERVER_NAME)
         self._send_numeric(372, "- Welcome to the test IRC server.")
@@ -237,10 +312,37 @@ class IRCTestServer:
         rest = parts[1] if len(parts) > 1 else ""
 
         if not self._writer or self._writer.is_closing():
-            if cmd not in ("SHUTDOWN", "WAIT"):
+            # RECEIVED is a question about the past, so it stays answerable
+            # after the client has gone -- which is when a test asks it.
+            # REJECT configures the server, and is most useful *before* a
+            # client connects, so that it applies to the autojoin burst.
+            if cmd not in ("SHUTDOWN", "WAIT", "RECEIVED", "REJECT"):
                 return "no client connected"
 
         client_nick = self.client_nick or "*"
+
+        if cmd == "REJECT":
+            # REJECT <channel> [numeric] [text]
+            bits = rest.split(None, 2)
+            if not bits:
+                raise ValueError("REJECT needs a channel")
+            chan = bits[0]
+            num = int(bits[1]) if len(bits) > 1 else 474
+            text = bits[2] if len(bits) > 2 else "Cannot join channel (+b)"
+            self.rejected[chan.lower()] = (num, text)
+            return "will reject %s with %d" % (chan, num)
+
+        if cmd == "RECEIVED":
+            # RECEIVED             -> every line the client has sent
+            # RECEIVED <COMMAND>   -> only those whose first word matches
+            # Answered as one line with the entries separated by " | " so it
+            # fits the control protocol's one-line "OK <text>" reply.
+            lines = self.received
+            if rest:
+                want = rest.strip().upper()
+                lines = [l for l in lines
+                         if l.split(None, 1)[0].upper() == want]
+            return " | ".join(lines)
 
         if cmd == "SHUTDOWN":
             self._running = False
@@ -279,6 +381,34 @@ class IRCTestServer:
             prefix = FAKE_USERS.get(src, "%s!%s@test.local" % (src, src))
             self._send_from(prefix, "NOTICE", channel, text)
             return "notice sent"
+
+        if cmd == "SERVERNOTICE":
+            # A NOTICE straight from the server: the prefix is a server name,
+            # so it has no nick!ident@host to attribute it to.  Deliberately a
+            # separate command from NOTICE, because that difference is the
+            # whole reason the two are filed in different log files.
+            self._send_from(SERVER_NAME, "NOTICE", client_nick, rest)
+            return "server notice sent"
+
+        if cmd == "BATCH":
+            # BATCH <ref> <type> [params...] -- open a batch.  Everything sent
+            # until ENDBATCH is tagged as part of it.
+            args = rest.split()
+            if not args:
+                raise ValueError("BATCH needs a reference")
+            ref = args[0]
+            btype = args[1] if len(args) > 1 else "znc.in/playback"
+            self._send_from(SERVER_NAME, "BATCH", "+%s" % ref, btype, *args[2:])
+            self._batch_ref = ref
+            return "batch %s opened" % ref
+
+        if cmd == "ENDBATCH":
+            ref = rest.strip() or self._batch_ref
+            if not ref:
+                raise ValueError("no batch is open")
+            self._batch_ref = None
+            self._send_from(SERVER_NAME, "BATCH", "-%s" % ref)
+            return "batch %s closed" % ref
 
         if cmd == "JOIN":
             src, channel = rest.split(None, 1)

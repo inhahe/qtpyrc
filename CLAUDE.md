@@ -31,6 +31,8 @@ Entrypoint: `qtpyrc.py`
 | `exec_system.py` | `/timer` and `/on` hook execution |
 | `plugins.py` | Plugin/script loading system |
 | `logger.py` | File logging (IRCLogger) |
+| `hang_watchdog.py` | GUI-thread stall detector; Python stacks, py-spy native stacks |
+| `render_audit.py` | Duplicate-render detector; wraps Window's `addline_*` and reports a line drawn twice, with both stacks |
 | `settings/` | Settings dialog pages. Pattern: `load_from_data(dict)` / `save_to_data(dict)` |
 | `docs/reference.md` | Command reference and scripting API docs. Update when adding/changing commands |
 | `config.defaults.yaml` | Documents every config option. Update when adding new options |
@@ -75,6 +77,32 @@ Enter key -> Window.lineinput(text)
 1. **`config.py`**: Add `self.<option> = data.get('<option>', default)` in AppConfig.__init__
 2. **`config.defaults.yaml`**: Document the option with a comment (see format below)
 3. **`settings/page_general.py`** (or appropriate page): Add widget in `__init__` using `_ck(Widget(), 'dotted.yaml.key')`, load in `load_from_data`, save in `save_to_data`
+
+**The page's fallback in `load_from_data` must be the same value `config.py`
+uses when the key is absent.** A page default is not merely what the user is
+*shown*: `save_to_data` writes the widget back verbatim, so opening the dialog
+and pressing OK turns the page's answer into the user's configuration. A page
+that disagrees with `config.py` silently rewrites the config into something that
+behaves differently from the same config before the dialog was opened — and it
+does it to people who never touched the setting. Four had accumulated:
+`logging.timestamp` (offered `HH:MM:SS`, but `MM` is the month and `mm` the
+minutes, so log lines recorded the month in the minutes field), `auto_connect`
+(off in `config.py`, on in the page), `history_replay.queries` (`backscroll_limit`
+in `config.py`, `0` — which that spin box renders as "disabled" — in the page),
+and the identity fields (`config.py` derives `user`/`realname` from `nick`; the
+page showed blanks and wrote them over the fallback).
+
+Where a value is only a *suggestion* — the conventional filename for an optional
+feature, say — put it in `setPlaceholderText`, never in the value. An empty
+`popups_file`/`toolbar_file`/`variables_file` means the feature is off, so
+prefilling the box turned all three on and overrode a deliberately-emptied
+setting.
+
+`tests/test_settings_defaults.py` enforces this by behaviour rather than by
+comparing literals (the defaults YAML doubles as an example, so its identity
+fields hold placeholders no page should adopt): it round-trips an empty config
+through every global page and requires the resulting `AppConfig` to be
+indistinguishable from one built from nothing.
 
 ### config.defaults.yaml comment format
 
@@ -160,6 +188,36 @@ multi-family chat font above, and `_prewarm_imports` (the HTTP/email stack warme
 for link previews), which now starts from a 0ms timer instead of competing for
 the GIL and the disk with the GUI thread that is building the first window.
 
+### Startup scripts: a file runs once, however many ways name it
+
+There are four ways to ask for a command script at startup — `--startup`,
+`scripts.startup`, `scripts.auto_load` and `--run` — and nothing stops two of
+them naming the same file. The shipped config points `scripts.startup` at
+`startup.rc`, so listing `startup.rc` in `auto_load` as well is the obvious thing
+to do, and it silently ran the script twice.
+
+`qtpyrc._load_scripts_and_plugins` therefore funnels all four through
+`run_script_once()`, which is **keyed on the resolved path, not the name** — the
+same file is reached under several spellings (`startup`, `startup.rc`, an
+absolute path), and keying on the name would pass a test while still running it
+twice in the field. `_resolve_file` is the same resolution `run_script` itself
+does; an unresolvable name is still passed through so `run_script` keeps
+ownership of the `[Script not found]` message.
+
+Why it went unnoticed for so long: **the damage depends entirely on what is in
+the file.** The declarations are keyed by name and merely overwrite themselves
+(`state._on_hooks[event][name]`, `state._timers[name]`, aliases), so a second run
+of a file full of `/on` and `/alias` leaves the same state behind and only prints
+its confirmation lines twice. Everything with a side effect happens twice for
+real: `/exec` runs its Python again, `/msg`, `/join` and `/server` do it again,
+`/run` pulls in another script again. What finally caught it was the
+duplicate-render audit, reporting one `[Added hook: …]` line drawn twice from two
+different lines of the same function.
+
+Covered by `tests/test_startup_scripts.py`, which names one file all four ways
+and has it append to a tally file via `/exec` — the invariant tested is "the file
+ran once", not "some particular command happened to be idempotent".
+
 ### Window display methods
 
 - `addline(text, fmt)` - plain text with mIRC color code rendering
@@ -184,6 +242,341 @@ the GIL and the disk with the GUI thread that is building the first window.
 - **server-time**: `@time=` tag parsed to local HH:MM via `_get_server_time()`
 - **Typing**: `+typing` via TAGMSG. 3s send throttle, 6s receive timeout. Shown as "..." prefix in nick list + typing bar above output
 
+### Registration: `registered()`, not `isupport()`
+
+**`isupport()` fires once per 005 line, and a server sends two or three.**
+ISUPPORT does not fit in one 512-byte message, so every real network splits it.
+Anything in `isupport()` therefore happens two or three times per connection.
+
+`IRCClient.registered()` is the once-per-connection hook, run by
+`asyncirc._fire_registered()` from `irc_RPL_ENDOFMOTD` / `irc_ERR_NOMOTD` —
+every server ends registration with one of the two, and both come after the 005
+burst, so `CASEMAPPING`, `PREFIX` and `NETWORK` are all parsed by the time it
+runs. `_registered_fired` guards it; `_ensure_connected()` (the 2s timer armed
+from `RPL_WELCOME`) calls it too, as a backstop for a server that sends neither
+terminator.
+
+**The autojoin loop and the NickServ IDENTIFY both lived in `isupport()`**, so
+every autojoin channel was JOINed two or three times and the account password
+was put on the wire two or three times. It hid for a long time because on a
+channel you *can* join it is invisible: the JOIN echo comes back, `joined()`
+strips the still-queued copies out of the flood queue, and a JOIN to a channel
+you are already in is a no-op at the server anyway. It only shows on a channel
+you *cannot* join — +b, or +k with the wrong key — where no `joined()` ever
+arrives to clean up and each JOIN earns its own error reply. That is the whole
+visible symptom: a doubled `#ops Cannot join channel (+b)` in the server window,
+which is what the render audit caught and what led here.
+
+Two rules follow, and they are what this section is for:
+
+- **Idempotent state assignment may stay in `isupport()`; wire traffic may
+  not.** Marking `client.connected` and refreshing the titlebar are still there
+  deliberately — they put nothing on the wire and want to happen as soon as the
+  network has a name, not after the MOTD.
+- **The test server must be as badly behaved as a real one.** `irc_test_server`
+  sent a single tidy 005 line, which is exactly why none of its tests ever saw
+  this. It now splits ISUPPORT across two. It also grew `RECEIVED [command]`
+  (what the client actually sent — the only way to see a message sent twice,
+  since the second copy leaves no trace client-side) and `REJECT <channel>`
+  (refuse a JOIN, so the no-`joined()` path is reachable at all).
+
+Covered by `tests/test_register_once.py`, which asserts on the wire and uses
+two rejected channels for that reason — an all-joinable version of it passes
+against the broken code.
+
+### Sending a message: `commands.send_message` is the only way
+
+**Every path that sends a PRIVMSG on the user's behalf goes through
+`commands.send_message(window, conn, target, text, display_window=None)`.** It
+is one operation — put it on the wire, show it, log it, save it, preview its
+links, tell the plugins — and it had been written five times, in `say`'s channel
+branch, `say`'s query branch, `/msg`, `/query <nick> <msg>` and `/amsg`. Nothing
+made them disagree on purpose; they disagreed because five copies of anything
+drift. What each one had lost:
+
+| path | lost |
+|---|---|
+| `/msg <nick>` | log line, history row |
+| `/query <nick> <msg>` | log line, history row, **chunking** — anything past 512 bytes was truncated by the server |
+| `/amsg` | `_own_messages.record` (so a bouncer echo drew and stored every line twice, in every channel), link preview, plugin dispatch |
+| `/msg`, `/query`, `/amsg` | link preview — a URL was previewed only if you typed it in a window |
+
+The reported symptom was the first row: a conversation held partly in a query
+window and partly through `/msg` came back, when the window was next opened,
+with only the in-window half in it. The `/msg` half was displayed and then
+dropped on the floor.
+
+Two rules keep it consolidated:
+
+- **Ask `conn.is_channel(target)`; never test for a leading `#`.** The channel
+  prefixes are per-network — ISUPPORT `CHANTYPES`, parsed into
+  `asyncirc._chantypes`, with the module-level `CHANNEL_PREFIXES` only as the
+  fallback for a server that has not said. `/msg` accepts a channel target, so
+  `send_message` has both shapes in it, and they differ in four places at once:
+  the log function (`log_channel` vs `log`), the history key (`#chan` vs
+  `_query_history_key(nick)`), the displayed nick (with mode prefix vs bare) and
+  whether `_own_messages.record` and the plugin `chanmsg` dispatch happen. Get
+  the shape wrong and nothing throws: the message is logged to the wrong file
+  and saved under `=#channel`, a key no window ever reads, and you find out when
+  the channel's backlog replays without it.
+- **The PM half deliberately does not `record()` for self-echo suppression.**
+  That is safe only while an echoed PM never reaches a window — see the
+  "PMs sent from another client attached to the same bouncer" entry in
+  `known-issues.md`. Whoever fixes that routing adds the `record()` here in the
+  same change, or turns a missing message into a doubled one.
+
+`display_window` is where the echo goes. Passed explicitly by the callers that
+already know (the window the user typed in; the query window `/query` just
+created); left `None` by `/msg`, which then looks up the channel's or nick's
+window and falls back to `[-> target] text` in the issuing window when there is
+none.
+
+Covered by `tests/test_msg_history.py`, which sends by all six routes and checks
+both the history table and the log tree — including that nothing about the
+channel landed under the query key.
+
+### Logging a chat line: `IRCClient._log_chat`, and the file is the partner
+
+**Every incoming chat line is logged through `_log_chat(target, line)` /
+`_log_chat_server(line)`, and the reason is the playback gate.** A bouncer
+replays the tail of each channel on every reconnect. History writes have been
+gated on `_in_playback_batch()` since they were written; the `irclogger` calls
+sat on the line above them, ungated — so each reconnect appended a duplicate
+copy of the tail of every channel to the log files. Nothing surfaces that: the
+duplicate is in a file nobody diffs, at a timestamp that looks plausible.
+
+**The file is named after the conversation partner, never after the window the
+line was shown in.** Channel traffic → the channel; private traffic → the other
+nick; a line with no user behind it (server notices, MOTD) → the server log.
+This is not cosmetic: an incoming private notice is displayed in *whichever
+window happened to be active*, and an outgoing `/notice` in *whichever window
+you typed it in*, so filing by window would scatter one conversation across
+several files and put two notices from the same person in two different ones.
+
+Notices were the case that made this explicit — they were not logged at all,
+in either direction. The two directions live in different modules
+(`irc_client.noticed`, `commands.Commands.notice`) and must agree on both the
+file and the wording, so the wording is `irc_client.notice_log_line()`, imported
+by the command. That is the `/msg` lesson applied one level down: two copies of
+"how a sent line is recorded" drift, and here they would drift into two halves
+of one conversation sitting in two files.
+
+Log line shapes, all distinguishable on sight: `<nick> text` (message),
+`* nick text` (action), `-nick- text` (notice).
+
+Left deliberately outside `_log_chat`: `connectionMade` / `connectionLost` call
+`irclogger.log_server` directly. Those are not chat, cannot arrive inside a
+batch, and must be recorded even if one is open.
+
+Covered by `tests/test_notice_log.py`, which needed `irc_test_server` to grow
+CAP ACK (it NAKed everything, so `batch` was never negotiated and *nothing* the
+client suppresses during playback was reachable from a test), `BATCH`/`ENDBATCH`
+control commands, and `SERVERNOTICE`.
+
+### Scoped mask lists: reading is additive, writing is not
+
+`ignores`, `auto_ops`, `highlights` and `notify` all exist at three scopes —
+global, network, channel — and are **read additively** across all three, so an
+entry at any one of them can act. Every command that maintains one of these
+lists must write with that asymmetry in mind, and `/aop` is where getting it
+wrong cost a channel: an entry the user could not see opped someone, who took
+the channel over.
+
+Five faults, all of them the same shape — the command answered from a narrower
+view of the config than the checker used, and never said so:
+
+1. **A list command must not be built on a context-sensitive collector, and
+   must have no narrowing flag.** `/aop -l` called
+   `get_auto_ops(network_key, channel)` with the channel taken from the *current
+   window*, and additionally honoured `-w`, which does **not** mean "all
+   networks" but "the global scope only". So `/aop -lw` — the obvious way to
+   spell "show me everything" — printed "[Auto-op list is empty]" from *every*
+   window, including the channel window of the channel whose entries were doing
+   the opping. `config.list_all_entries(key)` is the one that answers
+   unconditionally — every entry at every scope, each paired with its
+   `(network_key, channel)` — and `_show_all_entries` prints them labelled with
+   `config.scope_label`. `-w` is now inert in list mode and *says* it is inert,
+   because silently ignoring a flag the user typed is the same fault in the
+   other direction: an answer to a question other than the one asked. **An
+   incomplete list is worse than no list**, because it is used to conclude
+   something is not configured.
+
+   The reporter ran it in the **channel** window, not the server window, and
+   that detail is what identified `-w`: plain `/aop -l` from a server window
+   would have printed the network-scoped entry rather than "empty", so `-w` is
+   the only spelling that produces the message they saw. An earlier version of
+   this section guessed "server window" and was wrong — the symptom disambiguates
+   the path, and it is worth running the old code against the reporter's real
+   config to find out *which* path rather than picking a plausible one.
+2. **An unscoped remove removes from every scope.** `/aop -r <mask>` used to
+   write to one scope guessed from the current window (network scope from a
+   server window), so it never touched the channel entry that was doing the
+   opping. `config.remove_entry_everywhere` takes it out of all of them and
+   returns the list of scopes it hit, which the command names one per line.
+   Over-removal is visible and recoverable; under-removal is silent, and is what
+   happened. A remove that *does* name a scope still reports every scope where
+   the mask remains, with the command to remove it there.
+3. **A mutation helper that returns nothing forces its callers to lie.**
+   `_modify_list_entry` returned `None` and had a silent do-nothing path when the
+   network key was absent from the config; all three callers printed "Removed"
+   unconditionally, so a remove that did nothing was indistinguishable from one
+   that worked — run it five times and it claims five removals. It now returns
+   `LIST_ADDED` / `LIST_ALREADY` / `LIST_REMOVED` / `LIST_NOT_FOUND` /
+   `LIST_NO_NETWORK`, and every caller reports the code it got.
+4. **An unrecognised flag is an error, never a value.** The old parser kept any
+   `-x` whose letters were not all alphabetic as a *positional* argument, so
+   `/aop -?` — someone looking for a usage line — was read as "add the mask
+   `-?`" and written to the config. `?` is an fnmatch wildcard, so that entry
+   auto-opped every two-character nick beginning with `-`. `_parse_list_flags`
+   raises on any unknown flag letter and supports `--` for the rare value that
+   genuinely starts with `-`.
+5. **A component the user omits means "anything", not "impossible".** See the
+   next section — it is the same fault (answering from a narrower reading than
+   the user's) applied to the mask instead of to the config.
+
+`commands._mask_list_command` is the single body of `/ignore` and `/aop` for
+that reason: five identical bugs living in two copies is what having two copies
+buys. `/highlight` and `/notify` share the parser, the lister
+(`_show_all_entries`), `remove_entry_everywhere` and the `LIST_*` codes.
+
+**Sharing the pieces is not optional, and the reason is `/notify`.** It kept its
+own list branch — `get_notify_list(nk)` with `nk=None` for `-w` — through the
+first round of this fix, so it still had fault 1 *exactly*, unchanged, after
+`/aop` was fixed and documented. Nobody looked, because the bug had a name and
+the name was "/aop". A fault found in one of four commands that share a concept
+is present in all four until each is shown otherwise. `_show_all_entries` grew
+`annotate` (for `/notify`'s online/offline column) and `expand=False` (a
+highlight is a substring or a `/regex/`, not a hostmask, and must not be
+reported as expanding to one) so that no command has a reason to list on its
+own.
+
+Note that `docs/reference.md` already claimed `-l` "shows all scopes" before any
+of this was true. The documentation was right and the code silently disagreed,
+which means reading the docs *reinforced* the wrong conclusion that the list was
+complete. A behavioural test is the only thing that would have caught it.
+
+Covered by `tests/test_aop_list.py`, which drives the real command bodies
+against the reporter's config shape and asserts the property that matters: for
+any entry at any scope, `-l` shows it and `-r` removes it, from any window.
+
+### Masks: an omitted component means "anything", and only `*` and `?` are wildcards
+
+A mask is `nick!ident@host`, and `config.split_mask` / `config.expand_mask` fill
+in whatever the user left out with `*` **before** matching. `_match_any` matches
+against the expansion, never against the mask as written.
+
+Matching the mask flat — which is what `_match_any` used to do — makes an
+*omitted* component behave like an *impossible* one, because there is nothing in
+the pattern to absorb the separator and the text around it:
+`hegemon@lakitu.undernet.org` was matched against
+`hegemon!~heg@lakitu.undernet.org` and could not match. **The failure mode is
+silent and inverted**: the entry names a person and grants nothing, so the user
+believes a privilege is configured that in fact is not, and the only way to find
+out is that it never fires.
+
+**`x@y` is `nick@host`, never `ident@host`, and every add echoes the
+expansion.** This is the one spelling a user cannot resolve by looking at it —
+the same text in a `/whois` line is the *ident* — so the second reader of
+`/aop hegemon_@1.2.3.4` was the reporter, asking whether it was a bug that it
+opped a nick whose ident was something else. It is not: the leftmost component
+is the nick whether or not a `!` is present, which is the only reading under
+which `hegemon`, `hegemon!~heg` and `hegemon@host` all say something about the
+same person. Guessing from the text instead would be worse than either fixed
+rule, since an ident and a nick are frequently the same string and the guess
+would land differently for different users of the same command.
+
+The fix for the *ambiguity*, as opposed to the reading, is that
+`_mask_list_command` prints `[  matches hegemon_!*@1.2.3.4]` under the add
+confirmation whenever the expansion differs from what was typed. `-l` already
+showed it, but **`-l` is the wrong place to answer this on its own: you have to
+already suspect something to go and run it.** The moment a user forms their idea
+of what an entry means is the moment they add it, which is the same reason
+`_breadth_warning` fires there. The echo is deliberately silent when the mask is
+fully spelled out — `matches <itself>` is noise, and noise is what trains someone
+to skip the line that matters.
+
+The opposite gap is the one that actually cost the channel. A **nick-only** entry
+(`HEGEMON`, which is what the reporter's config held) has no host component at
+all, so it ops whoever holds that nick — after a quit, during a netsplit, or
+because the nick was never registered. That is the "hegemon@anything else" case,
+and it is why the two shapes must not be conflated: `hegemon` and
+`hegemon@lakitu.undernet.org` differ by an entire host, and only one of them
+names a person. `commands._breadth_warning` reports it on add, for `/aop` only —
+`/ignore` confers nothing, and a warning that fires where it does not matter
+stops being read. It is deliberately silent for `bob!*@*`, the ordinary way to
+write "bob, wherever he connects from"; the strong "matches EVERY user" warning
+needs *every* component pure `*`.
+
+`_show_all_entries` prints the expansion beside any entry whose written form
+differs from it, so the difference is visible rather than something you have to
+know. That is the one place a user can see that `*@some.host` is `*!*@some.host`
+— an entry that ops *anyone* on that host, not one person.
+
+**`fnmatch` is the wrong matcher and is no longer used.** It honours `[...]`
+character classes, and `[`, `]`, `\`, `^`, `_`, `{`, `|`, `}` are all legal IRC
+nick characters — `bob[away]` is the conventional away marker, not an exotic
+nick. So `/ignore bob[away]!*@*` matched `boba`, `bobw` and `boby` and did not
+match `bob[away]`: the entry pointed at four people, none of them the one named
+in it. `config._mask_regex` compiles the mask itself, `re.escape`-ing everything
+except `*` → `.*` and `?` → `.`, cached per mask string.
+
+One asymmetry worth keeping: `_match_any` also accepts a bare nick as the
+*subject*, and then a mask asserting anything about the ident or host cannot
+match it. We do not know those, and for an auto-op list a guess in favour of a
+match hands out operator status on the strength of a nick alone.
+
+**Every place that matches a user against a configured mask goes through
+`_match_any`.** Two did not, and had both bugs: `irc_client._is_trusted_host`
+(`dcc.trusted_hosts` — a match there *skips the "accept this file?" dialog*)
+and the `nick_mask` filter in `exec_system._dispatch_on_hooks` (`/on`). Neither
+is a mask list command, which is why neither was looked at when `/ignore` and
+`/aop` were fixed; both are mask *matching*, which is the thing that was wrong.
+`_mask_match` remains for genuinely non-mask wildcard text (`/on`'s message
+`pattern`), and even that is better off without fnmatch's character classes.
+
+Covered by `tests/test_aop_list.py` section 7.
+
+### Self-echo suppression (`irc_client.SelfEchoTracker`)
+
+qtpyrc draws its own messages locally as it sends them and does not negotiate
+`echo-message`, so an echo coming back from a bouncer would draw them a second
+time. `conn._own_messages` / `conn._own_actions` record what to expect
+(`record(target_lower, text)`, from `Commands.say` and the `/me` path) and the
+incoming handler drops the line when `claim()` matches.
+
+**The match is not byte-exact, on purpose**, and that is the whole point of the
+class existing instead of a list and an `==`. The echo is the *server's* copy of
+the line — what everyone else on the channel saw — and a server may normalise it
+on the way through. Two transformations are routine and neither is visible by
+eye:
+
+- **Trailing whitespace is stripped.** Libera does this. This was the
+  long-lived "some of my messages appear twice" bug: the echo matched nothing,
+  so it was drawn *and saved* on top of the local copy. It took so long to find
+  because a trailing space is invisible in a log, in a paste, and to every
+  duplicate scan that compares text for equality — which is why the database
+  looked clean when it was not. Anything that compares a sent line to its echo
+  needs the same tolerance; the bouncer's `_match_pending_echo` needed fixing
+  too.
+- **The line is truncated** to fit the 512-byte protocol limit, computed by the
+  server from *its* idea of our hostmask. A client cannot know that length, so
+  it must accept a shortened echo — but only one that keeps a healthy prefix
+  (`MIN_TRUNCATED = 40`), or a short common line ("ok", "yes") would claim an
+  unrelated longer one that happens to start the same way.
+
+Entries expire (`WAIT_SECS`, `MAX_ENTRIES`), which the old plain lists did not:
+on a network that never echoes — the ordinary case — every message the user sent
+was appended and never removed, so the list grew for the whole session. Covered
+by `tests/test_self_echo.py`.
+
+**Only the channel paths are wired up** (`chanmsg` claims from `_own_messages`,
+`action` from `_own_actions`). The query path records nothing and consults
+nothing, and that is *currently* harmless only by accident — see the
+"PMs sent from another client attached to the same bouncer never appear" entry in
+`known-issues.md`. Anything that changes how an echoed PM is routed has to add
+the `record()`/`claim()` pair in the same change, or it turns a missing message
+into a doubled one.
+
 ### Mode prefixes
 
 `_pnick(nick, channel)` prepends mode symbol when `show_mode_prefix` enabled. `_nick_prefix(nick, channel)` returns just the symbol. Stored in `User.prefix[irclower(channel)]`, updated by NAMES reply and MODE changes. Saved to history DB `prefix` column for replay.
@@ -195,6 +588,21 @@ the GIL and the disk with the GUI thread that is building the first window.
 - `_history_save()` / `_history_replay()` in irc_client.py
 - Replay inserts lines then `add_separator(" End of saved history ")`
 - Bouncer playback shows separate start/end separators
+
+**Every read returns rows in one shape: `(id, ts, type, nick, text, prefix)`.**
+`get_last` / `get_before` / `get_chunk` and their `HistoryReader` counterparts
+all agree, and `irc_client._render_history_row` is the single function that turns
+one of those tuples into a visible line (used by `render_history_rows`, the lazy
+scroll-up prepend and the drip-feed's tail flush alike — the last of those used
+to inline its own copy of the loop and silently skipped filling the channel's
+history buffer).
+
+**The id is not decoration.** Two consumers need it. The lazy scroll-up loader
+and the drip-feed walk the table by id and used to be handed it separately,
+alongside the rows (`oldest_id` / `last_id`) — `_history_replay` no longer runs a
+second `replay_bounds` query for what `rows[0][0]` already says. And
+`render_audit` uses it as the identity of a rendered line: see its section below
+for why nothing else it could compare on is unambiguous.
 
 **Three connections, and what may run on which thread.** `HistoryDB._conn`
 belongs to the GUI thread and does the writing; `HistoryReader` owns a
@@ -300,6 +708,17 @@ Three more consequences of there being two containers, all of them once bugs:
   A **minimized** one is routed to the same skip a tab click does, rather than
   leaving an icon stub — the tab bar is already that.
 
+**Arrange against the domain the arrangement will land in, not the one it
+starts from.** The MDI area's scroll bars are `AsNeeded`, and every arranger
+measures `viewport()` — whose size those bars decide. So a bar left up by the
+previous arrangement (a cascade deliberately overflows) shrinks the viewport the
+next tile measures, and the tile then removes the bar it just made room for,
+leaving its rows one scroll bar extent short of the workspace. `_arranging()`
+therefore pins both policies to `ScrollBarAlwaysOff` for the duration and
+restores them afterwards, so `AsNeeded` recomputes against the finished layout.
+This is why it wraps *all three* of `tileSubWindows` / `cascadeSubWindows` /
+`tileVertically` rather than living in the one that had the visible symptom.
+
 Covered by `tests/test_tab_skip.py`.
 
 ### Notifications (`notify.py`)
@@ -337,11 +756,25 @@ renders it afterwards:
   `_history_replay()` and `qtpyrc._bg_replay_loop()`.
 - `_queue_if_replaying()` / `queue_replay_callback()` — hold one call.
 - `_flush_replay_queue()` — render everything held, then reopen the window to
-  live output. **Every path that ends a replay must call it**, including
-  `qtpyrc._bg_replay_drop()`, which is reached when a window turns out to have
-  nothing to replay; leaving the queue open makes the window mute for good.
+  live output. **Every path that ends a replay must call it — including the ones
+  that end it by never starting it.** The queue is opened by whoever *creates*
+  the window (`joined()`, `_find_or_create_query()`), long before anyone asks how
+  much there is to replay, so a later "nothing to replay after all" is a path out
+  of an already-open queue, and leaving it open makes the window mute for good.
+  Two such paths exist, and both were once that bug:
+  `qtpyrc._bg_replay_drop()`, reached when the drip-feed finds a window with no
+  backlog or with replay disabled for it; and `irc_client._history_replay()`'s
+  early return (`if not db or limit <= 0`) on the synchronous path — `limit <= 0`
+  is exactly what `history_replay.queries: 0` means, and the settings dialog used
+  to write that into every config that was opened.
 - `headless.StubWindow` implements the same protocol as no-ops (headless prints
-  as lines arrive, so it never holds anything back).
+  as lines arrive, so it never holds anything back). **A missing member there is
+  not a missing no-op, it is an `AttributeError` in shared code** — and the
+  shared renderer `render_history_rows()` *reads* `window._auto_scroll` to save
+  it around the replay, so leaving it off the stub killed the whole drip-feed
+  task for every channel in headless mode. `_auto_scroll`, `_in_replay`,
+  `_history_more`, `_scroll_to_bottom`, `_clear_nick_typing` and
+  `_update_typing_bar` are part of that contract for exactly this reason.
 
 **The backlog must stop where the queue starts.** A held-back line is also
 written to the history table as it arrives, so a replay bounded only by "newest
@@ -356,3 +789,75 @@ hold-back takes its own snapshot. Any new replay read needs the same treatment;
 the symptom of missing it is a doubled message, not a crash.
 
 Covered by `tests/test_activity_replay.py`.
+
+### Duplicate-render audit (`render_audit.py`)
+
+The instrumentation for "I keep seeing some of my messages twice", which is what
+found the self-echo bug above — and, incidentally, the startup script that ran
+four times. Its whole job is to name the path that drew the second copy, and it
+is worth having permanently because the alternative is narrowing by elimination:
+the reasoning that the duplicate must be a *render*-only path (since
+`Commands.say`, `chanmsg()` and `privmsg()` all log unconditionally, so the logs
+would show it) was sound and still pointed at the wrong half of the program.
+
+`install()` wraps `Window`'s render methods at class level, from one tuple
+(`ENTRY_POINTS`), so `window.py` has no audit code in it and a future entry point
+is covered by adding its name there. Installed from `qtpyrc.py` right after the
+config loads — it creates no Qt object, so unlike the hang watchdog it can go
+ahead of the first window rather than behind it. Config: `logging.render_audit.*`
+(`enabled`, `window`, `file`), settings UI on the Logging page.
+
+Three rules decide whether it produces signal or noise, and all three are easy to
+get backwards:
+
+- **A call that draws nothing is not a render.** The wrapper compares
+  `output.document().characterCount()` before and after, and only records when it
+  grew. An `addline_*` that put itself on the replay queue drew nothing, and
+  counting it would flag every held-back line against its own flush — the
+  ordinary, correct case — burying the real bug in false positives. Asking the
+  document is also what keeps the audit from re-implementing (and then drifting
+  from) the hold-back rules.
+- **The key is content, not appearance.** The live and replayed copies of one
+  line carry different timestamps (server tag vs stored row), may differ in mode
+  prefix (`/pnick` decorates one from live state, the other from the stored
+  `prefix` column), and pick their `QTextCharFormat` independently. So
+  `render_key()` drops `timestamp_override`, flattens args recursively keeping
+  only strings, and `lstrip`s `~&@%+` from each — one uniform rule rather than
+  per-method special cases. It does **not** strip trailing whitespace from the
+  text, which is deliberate now rather than accidental: the whole self-echo bug
+  was a trailing space, so a key that normalised it away would have hidden the
+  thing it was installed to find.
+- **Identical text is not enough to make two renders the same line.** This is
+  what decides whether the log is readable at all: before it, 992 of the first
+  1000 reports in `me/renders.log` were false, and the two real findings were
+  buried. Two tests, in order of authority:
+  - **The history row id.** Whoever draws a stored row names it, via the
+    `render_audit.source_id(row_id)` context manager that
+    `irc_client._render_history_row` wraps its whole body in. Two renders that
+    name two *different* rows are two different lines, full stop — this is
+    exact, and it is the only exact identity a rendered line has. (Cost: two dict
+    stores per row, and nothing at all when the audit is off — affordable in the
+    inner loop of a several-thousand-row replay.)
+  - **Failing that** — a live render names no row — **the minute each was shown
+    at, within one minute.** The stored row's stamp on one side; on the other,
+    the wall clock, because that is what a live line is stamped with. Treating
+    "no `timestamp_override`" as "matches anything" made a live rejoin pair with
+    every identical join in the backlog. The one-minute slack is because a live
+    line at 19:44:59 and its replayed twin two seconds later name different
+    minutes. This is only a fallback: HH:MM means a line said daily at the same
+    minute still collides with itself, which is exactly how one report — a
+    "hello people" posted at ~17:00 every day, stored three times — survived it
+    until the row-id test arrived.
+
+Per-window `OrderedDict` of key → list of (time, stack, timestamp, row id),
+stored on the window so it dies with it, evicted by age and by `_MAX_KEYS`. A
+*list* per key rather than one entry, because the identity tests mean several
+distinct lines can share a key and each needs its own candidate. Stacks are
+walked via
+`frame.f_back` rather than `traceback.extract_stack()`, which opens the source
+file per frame — unaffordable once per line during a multi-thousand-line replay
+on the GUI thread. `stop()` disables reporting but leaves the wrappers in place;
+unwrapping a class method something else may have wrapped since is the more
+dangerous half.
+
+Covered by `tests/test_render_audit.py`.

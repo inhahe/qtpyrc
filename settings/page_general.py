@@ -145,17 +145,26 @@ class GeneralPage(QWidget):
         self.auto_copy_selection.setChecked(bool(data.get('auto_copy_selection', False)))
         self.whois_on_query.setChecked(bool(data.get('whois_on_query', False)))
         self.tab_complete_age.setValue(int(data.get('tab_complete_age', 0) or 0))
-        self.auto_connect.setChecked(bool(data.get('auto_connect', True)))
+        # config.py defaults this to False. A page default that disagrees with
+        # the runtime one does not merely display the wrong thing: the box is
+        # saved back verbatim, so opening the dialog once writes the page's
+        # answer into the config and makes it real. Keep these in step.
+        self.auto_connect.setChecked(bool(data.get('auto_connect', False)))
         self.persist_autojoins.setChecked(bool(data.get('persist_autojoins', False)))
         self.backscroll_limit.setValue(int(data.get('backscroll_limit', 10000)))
         hr = data.get('history_replay') or {}
+        _backscroll = int(data.get('backscroll_limit', 10000))
         if isinstance(hr, int):
+            # legacy: the single value applies to both, as config.py reads it
             self.history_replay_channels.setValue(hr)
-            self.history_replay_queries.setValue(0)
+            self.history_replay_queries.setValue(hr)
             self.history_replay_initial.setValue(500)
         else:
-            self.history_replay_channels.setValue(int(hr.get('channels', data.get('backscroll_limit', 10000))))
-            self.history_replay_queries.setValue(int(hr.get('queries', 0)))
+            self.history_replay_channels.setValue(int(hr.get('channels', _backscroll)))
+            # Queries default to the same as channels (config.py), not 0 --
+            # which the spin box shows as "disabled", so the old default turned
+            # query history replay off for anyone who opened this page.
+            self.history_replay_queries.setValue(int(hr.get('queries', _backscroll)))
             self.history_replay_initial.setValue(int(hr.get('initial', 500)))
         if isinstance(hr, dict):
             self.bg_replay_enabled.setChecked(bool(hr.get('bg_enabled', True)))
@@ -380,13 +389,21 @@ class FilesPage(QWidget):
         self.history_file = _ck(QLineEdit(), 'history_file')
         layout.addRow("History file:", self.history_file)
 
+        # An empty name means the feature is off (popups._resolve_popups_path
+        # and toolbar._resolve_toolbar_path return None for it), so the
+        # conventional filename is a *suggestion* and belongs in placeholder
+        # text. Putting it in the value instead made opening this page switch
+        # all three features on, and overrode a deliberately-emptied setting.
         self.popups_file = _ck(QLineEdit(), 'popups_file')
+        self.popups_file.setPlaceholderText("popups.ini  (empty: no popups)")
         layout.addRow("Popups file:", self.popups_file)
 
         self.toolbar_file = _ck(QLineEdit(), 'toolbar_file')
+        self.toolbar_file.setPlaceholderText("toolbar.ini  (empty: no toolbar)")
         layout.addRow("Toolbar file:", self.toolbar_file)
 
         self.variables_file = _ck(QLineEdit(), 'variables_file')
+        self.variables_file.setPlaceholderText("variables.ini  (empty: none)")
         layout.addRow("Variables file:", self.variables_file)
 
     def _save_optional(self, data, key, widget):
@@ -398,9 +415,9 @@ class FilesPage(QWidget):
 
     def load_from_data(self, data):
         self.history_file.setText(str(data.get('history_file', 'history.db') or 'history.db'))
-        self.popups_file.setText(str(data.get('popups_file', 'popups.ini') or 'popups.ini'))
-        self.toolbar_file.setText(str(data.get('toolbar_file', 'toolbar.ini') or 'toolbar.ini'))
-        self.variables_file.setText(str(data.get('variables_file', 'variables.ini') or 'variables.ini'))
+        self.popups_file.setText(str(data.get('popups_file', '') or ''))
+        self.toolbar_file.setText(str(data.get('toolbar_file', '') or ''))
+        self.variables_file.setText(str(data.get('variables_file', '') or ''))
 
     def save_to_data(self, data):
         self._save_optional(data, 'history_file', self.history_file)

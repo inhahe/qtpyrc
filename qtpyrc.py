@@ -718,25 +718,11 @@ def _finish_pending_replay(widget):
     else:
       remaining = []
     del widget._bg_replay
-    from irc_client import _render_history_row, _setup_history_more
-    if remaining:
-      widget._in_replay = True
-      saved_auto_scroll = widget._auto_scroll
-      widget._auto_scroll = False
-      widget.output.setUpdatesEnabled(False)
-      widget.cur.beginEditBlock()
-      show_prefix = state.config.show_mode_prefix_messages
-      try:
-        for ts, etype, nick, text, prefix in remaining:
-          _render_history_row(widget, chname, ts, etype, nick, text, prefix,
-                              show_prefix)
-      finally:
-        widget._in_replay = False
-        widget.cur.endEditBlock()
-        widget.output.setUpdatesEnabled(True)
-        widget._auto_scroll = saved_auto_scroll
-        if saved_auto_scroll:
-          widget._scroll_to_bottom()
+    from irc_client import render_history_rows, _setup_history_more
+    # Same renderer the drip-feed uses, so this path cannot drift from it --
+    # it used to inline its own copy of the loop, which meant it silently
+    # skipped populating the channel's history buffer.
+    render_history_rows(widget, chname, remaining, chan)
     # Set up lazy scroll-up for older lines beyond the eager window.
     _setup_history_more(widget, network, chname.lower(),
                         bg['min_id'], bg['loaded'], bg['cap'])
@@ -1876,25 +1862,58 @@ def _load_scripts_and_plugins(cli_args, config_dir):
   state.activescripts = dict(scripts)
 
   # Startup commands & command scripts
-  from commands import run_script
+  from commands import run_script, _resolve_cmdscripts_dir, _resolve_file
+  from plugins import _expand_auto_load
+  import fnmatch as _fnmatch
   win = next(iter(state.clients)).window if state.clients else None
+  cmdscripts_dir = _resolve_cmdscripts_dir()
+
+  # A command script is run at most once per startup, no matter how many of the
+  # four ways of asking for one name it. There are four -- --startup,
+  # scripts.startup, scripts.auto_load and --run -- and nothing stops them
+  # naming the same file; the shipped config points scripts.startup at
+  # startup.rc, and putting startup.rc in auto_load as well is the obvious
+  # thing to do and silently runs it twice.
+  #
+  # Running a script twice is never what anyone means by it, and how much it
+  # costs depends entirely on what is in the file. The declarations are keyed by
+  # name and merely overwrite themselves (/on, /alias, /timer), so the damage
+  # there is only the confirmation line printed twice -- but everything with a
+  # side effect happens twice for real: /exec runs its Python again, /msg and
+  # /join and /server do it again, /run pulls in another script again.
+  # It leaves nothing behind to explain itself either. The duplicate-render
+  # audit is what caught it, reporting one "[Added hook: ...]" line drawn twice
+  # from two different lines of this function.
+  #
+  # Keyed on the resolved path rather than the name, because the same file is
+  # reached under several spellings ("startup", "startup.rc", an absolute path);
+  # _resolve_file is the same resolution run_script itself does.  An unresolvable
+  # name is still passed through, so run_script keeps ownership of the
+  # "[Script not found]" message.
+  already_run = set()
+
+  def run_script_once(name):
+    path = _resolve_file(name, cmdscripts_dir)
+    if path:
+      key = os.path.normcase(os.path.abspath(path))
+      if key in already_run:
+        return
+      already_run.add(key)
+    run_script(name, win)
+
   if not cli_args.no_startup:
     if cli_args.startup:
-      run_script(cli_args.startup, win)
+      run_script_once(cli_args.startup)
     else:
       startup = _startup_path()
       if startup and os.path.isfile(startup):
-        run_script(startup, win)
-  from commands import _resolve_cmdscripts_dir
-  from plugins import _expand_auto_load
-  import fnmatch as _fnmatch
-  cmdscripts_dir = _resolve_cmdscripts_dir()
+        run_script_once(startup)
   for name in _expand_auto_load(state.config.scripts_auto_run, cmdscripts_dir, None):
     if cli_args.no_scripts and any(_fnmatch.fnmatch(name, p) for p in cli_args.no_scripts):
       continue
-    run_script(name, win)
+    run_script_once(name)
   for name in _expand_auto_load(cli_args.run, cmdscripts_dir, None):
-    run_script(name, win)
+    run_script_once(name)
 
 
 def _init_config(app_dir, path_arg, set_opts):
@@ -2177,6 +2196,19 @@ if __name__ == '__main__':
 
   _mark('config load + logger')
 
+  # --- Duplicate-render audit ---
+  # It works by wrapping Window's render methods, so it has to be installed
+  # before anything renders. It creates no Qt object of its own, so unlike the
+  # hang watchdog it has no ordering constraint against makeapp() -- which is
+  # what lets it go here, ahead of the first window rather than behind it.
+  if state.config.render_audit_enabled:
+    import render_audit
+    raf = state.config.render_audit_file
+    if raf and not os.path.isabs(raf):
+      raf = os.path.join(config_dir, raf)
+    render_audit.install(enabled=True, logfile=raf,
+                         window_seconds=state.config.render_audit_window)
+
   # --- History DB ---
   from history import HistoryDB, HistoryReader
   hf = state.config.history_file
@@ -2344,7 +2376,8 @@ if __name__ == '__main__':
     if hwf and not os.path.isabs(hwf):
       hwf = os.path.join(config_dir, hwf)
     hang_watchdog.start(threshold=state.config.hang_watchdog_threshold,
-                        logfile=hwf)
+                        logfile=hwf,
+                        native=state.config.hang_watchdog_native)
 
   loop = qasync.QEventLoop(state.app)
   asyncio.set_event_loop(loop)

@@ -30,16 +30,34 @@ def _id_cap(cutoff_id):
   return ' AND id <= ?', (cutoff_id,)
 
 
+# ---------------------------------------------------------------------------
+# Every read below returns rows in one shape:
+#
+#     (id, ts, type, nick, text, prefix)
+#
+# The id is not decoration. It is the only exact identity a rendered line has,
+# and two consumers need one:
+#
+#   * the lazy scroll-up loader and the drip-feed, which walk the table by id
+#     (they used to be handed it separately, alongside the rows, as
+#     ``oldest_id`` / ``last_id``);
+#   * render_audit, which asks "are these two identical-looking lines the same
+#     line?".  Everything else it could compare on is ambiguous: the displayed
+#     timestamp is HH:MM, so a line said daily at the same minute collides with
+#     itself, and the text is the *reason* it is looking.  Row identity is the
+#     answer that cannot be wrong -- see irc_client._render_history_row.
+# ---------------------------------------------------------------------------
+
 def _q_get_last(conn, network, channel, limit, cutoff_id=None):
   cap, cap_params = _id_cap(cutoff_id)
   cur = conn.execute(
-    "SELECT ts, type, nick, text, COALESCE(prefix, '') FROM history "
+    "SELECT id, ts, type, nick, text, COALESCE(prefix, '') FROM history "
     "WHERE network = ? AND channel = ?" + cap + " "
     "ORDER BY id DESC LIMIT ?",
     (network or '', channel) + cap_params + (limit,))
   rows = cur.fetchall()
   rows.reverse()
-  return rows  # [(ts, type, nick, text, prefix), ...]
+  return rows  # [(id, ts, type, nick, text, prefix), ...]
 
 
 def _q_replay_bounds(conn, network, channel, limit, cutoff_id=None):
@@ -63,9 +81,9 @@ def _q_get_before(conn, network, channel, before_id, limit):
   """Return (rows, oldest_id) for the *limit* history rows immediately older
   than *before_id* (i.e. with id < before_id), oldest first. Used by the lazy
   scroll-up loader: when the user scrolls to the top of a window we prepend the
-  next batch of older lines. rows are 5-tuples (ts, type, nick, text, prefix);
-  oldest_id is the smallest id in the batch (pass it as *before_id* on the next
-  call). When no older rows exist, returns ([], before_id)."""
+  next batch of older lines. rows are 6-tuples (id, ts, type, nick, text,
+  prefix); oldest_id is the smallest id in the batch (pass it as *before_id* on
+  the next call). When no older rows exist, returns ([], before_id)."""
   cur = conn.execute(
     "SELECT id, ts, type, nick, text, COALESCE(prefix, '') FROM history "
     "WHERE network = ? AND channel = ? AND id < ? "
@@ -75,8 +93,7 @@ def _q_get_before(conn, network, channel, before_id, limit):
   if not raw:
     return [], before_id
   raw.reverse()  # oldest first
-  rows = [r[1:] for r in raw]
-  return rows, raw[0][0]
+  return raw, raw[0][0]
 
 
 def _q_get_chunk(conn, network, channel, after_id, max_id, chunk):
@@ -88,8 +105,7 @@ def _q_get_chunk(conn, network, channel, after_id, max_id, chunk):
   raw = cur.fetchall()
   if not raw:
     return [], after_id
-  rows = [r[1:] for r in raw]
-  return rows, raw[-1][0]
+  return raw, raw[-1][0]
 
 
 class HistoryReader:
@@ -342,7 +358,7 @@ class HistoryDB:
     """Return (rows, last_id) for the next ascending-id slice of a channel's
     history: rows with after_id < id <= max_id, oldest first, at most *chunk*.
 
-    rows are 5-tuples (ts, type, nick, text, prefix) ready for rendering;
+    rows are 6-tuples (id, ts, type, nick, text, prefix) ready for rendering;
     last_id is the id to pass as *after_id* on the next call. When fewer than
     *chunk* rows come back the caller has reached max_id and replay is done."""
     return _q_get_chunk(self._conn, network, channel, after_id, max_id, chunk)

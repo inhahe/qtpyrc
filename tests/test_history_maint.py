@@ -106,13 +106,13 @@ def run(tmpdir):
         'an under-limit channel lost rows it should have kept')
 
   # The rows kept must be the *newest* ones.
-  rows = db.get_last('net', '#big', KEEP)
-  check(rows[-1][3] == 'big %d' % (db.MAINT_INTERVAL * 3 - 1),
+  rows = db.get_last('net', '#big', KEEP)   # (id, ts, type, nick, text, prefix)
+  check(rows[-1][4] == 'big %d' % (db.MAINT_INTERVAL * 3 - 1),
         'the newest line did not survive the prune (last row is %r)'
-        % (rows[-1][3],))
-  check(rows[0][3] == 'big %d' % (db.MAINT_INTERVAL * 3 - KEEP),
+        % (rows[-1][4],))
+  check(rows[0][4] == 'big %d' % (db.MAINT_INTERVAL * 3 - KEEP),
         'the prune kept the wrong window of rows (oldest kept is %r)'
-        % (rows[0][3],))
+        % (rows[0][4],))
 
   # ------------------------------------------------------------------ 3
   # A pass over channels that are all under the limit must issue no DELETE and

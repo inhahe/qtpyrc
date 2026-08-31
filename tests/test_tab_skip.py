@@ -147,13 +147,29 @@ def run(app):
   # ------------------------------------------------------------------ 4
   # A tile only lays out the windows that are showing; a skipped one must not
   # be given a share of the workspace and then left empty.
+  #
+  # Tiled against a workspace whose scroll bars are up, too.  They are
+  # AsNeeded, so the arrangement a tile produces decides whether they stay --
+  # and a tiler that measures the viewport while a bar left over from the
+  # previous arrangement is still up lays its rows out one scroll bar extent
+  # short, then removes the bar it made room for and leaves a dead strip along
+  # the edge.  Overflowing the workspace first makes that certain rather than a
+  # matter of what the last arrangement happened to leave behind, which is what
+  # made this an intermittent failure.
+  find(ws, '#two')['proxy']._mdi_sub.setGeometry(0, 0, 2000, 2000)
+  app.processEvents()
+  check(ws._mdi.verticalScrollBar().isVisible(),
+        'the workspace did not scroll for a window twice its size, so the tile '
+        'below is not being tested against the case that matters')
+
   ws.tileVertically()
   app.processEvents()
   vp_h = ws._mdi.viewport().height()
   sub = find(ws, '#two')['proxy']._mdi_sub
   check(abs(sub.height() - vp_h) <= 2,
-        'a vertical tile with one window showing gave it %d of %d pixels -- the '
-        'skipped windows were counted' % (sub.height(), vp_h))
+        'a vertical tile with one window showing gave it %d of %d pixels -- '
+        'either the skipped windows were counted, or the workspace was measured '
+        'with a scroll bar up that the tile then removed' % (sub.height(), vp_h))
   ws.deleteLater()
 
   # ------------------------------------------------------------------ 5

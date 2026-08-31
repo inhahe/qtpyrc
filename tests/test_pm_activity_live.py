@@ -22,6 +22,7 @@ Both modes matter: they are different replay paths (qtpyrc._bg_replay_loop vs
 irc_client._history_replay) and each has to reach the same result.
 """
 
+import atexit
 import os
 import runpy
 import shutil
@@ -88,6 +89,16 @@ CTRL_PORT = free_port()
 NONCE = 'pm-%d' % (time.time() * 1000)
 
 tmpdir = tempfile.mkdtemp(prefix='qtpyrc-pmtest-')
+
+# Removed at interpreter exit rather than in a finally, and registered here --
+# before qtpyrc is run -- on purpose. qtpyrc holds crash.log open for the life of
+# the process (faulthandler needs a live file object) and closes it from its own
+# atexit handler, so a rmtree in a finally runs while Windows still has the file
+# locked, silently does nothing under ignore_errors, and leaves the directory
+# behind on every run. atexit is LIFO, so registering first means running last:
+# after qtpyrc's handler has closed the file.
+atexit.register(shutil.rmtree, tmpdir, True)
+
 cfg = os.path.join(tmpdir, 'config.yaml')
 with open(cfg, 'w', encoding='utf-8') as f:
   f.write(CONFIG % {'port': PORT})
@@ -220,6 +231,5 @@ finally:
     server.wait(timeout=5)
   except Exception:
     server.kill()
-  shutil.rmtree(tmpdir, ignore_errors=True)
 
 sys.exit(EXIT)
