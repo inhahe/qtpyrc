@@ -310,12 +310,14 @@ Nicks are checked via server-side MONITOR when supported (instant push notificat
 | `/plugin` | `/plugin -r <name>` | Reload a plugin (unload + load) |
 | `/load` | `/load <name>` | Alias for `/plugin` |
 | `/unload` | `/unload <name>` | Alias for `/plugin -u` |
-| `/plugins` | `/plugins [-l or -a]` | List available plugins (-l loaded only, -a auto-load only) |
+| `/plugins` | `/plugins [-l or -a]` | List available plugins, grouped by the directory each was found in (`-l` loaded only, `-a` auto-load only) |
 | `/scripts` | `/scripts [-a]` | List available command scripts (`-a` auto-load) |
 | `/script` | `/script <filename>` | Run a command script (text file of /commands) |
 | `/play` | `/play <filename>` | Send a plain text file to the current window line by line |
 | `/alias` | `/alias [name] [command...]` | Define, show, or list command aliases |
 | `/alias` | `/alias -r <name>` | Remove an alias |
+| `/hotkeys` | `/hotkeys` | List hotkeys bound by plugins (`irc.bind_key`), with their descriptions and owning plugins |
+| `/keys` | `/keys` | Alias for `/hotkeys` |
 | `/popups` | `/popups` | Reload the popups.ini file |
 | `/set` | `/set [name] [value]` | Define/list persistent variables (saved to `variables.ini`) |
 | `/set` | `/set -r <name>` | Remove a persistent variable |
@@ -810,6 +812,44 @@ All methods below take `conn` (an IRCClient connection) as their first argument.
 | `timer` | `timer(name, reps, secs, command, *, window=None)` | Create a named timer (0 reps = infinite) |
 | `cancel_timer` | `cancel_timer(name)` | Stop and remove a timer |
 
+### Slash Command Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `add_command` | `add_command(name, func, help='')` | Register `/name`. `func(window, text)`. Returns the normalised name |
+| `remove_command` | `remove_command(name)` | Unregister a command added with `add_command` |
+
+`name` is written without the command prefix (`'np'`, not `'/np'`) and is
+matched case-insensitively, like every built-in. `text` arrives as a
+`TokenizedString` with `{variable}` expansion already applied, exactly as a
+built-in receives it.
+
+The lookup order is **built-in, then plugin command, then `/alias`**.
+`add_command` raises `ValueError` if `name` is already a built-in — a plugin
+cannot override one, because registering it and having the built-in win anyway
+is a registration that silently never fires. `/alias` warns when it shadows
+either. Registering the same name twice from a plugin *is* allowed and replaces
+the previous handler, so a reload needs no special case.
+
+An exception raised by a plugin command is reported in the window as
+`[/name failed: Type: message]`, with the traceback on the console.
+
+### Hotkey Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `bind_key` | `bind_key(sequence, func, description='')` | Bind an application-wide hotkey. `func()` takes no arguments. Returns the canonical sequence |
+| `unbind_key` | `unbind_key(sequence)` | Remove a binding. Returns True if there was one |
+
+`sequence` is anything `QKeySequence` understands: `'F12'`, `'Ctrl+Shift+P'`,
+`'Alt+N'`. The binding is application-scoped, so it fires from any window and
+while the input box has focus. `bind_key` raises `ValueError` if Qt cannot
+parse the sequence, rather than installing a shortcut that can never fire.
+
+Bindings are keyed by the *canonical* form, so `'f12'`, `'F12'` and `'  F12  '`
+are one binding rather than three, and re-binding replaces. `/hotkeys` lists
+everything currently bound.
+
 ### UI Methods
 
 | Method | Signature | Description |
@@ -851,7 +891,49 @@ class MyPlugin(plugin.Callbacks):
 ```
 
 Supported types: `str`, `int`, `float`, `bool`. Values are stored under
-`plugins.<name>:` in the config YAML.
+`plugins.<name>:` in the config YAML. A fifth element may be a list of choices,
+which is rendered as a combo box.
+
+**Reading a setting when you use it needs nothing else** — `get_config` reads
+the current config every time it is called, so it already reflects a settings
+change or a Reload Configuration. Override `config_changed(self, irc)` only for
+settings that *cannot* be read at the point of use because they were handed to
+something else at registration time — a hotkey bound with `bind_key`, or a name
+given to `add_command`. Without it, changing either in the settings dialog
+appears to work and does nothing.
+
+| Callback | Signature | When |
+|----------|-----------|------|
+| `config_changed` | `config_changed(self, irc)` | After the settings dialog applies, and after Reload Configuration |
+
+### Where plugins are found
+
+Plugins are looked up on a **search path**, highest priority first:
+
+1. the profile's plugin directory — `plugins.dir` (default `plugins`), resolved
+   relative to the config file, so `me/config.yaml` means `me/plugins/`;
+2. the `plugins/` directory inside the qtpyrc installation, where the plugins
+   that ship with qtpyrc live.
+
+A name matches `<name>.py` first, then `<name>/__init__.py`, in each directory
+in turn. Everything that takes a plugin name searches the same path in the same
+order: `plugins.auto_load` (including its wildcards, which expand across both
+directories), `/plugin`, `--plugin`, and the plugin list in
+**Settings > Plugins**.
+
+Two consequences worth knowing:
+
+- **A profile does not need a copy of the shipped plugins.** They are always
+  available. Creating a profile no longer copies them in, and if an older
+  profile has copies you can delete them — they are forks that receive no
+  updates, and the shipped ones will be used instead.
+- **A file in your own directory overrides a shipped plugin of the same name.**
+  That is how you customise one deliberately. Because it is invisible in the
+  name alone, both `/plugins` and the Plugins settings page name the file each
+  plugin was found in, and flag any shipped plugin that is being shadowed.
+
+An `auto_load` entry containing a path separator is used as a path rather than a
+name, so a plugin can also be loaded from anywhere on disk.
 
 ### Plugin Example
 
@@ -879,6 +961,120 @@ Class = MyPlugin
 ```
 
 For a full working example, see the **triviabot** plugin in `plugins/triviabot/__init__.py`. It demonstrates channel message handling, config fields, timers, fuzzy matching, mIRC colors, and per-channel allow/block lists.
+
+### nowplaying — announce what foobar2000 is playing
+
+`plugins/nowplaying.py`. Load it with `/plugin nowplaying`, or add `nowplaying`
+to `plugins.auto_load` to have it load at startup. Configure it in
+**Settings > Plugin Config > nowplaying**.
+
+| Trigger | Effect |
+|---------|--------|
+| `F12` | Announce the current track in the focused channel or query |
+| `/np` | The same thing as a command |
+| `/np <spec>` | Announce using a one-off foobar2000 title-format spec |
+| `/np -l` | Show it to yourself only, without sending it |
+| `/np -probe` | Diagnose the connection to foobar2000 |
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `hotkey` | `F12` | Key that announces. Blank disables it |
+| `command` | `np` | Slash command name, without the prefix. Blank disables it |
+| `format` | see below | foobar2000 title-format spec |
+| `template` | `np: {title}` | The line that gets sent. Placeholders: `{title}` `{elapsed}` `{length}` `{time}` `{state}` |
+| `action` | off | Send as an action (`/me`) instead of a message |
+| `source` | `auto` | How to reach foobar2000: `auto`, `beefweb` or `com` |
+| `beefweb_url` | `http://localhost:8880` | Base URL of the foo_beefweb component |
+| `progid` | `Foobar2000.Application.0.7` | The COM ProgID foo_comserver2 publishes |
+
+`{time}` is `elapsed/length` and is empty when either is unknown; `{state}` is
+` (paused)` or empty. An unknown placeholder is left as written rather than
+raising, so a typo in the settings box produces a visibly odd line rather than
+a hotkey press that does nothing.
+
+#### The `format` setting
+
+`format` is a foobar2000 title-format spec. It is not interpreted by qtpyrc at
+all — it is handed to foobar2000, which evaluates it and returns the result — so
+every field and every `$function()` foobar2000 supports is available, including
+multi-argument ones such as `$if(%artist%,%artist%,unknown)`. Whatever it
+produces arrives as `{title}` in `template`.
+
+The default announces `Artist - Title [320kbps mp3]`, and every part of it is
+conditional:
+
+| Situation | Announced |
+|-----------|-----------|
+| Ordinary tagged MP3 | `Artist - Title [320kbps mp3]` |
+| Lossless (FLAC, WAV, ALAC `.m4a`, WMA Lossless) | `Artist - Title [flac]` — no bitrate, which is meaningless for lossless |
+| No artist tag | `Title [128kbps mp3]` — the artist and its separator drop out together |
+| Bitrate unknown to foobar2000 (raw `.aac`, `.webm`) | `Artist - Title [aac]` |
+| Internet radio | `DI.FM - Progressive` — no brackets at all |
+
+Lossless is detected with `%__bitspersample%` rather than the file extension,
+because `.m4a` and `.wma` are containers that hold either lossy or lossless
+audio, so the extension cannot tell you which you have.
+
+Two traps if you write your own spec:
+
+- **Square brackets are foobar2000's conditional syntax, not literals.** To
+  print an actual `[`, single-quote it: `'['`. An unquoted one is silently
+  swallowed along with its contents.
+- **A field that is absent renders as a literal `?`** (`%genre%` on an untagged
+  track). Guard it with `$if(%genre%,...)` or `$if2(%genre%,fallback)`.
+
+Avoid the colour functions (`$rgb`, `$blend`): they emit a raw `0x03` byte,
+which is also the mIRC colour code, so the line arrives garbled.
+
+#### Which source to use
+
+**Install [foo_beefweb](https://www.foobar2000.org/components/view/foo_beefweb)
+and leave `source` at `auto`.** That is the answer for every current
+foobar2000.
+
+| Source | Component | Works with | Needs |
+|--------|-----------|-----------|-------|
+| `beefweb` | [foo_beefweb](https://www.foobar2000.org/components/view/foo_beefweb) | foobar2000 v1.6+, **32- and 64-bit**, and remote machines | nothing — stdlib HTTP |
+| `com` | foo_comserver2 | 32-bit foobar2000 v1.x only | `pywin32` or `comtypes` |
+
+`auto` tries beefweb first and falls back to COM, so whichever component you
+have installed simply works.
+
+**foo_comserver2 cannot work with a 64-bit foobar2000.** It is a 32-bit-only
+build of a component last released for foobar2000 0.9 — foobar2000's own
+component troubleshooter lists it for repeated crash reports — and a 32-bit DLL
+cannot be loaded into a 64-bit process at all. foobar2000 has been 64-bit by
+default since v2.0, so on any normal current install this source is unavailable
+no matter how it is configured. It is kept only for genuinely old 32-bit v1.x
+setups, where it is the only option.
+
+beefweb also needs no Python dependency whatsoever, and because it speaks HTTP
+it works when foobar2000 runs on a different machine — point `beefweb_url` at
+it (and enable remote connections in the component's settings).
+
+#### Behaviour
+
+The plugin never launches foobar2000. On the COM path it attaches to a running
+instance with `GetActiveObject` rather than `Dispatch`, so pressing the hotkey
+with no player running reports that instead of starting one. Nothing is
+announced unless the player is actually playing; a stopped player with a track
+still loaded reports "not playing". All errors are shown locally and never
+sent to the channel.
+
+An unrecognised `source` is refused and named, rather than quietly treated as
+`auto` — otherwise a typo would leave you testing something other than what you
+configured.
+
+If nothing happens, run `/np -probe`. It reports on **every** source under its
+own heading — whether beefweb is reachable and what it says, and separately
+whether a COM library is installed, whether the ProgID is registered, and
+whether a running instance was found — because "nothing happened" has several
+different causes, and naming only one sends people to fix the wrong thing.
+
+The query runs on a worker thread, whichever source is used, because it blocks
+until the other program answers and foobar2000 can be busy, minimised,
+rescanning its library, or showing a modal dialog. One query is allowed in
+flight at a time.
 
 ### TokenizedString — Pre-parsed Message Parameters
 

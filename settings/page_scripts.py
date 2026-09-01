@@ -59,7 +59,10 @@ class ScriptsPage(QWidget):
         self.plugins_dir = QLineEdit()
         self.plugins_dir.setPlaceholderText("plugins%s (default)" % os.sep)
         self.plugins_dir.setToolTip(
-            "Directory for Python plugins (relative to config file)")
+            "Directory for your own Python plugins (relative to the config "
+            "file).\nThe plugins shipped with qtpyrc are always available as "
+            "well;\na plugin of the same name here takes precedence over one "
+            "of theirs.")
         dir_row.addWidget(self.plugins_dir)
         pl.addLayout(dir_row)
 
@@ -218,20 +221,29 @@ class ScriptsPage(QWidget):
     def setup(self, config_dir):
         self._config_dir = config_dir
 
-    def _update_dir_status(self, label, text_field, default):
-        """Update a directory label to indicate directory status."""
+    def _update_dir_status(self, label, text_field, default,
+                           fallback_ok=False):
+        """Update a directory label to indicate directory status.
+
+        *fallback_ok* says a missing directory is not an error because the
+        entries can be found elsewhere -- true for plugins, which have a
+        search path (the profile's directory, then the application's own), and
+        false for command scripts, which have only the one directory.
+        """
         configured = bool(text_field.text().strip())
         d = self._abs_dir(text_field.text(), default)
         exists = os.path.isdir(d)
-        if configured and exists:
-            label.setText("Directory:")
+        if exists:
+            label.setText("Directory:" if configured else "Directory (default):")
             label.setStyleSheet("")
-        elif configured and not exists:
+        elif fallback_ok and not configured:
+            # Nothing here yet, and nothing needs to be: shipped plugins load
+            # from the application's own directory.
+            label.setText("Directory (default, not created):")
+            label.setStyleSheet("")
+        elif configured:
             label.setText("Directory (not found):")
             label.setStyleSheet("color: red;")
-        elif not configured and exists:
-            label.setText("Directory (default):")
-            label.setStyleSheet("")
         else:
             label.setText("Directory (default, not found):")
             label.setStyleSheet("color: red;")
@@ -245,48 +257,67 @@ class ScriptsPage(QWidget):
             return d
         return os.path.join(self._config_dir, d)
 
-    def _expand_patterns(self, names, directory, is_plugin=False):
-        """Expand glob patterns in an auto_load list to concrete names."""
+    def _plugin_dirs(self):
+        """The plugin search path implied by the directory field.
+
+        Asked of `plugins` rather than computed here, so that what the dialog
+        lists and offers to edit is what the loader would actually resolve.
+        """
+        import plugins as _plugins
+        return _plugins.search_path_for(
+            self._abs_dir(self.plugins_dir.text(), 'plugins'))
+
+    def _expand_patterns(self, names, directories, is_plugin=False):
+        """Expand glob patterns in an auto_load list to concrete names.
+
+        *directories* is a search path, highest priority first -- one entry for
+        command scripts, profile-then-application for plugins.
+        """
         result = set()
         for entry in names:
             entry = str(entry).strip()
             if not entry:
                 continue
             if any(c in entry for c in ('*', '?', '[')):
-                if not os.path.isdir(directory):
-                    continue
-                if is_plugin:
-                    pat = entry if entry.endswith('.py') else entry + '.py'
-                    for path in _glob.glob(os.path.join(directory, pat)):
-                        base = os.path.basename(path)
-                        if not base.startswith('_') and os.path.isfile(path):
-                            result.add(base[:-3])
-                    for path in _glob.glob(os.path.join(directory, entry)):
-                        base = os.path.basename(path)
-                        if (not base.startswith('_') and os.path.isdir(path)
-                                and os.path.isfile(
-                                    os.path.join(path, '__init__.py'))):
-                            result.add(base)
-                else:
-                    for path in _glob.glob(os.path.join(directory, entry)):
-                        base = os.path.basename(path)
-                        if not base.startswith('_') and os.path.isfile(path):
-                            result.add(base)
+                for directory in directories:
+                    if not os.path.isdir(directory):
+                        continue
+                    if is_plugin:
+                        pat = entry if entry.endswith('.py') else entry + '.py'
+                        for path in _glob.glob(os.path.join(directory, pat)):
+                            base = os.path.basename(path)
+                            if not base.startswith('_') and os.path.isfile(path):
+                                result.add(base[:-3])
+                        for path in _glob.glob(os.path.join(directory, entry)):
+                            base = os.path.basename(path)
+                            if (not base.startswith('_') and os.path.isdir(path)
+                                    and os.path.isfile(
+                                        os.path.join(path, '__init__.py'))):
+                                result.add(base)
+                    else:
+                        for path in _glob.glob(os.path.join(directory, entry)):
+                            base = os.path.basename(path)
+                            if not base.startswith('_') and os.path.isfile(path):
+                                result.add(base)
             else:
                 result.add(entry)
         return result
 
-    def _is_in_dir(self, name, directory, is_plugin=False):
-        """Check whether a name corresponds to a file in the directory."""
+    def _is_in_dir(self, name, directories, is_plugin=False):
+        """Check whether a name resolves to a file on the search path."""
         if os.path.isabs(name) or os.sep in name or '/' in name:
             return False
-        if not os.path.isdir(directory):
-            return False
-        if is_plugin:
-            py = os.path.join(directory, name + '.py')
-            pkg = os.path.join(directory, name, '__init__.py')
-            return os.path.isfile(py) or os.path.isfile(pkg)
-        return os.path.isfile(os.path.join(directory, name))
+        for directory in directories:
+            if not os.path.isdir(directory):
+                continue
+            if is_plugin:
+                py = os.path.join(directory, name + '.py')
+                pkg = os.path.join(directory, name, '__init__.py')
+                if os.path.isfile(py) or os.path.isfile(pkg):
+                    return True
+            elif os.path.isfile(os.path.join(directory, name)):
+                return True
+        return False
 
     # -- styling --
 
@@ -376,13 +407,11 @@ class ScriptsPage(QWidget):
         if os.path.isabs(value) and os.path.isfile(value):
             return value
         if is_plugin:
-            pdir = self._abs_dir(self.plugins_dir.text(), 'plugins')
-            py = os.path.join(pdir, value + '.py')
-            if os.path.isfile(py):
-                return py
-            init = os.path.join(pdir, value, '__init__.py')
-            if os.path.isfile(init):
-                return init
+            # Resolved by the loader, so Edit opens the file that would load.
+            import plugins as _plugins
+            found = _plugins.find_plugin(value, self._plugin_dirs())
+            if found is not None:
+                return found.path
         else:
             sdir = self._abs_dir(self.scripts_dir.text(), 'scripts')
             path = os.path.join(sdir, value)
@@ -485,23 +514,21 @@ class ScriptsPage(QWidget):
 
     def _scan_plugins(self):
         import state
-        self._update_dir_status(self._plugins_dir_label, self.plugins_dir, 'plugins')
+        import plugins as _plugins
+        self._update_dir_status(self._plugins_dir_label, self.plugins_dir,
+                                'plugins', fallback_ok=True)
         checked = self._get_checked(self.plugins_list)
         self.plugins_list.clear()
-        pdir = self._abs_dir(self.plugins_dir.text(), 'plugins')
+        dirs = self._plugin_dirs()
 
-        # Local entries from directory
-        local = []
-        if os.path.isdir(pdir):
-            for entry in sorted(os.listdir(pdir)):
-                if entry.startswith('_') or entry.startswith('.'):
-                    continue
-                full = os.path.join(pdir, entry)
-                if os.path.isfile(full) and entry.endswith('.py'):
-                    local.append(entry[:-3])
-                elif (os.path.isdir(full)
-                      and os.path.isfile(os.path.join(full, '__init__.py'))):
-                    local.append(entry)
+        # Local entries: everything on the search path, resolved exactly as the
+        # loader resolves it.  A plugin found in the application's own
+        # directory is as local as one in the profile's -- listing it as
+        # "external" was the old behaviour and it was wrong twice over: it said
+        # the plugin was missing when it was merely shipped, and it drew the
+        # row as a widget, which indented it out of line with the others.
+        available = _plugins.available_plugins(dirs)
+        local = sorted(available)
         local_set = set(local)
 
         # External entries: auto_load items not in dir + recently used
@@ -531,7 +558,12 @@ class ScriptsPage(QWidget):
         local = self._apply_order(local, auto_order, saved)
         external = self._apply_order(external, auto_order, saved)
 
-        # Local items (plain checkable items, bold if checked)
+        # Local items (plain checkable items, bold if checked).  The tooltip
+        # names the file that would load, because with a search path the name
+        # alone no longer says where a plugin comes from -- and a profile copy
+        # silently shadowing a shipped plugin is exactly the situation worth
+        # being able to see.
+        shadowed = self._shadowed_names(dirs)
         for name in local:
             is_checked = name in checked or name in self._auto_load_plugins
             item = QListWidgetItem(name)
@@ -544,6 +576,12 @@ class ScriptsPage(QWidget):
             font = item.font()
             font.setBold(is_checked)
             item.setFont(font)
+            tip = available[name].path
+            if name in shadowed:
+                tip += ("\n\nShadows:\n  "
+                        + "\n  ".join(shadowed[name])
+                        + "\n\nDelete this copy to use the shipped one.")
+            item.setToolTip(tip)
             self.plugins_list.addItem(item)
 
         # External items (checkbox + X button)
@@ -552,9 +590,22 @@ class ScriptsPage(QWidget):
             self._add_external_item(
                 self.plugins_list, name,
                 name + "  (external)",
-                "External plugin \u2014 not in plugins directory",
+                "External plugin \u2014 not on the plugin search path:\n  "
+                + "\n  ".join(dirs),
                 is_checked,
                 lambda n=name: self._remove_plugin_by_value(n))
+
+    @staticmethod
+    def _shadowed_names(dirs):
+        """name -> the lower-priority files that the winning plugin hides."""
+        import plugins as _plugins
+        winners = _plugins.available_plugins(dirs)
+        out = {}
+        for d in dirs[1:]:
+            for name, found in _plugins.available_plugins([d]).items():
+                if name in winners and winners[name].path != found.path:
+                    out.setdefault(name, []).append(found.path)
+        return out
 
     def _scan_scripts(self):
         import state
@@ -708,16 +759,16 @@ class ScriptsPage(QWidget):
         plugins_cfg = data.get('plugins') or {}
         self.plugins_dir.setText(str(plugins_cfg.get('dir', '') or ''))
         raw_plugins = list(plugins_cfg.get('auto_load') or [])
-        pdir = self._abs_dir(self.plugins_dir.text(), 'plugins')
+        pdirs = self._plugin_dirs()
         self._auto_load_plugins = self._expand_patterns(
-            raw_plugins, pdir, is_plugin=True)
+            raw_plugins, pdirs, is_plugin=True)
         self._auto_load_plugins_ordered = self._build_auto_load_order(
             raw_plugins, self._auto_load_plugins)
 
         # Persist external auto_load entries to recent list
         if state.ui_state:
             for name in self._auto_load_plugins:
-                if not self._is_in_dir(name, pdir, is_plugin=True):
+                if not self._is_in_dir(name, pdirs, is_plugin=True):
                     state.ui_state.add_recent_plugin_name(name)
 
         scripts_cfg = data.get('scripts') or {}
@@ -726,13 +777,13 @@ class ScriptsPage(QWidget):
         raw_scripts = list(scripts_cfg.get('auto_load') or [])
         sdir = self._abs_dir(self.scripts_dir.text(), 'scripts')
         self._auto_load_scripts = self._expand_patterns(
-            raw_scripts, sdir, is_plugin=False)
+            raw_scripts, [sdir], is_plugin=False)
         self._auto_load_scripts_ordered = self._build_auto_load_order(
             raw_scripts, self._auto_load_scripts)
 
         if state.ui_state:
             for name in self._auto_load_scripts:
-                if not self._is_in_dir(name, sdir, is_plugin=False):
+                if not self._is_in_dir(name, [sdir], is_plugin=False):
                     state.ui_state.add_recent_script_path(name)
 
         self._scan_plugins()

@@ -668,13 +668,28 @@ logging:
 
 # Python plugin system
 plugins:
-  dir: plugins             # directory for Python plugins (relative to config file)
+  # Directory for your own Python plugins, relative to this config file.
+  #
+  # Plugins are looked up on a search path: this directory first, then the
+  # plugins/ directory inside the qtpyrc installation, where the plugins that
+  # ship with qtpyrc live.  So a profile does not need -- and should not have --
+  # a copy of the shipped plugins: they are always available.  A file here with
+  # the same name as a shipped one takes precedence over it, which is how you
+  # override a shipped plugin deliberately; "/plugins" and the Plugins settings
+  # page both show where each one was found, and flag any that is being
+  # shadowed.
+  dir: plugins
   auto_load:               # Python plugins to load automatically on startup
     - rotate               # /secret command — text rotation cipher
     - chess                # !chess — IRC chess (set allowed_channels in Plugin Config)
     - triviabot            # !trivia — trivia game (set allowed_channels in Plugin Config)
+    # Not loaded by default: it needs a component installed in foobar2000 (use
+    # foo_beefweb -- foo_comserver2 is 32-bit only and cannot load into a
+    # current 64-bit foobar2000), and it takes F12 application-wide, which is
+    # not a key to claim from someone who has no use for the plugin.
+    # - nowplaying         # F12 / /np — announce what foobar2000 is playing
     # - myplugin           # plain name or wildcard pattern (*, ?, [abc])
-    # - "*"                # load all .py plugins in the plugins dir
+    # - "*"                # load every plugin on the search path
 
 # Command scripts run at startup.  Four things can ask for one -- "startup" and
 # "auto_load" below, plus --startup and --run on the command line -- and a file

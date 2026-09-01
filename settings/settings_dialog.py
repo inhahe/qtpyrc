@@ -942,6 +942,11 @@ class SettingsDialog(QDialog):
                     state.clients.add(client)
                     asyncio.ensure_future(client.connect_to_server())
 
+        # Let plugins re-register anything they cannot re-read lazily (a
+        # hotkey, a command name) -- see plugins.dispatch_config_changed.
+        import plugins
+        plugins.dispatch_config_changed()
+
     def _on_apply(self):
         """Apply changes to the running UI without saving to disk."""
         self.setCursor(Qt.CursorShape.WaitCursor)
