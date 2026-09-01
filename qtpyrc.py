@@ -1504,6 +1504,8 @@ def _reload_config():
                         "Error reloading config:\n%s" % e)
     return
   state.config = cfg
+  import plugins
+  plugins.dispatch_config_changed()
 
 def _save_config_as():
   """Save configuration to a new YAML file and switch to it."""
@@ -1824,25 +1826,12 @@ def init_default_files(directory, config_name='config.yaml', overwrite=None):
         elif ('icons/' + fname) not in overwrite:
           skipped.append(('icons/' + fname, 'already exists'))
 
-  # Copy bundled plugins into the plugins/ directory
-  bundled_plugins = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'plugins')
-  target_plugins = os.path.join(directory, 'plugins')
-  if os.path.isdir(bundled_plugins):
-    for item in os.listdir(bundled_plugins):
-      src = os.path.join(bundled_plugins, item)
-      dst = os.path.join(target_plugins, item)
-      if os.path.isfile(src):
-        if not os.path.isfile(dst):
-          shutil.copy2(src, dst)
-          created.append(('plugins/' + item, 'plugin'))
-        elif ('plugins/' + item) not in overwrite:
-          skipped.append(('plugins/' + item, 'already exists'))
-      elif os.path.isdir(src):
-        if not os.path.isdir(dst):
-          shutil.copytree(src, dst)
-          created.append(('plugins/' + item + '/', 'plugin data'))
-        else:
-          skipped.append(('plugins/' + item + '/', 'already exists'))
+  # Shipped plugins are deliberately *not* copied into the profile.  The
+  # loader searches the profile's plugin directory and then the application's
+  # own (plugins.plugin_search_path), so a copy would buy nothing and cost
+  # everything: it is a fork that receives no updates, silently shadowing the
+  # shipped plugin from the moment either changes.  A profile's plugins/
+  # directory is for the user's own plugins and for deliberate overrides.
 
   return created, skipped, overwritten
 
@@ -1908,11 +1897,13 @@ def _load_scripts_and_plugins(cli_args, config_dir):
       startup = _startup_path()
       if startup and os.path.isfile(startup):
         run_script_once(startup)
-  for name in _expand_auto_load(state.config.scripts_auto_run, cmdscripts_dir, None):
+  # Command scripts have a single directory, not a search path -- unlike
+  # plugins, which is why _expand_auto_load takes a list.
+  for name in _expand_auto_load(state.config.scripts_auto_run, [cmdscripts_dir], None):
     if cli_args.no_scripts and any(_fnmatch.fnmatch(name, p) for p in cli_args.no_scripts):
       continue
     run_script_once(name)
-  for name in _expand_auto_load(cli_args.run, cmdscripts_dir, None):
+  for name in _expand_auto_load(cli_args.run, [cmdscripts_dir], None):
     run_script_once(name)
 
 

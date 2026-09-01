@@ -790,6 +790,283 @@ the symptom of missing it is a doubled message, not a crash.
 
 Covered by `tests/test_activity_replay.py`.
 
+### Plugins live on a search path, and a profile copy is the failure
+
+`plugins.plugin_search_path()` is the profile's plugin directory (`plugins.dir`,
+resolved against the *config file's* directory — `me/config.yaml` means
+`me/plugins/`) followed by the application's own `plugins/`, where the shipped
+plugins live. `find_plugin(name)` walks it in order and returns a `PluginFile`
+saying which file won; `available_plugins()` returns the union, first-wins;
+`_import_script` executes that file. **Nothing loads a plugin by importing its
+bare name any more**, because two directories can offer the same name and only
+`find_plugin` gets to decide which one is meant.
+
+Before this there was one directory, and the way that was papered over was to
+**copy the shipped plugins into the profile** when the profile was created. That
+copy is the bug, not the workaround for it: it forks every shipped plugin at
+creation time, and from then on the profile silently runs a version that
+receives no fixes. It had already happened — the reporter's `me/plugins/`
+carried a six-month-old `triviabot` with no `plugin_prefix` support, and nothing
+anywhere said so. `qtpyrc._create_profile` therefore no longer copies plugins.
+
+The two reported symptoms were both downstream of the single directory, which is
+worth recording because neither one names it:
+
+- **A plugin in `auto_load` but only in the application's directory had no
+  settings page.** `page_plugin_config.get_plugin_names()` lists a plugin only
+  if it *loaded* and declared `config_fields`. It never loaded, so the settings
+  tree simply did not mention it — the failure mode this file keeps paying for,
+  where the code does something reasonable-looking and says nothing.
+- **Its row in the Plugins page was indented.** `page_scripts` classified a name
+  that was in `auto_load` but not in the directory as *external* and drew it
+  with `_add_external_item` (a checkbox+X composite widget, hence the extra
+  margin) instead of a plain `QListWidgetItem`. The indentation was the only
+  visible trace of the real fault.
+
+So: **anything that answers "which plugins are there?" asks `plugins`, never
+`os.listdir` of one directory.** `page_scripts._scan_plugins`,
+`_resolve_edit_path`, `_expand_patterns`, `_is_in_dir` and `Commands.plugins`
+all go through `available_plugins` / `find_plugin` / `search_path_for`, so what
+is listed, what Edit opens, and what loads cannot disagree. `search_path_for`
+takes the profile directory as an argument for exactly one reason: the settings
+dialog must be able to ask about the directory the user is *currently typing*,
+not the one that was loaded.
+
+**A search path makes the origin of a plugin invisible, so it has to be shown.**
+An override is a legitimate thing to want, and a stale copy is
+indistinguishable from one — the difference is intent, which only the user
+knows. Both `/plugins` and the settings page therefore name the file each
+plugin was found in and flag anything it shadows. `_update_dir_status` also
+stops painting a missing plugin directory red when it was not configured: with
+a fallback that works, red there is a false alarm, and false alarms are how a
+user learns to ignore the colour that matters.
+
+Two smaller things fell out and are worth not re-breaking:
+
+- **Modules are registered under `_MODULE_PREFIX + name`, not their bare name,
+  and executed from an explicit file path.** The old package-style import
+  (`<basename-of-dir>.<name>`) went through the *repo root*, which contains both
+  `plugins.py` and `plugins/` — a module and a directory of the same name, whose
+  resolution order is a Python detail and not a decision anyone made. Executing
+  from the path also means reload has nothing to reload: a plugin that moved
+  between directories is picked up from wherever it is now.
+- **`_expand_auto_load` takes a list of directories.** Command scripts pass
+  `[cmdscripts_dir]` (they have one directory, not a search path) — the list is
+  not decoration, it is what stops the plugin path leaking into the script path.
+
+Covered by `tests/test_plugin_search_path.py`, which writes a plugin into each
+directory plus one name into both, and asserts on resolution order, the union,
+wildcard expansion across both, and that a reload replaces registrations rather
+than accumulating them. Verified to fail against a one-entry search path, with
+"a plugin present only in the application directory was not found" among the
+eight failures.
+
+### Plugin registration: it fires, or it refuses — never neither
+
+A plugin can register a slash command (`irc.add_command`), an application-wide
+hotkey (`irc.bind_key`), an `/on` hook (`irc.on`) and a timer (`irc.timer`).
+All four are stored in `state`, all four are owned by the plugin that made
+them, and all four obey one rule: **a registration that cannot possibly fire is
+refused at registration time, loudly, rather than accepted and then ignored.**
+That is not a stylistic preference — it is the failure mode this codebase keeps
+paying for, in four different subsystems already: a config entry the lister
+would not show, a JOIN sent three times because the hook ran per-005, an `/aop`
+mask that expanded to something other than what the user read, and a `-w` flag
+that answered a narrower question than the one asked. In every case the code
+did something reasonable-looking and said nothing, and the user concluded the
+opposite of the truth.
+
+So:
+
+- **`add_command` refuses a built-in name.** The lookup order in `docommand` is
+  built-in → plugin command → `/alias`, so a plugin registering `msg` would be
+  shadowed by `Commands.msg` forever. It also refuses `exec`, which
+  `hasattr(Commands, ...)` does *not* catch: `docommand` rewrites `exec` to
+  `exec_` on the line above the lookup, so the check has to name it explicitly.
+  `/alias` warns when it shadows a built-in *or* a plugin command, since an
+  alias is looked up last and would otherwise be defined successfully and never
+  run.
+- **`bind_key` refuses a sequence Qt cannot parse — and the test for that is an
+  empty `toString()`, not `isEmpty()`.** `QKeySequence('not a key')` is not
+  empty: it holds one key, `Qt.Key_unknown`, and reports `count() == 1`. Only
+  the round trip back to text shows it up, by coming back blank. The first
+  version of this checked `isEmpty()`, which caught a literally empty string and
+  nothing else — so every typo in the hotkey settings box installed a live
+  QShortcut bound to a key that does not exist, registered and listed by
+  `/hotkeys` and unable to fire. Bindings are keyed by the canonical
+  `toString()`, so `f12`, `F12` and `  F12  ` are one binding rather than three
+  (which is also what stops a reload accumulating them).
+- **`/hotkeys` exists because an application-wide hotkey is otherwise
+  invisible.** The only other way to find out what F12 does is to press it.
+
+**Ownership is per-plugin, and teardown lives in the loader.** `plugin.irc` is
+a module-level singleton, so its `_owned_*` lists were shared by everything
+that touched it — `remove_all()` tore down *every* plugin's hooks, and
+reloading one plugin silently disarmed the others. `_Irc.for_plugin(owner)`
+returns a `_PluginIrc` view: same live state (read through to the singleton and
+to `state`), its own registration lists. The loader gives each plugin its own
+view and calls `view.remove_all()` in `plugins.unload_plugin` — *not* from
+`Callbacks.die()`, because overriding `die()` without chaining up is both easy
+and common, and a plugin whose command outlives it raises from a dead instance
+while a hotkey that outlives it does so with no visible cause at all.
+
+**`irc.clients` / `irc.config` / `irc.app` are read from `state` on every
+access.** They used to be copied in `_init` at startup, and
+`qtpyrc._reload_config` *replaces* `state.config` with a freshly parsed
+`AppConfig` — so from the first Reload Configuration onward every plugin was
+reading the settings the client launched with, with nothing to say so.
+
+**`config_changed(self, irc)` is for the settings that cannot be read lazily,
+and only those.** `irc.get_config()` reads the current config each time it is
+called, so a plugin that looks a setting up at the point of use is already
+current and needs no notification. A hotkey is a live `QShortcut` and a command
+name is a key in a registry: both were handed to something else at registration
+time, so changing them in the settings dialog did nothing at all until the
+plugin was reloaded — the setting appeared to save and had no effect.
+`plugins.dispatch_config_changed()` is called from `settings_dialog._apply_to_ui`
+and from `qtpyrc._reload_config`, which are the two places the configuration
+changes under a running client.
+
+Covered by `tests/test_plugin_commands.py`.
+
+### nowplaying (`plugins/nowplaying.py`): two sources, because the obvious one is dead
+
+Announces the track foobar2000 is playing. It was written against
+**foo_comserver2**, the component everyone means by "foobar2000 COM" — and that
+component **cannot work on any current foobar2000, by construction**. It is a
+32-bit-only build last released for foobar2000 0.9 (foobar2000's own
+troubleshooter lists it for repeated crash reports), foobar2000 has been 64-bit
+by default since v2.0, and a 32-bit DLL cannot load into a 64-bit process. No
+amount of configuration reaches it. The reporter's machine was the ordinary
+case, not an unlucky one: foobar2000 v2.26 x64, no `Foobar2000.*` ProgID
+registered in HKCR/HKCU/HKLM at all, and an orphaned 32-bit `amip.dll` sitting
+unloaded in `components/` as the fossil of the 32-bit install it came from.
+
+**The lesson is about verification, not about foobar2000.** The COM API shape
+was taken from the component's documentation and every layer in front of it was
+tested against a fake, so the tests were green and the plugin was undeliverable.
+A fake proves the code does what you told it to; it cannot tell you that you are
+talking to something that does not exist. Where an integration cannot be
+exercised, **check that the target is real before trusting a green suite** — the
+five-minute registry scan that settled this was available the whole time.
+
+So there are two sources, and `_Source` (`fetch` + `probe`) is the seam:
+
+| source | component | works with | needs |
+|---|---|---|---|
+| `beefweb` | foo_beefweb | v1.6+, 32- **and** 64-bit, and remote hosts | nothing (stdlib HTTP+JSON) |
+| `com` | foo_comserver2 | 32-bit v1.x only | pywin32 / comtypes |
+
+`source: auto` tries beefweb then COM. COM is kept rather than deleted because
+it is the only option on a 32-bit v1.x install, and deleting a working path for
+a shrinking group is not a fix.
+
+Four things are load-bearing rather than incidental:
+
+- **A stopped player is an answer, not a failure.** `fetch` returns
+  `playing: False`; only a source that cannot answer at all raises
+  `NotRunning`. Get this backwards and `auto` falls through from a perfectly
+  healthy beefweb to COM, and the announcement reports some other component's
+  idea of the truth.
+- **beefweb's `columns` parameter is comma-separated with backslash escapes**
+  (boost `escaped_list_separator`, via `tryParseValueListStrict` in
+  `cpp/server/parsing.hpp`). Commas in a title-format spec are not exotic —
+  `$if(%artist%,%artist%,unknown)` is how everyone writes a fallback — and an
+  unescaped one does not arrive wrong, it arrives as *three separate columns*
+  and the announcement becomes the fragment `<$if(%artist%>`. Backslash needs
+  escaping too, for a different reason: boost expands `\n` and **throws** on an
+  escape it does not recognise, so a stray backslash is an HTTP 400 rather than
+  a bad string. `_beefweb_escape` handles both; the test un-escapes with its own
+  independent implementation, because a test that undoes the escaping with the
+  same code that applied it agrees with itself no matter what the server wants.
+- **An unrecognised `source` is refused, not silently read as `auto`.** Same
+  rule as the rest of this file: answering a narrower or different question than
+  the one asked, in silence, is the failure mode this codebase keeps paying for.
+- **`GetActiveObject`, never `Dispatch`** (COM path). `Dispatch` *launches* the
+  application, so a hotkey pressed by accident would start foobar2000. "Nothing
+  is playing" must not become "something is now playing".
+
+**`DEFAULT_FORMAT` is entirely conditional, and every branch of it was measured
+against a real library rather than reasoned about.** It announces
+`Artist - Title [320kbps mp3]`. The obvious spelling —
+`%artist% - %title% [%bitrate%kbps %codec%]` — is wrong for most of a real
+collection, in four separate ways, each found by querying beefweb's playlist
+API over a 9,000-track sample of one 32,483-track library (which reads other
+people's tracks without touching playback, so it costs the user nothing):
+
+| case | share | naive result |
+|---|---|---|
+| no artist tag | **39%** | `? - Title` — an absent field renders as a literal `?` |
+| lossless | flac/wav/ALAC/WMA-L | `950kbps flac` — a bitrate that means nothing |
+| bitrate unknown to foobar2000 | raw `.aac`, `.webm` | `?kbps aac` |
+| internet radio | — | `Title []` — no filename, so no extension |
+
+Two of those are worth stating as rules:
+
+- **Lossless is detected with `%__bitspersample%`, never with the extension.**
+  `.m4a` holds *either* lossy AAC or lossless ALAC and that library has both
+  (267 / 180), as it does for `.wma`. So "is it FLAC?" is not merely a special
+  case in the sense this codebase usually means — it gets the answer *wrong*
+  for 180 files. The bits-per-sample test is both the general rule and the
+  correct one.
+- **A missing bitrate cannot be computed, so it is omitted.** Raw `.aac` has no
+  `%length_seconds%` either, so deriving it from `%filesize%` yields 19018; for
+  `.webm` the arithmetic would count the video stream. `[aac]` is the honest
+  answer.
+
+And two syntax traps, both invisible until run:
+
+- **`[` and `]` are foobar2000's *conditional* syntax, not literals.** They must
+  be single-quoted (`' ['`, `']'`) or they are silently swallowed — the first
+  version printed `Artist - Title 320kbps mp3` with no brackets at all.
+- **The default now depends on `_beefweb_escape`** for its `$if`/`$puts`/
+  `$ifgreater` argument commas. The old default (`%filename_ext%`) had none and
+  so was immune; this one fragments into 11 columns and announces `<$puts(i>`
+  if the escaping regresses. `test_default_format_survives_escaping` guards it,
+  and asserts the default *contains* commas first — otherwise simplifying the
+  default would leave the test passing vacuously.
+
+`%title%` needs no guard: foobar2000 falls back to the filename for it (present
+for all 9,000 sampled). `%encoding%`, `%path_raw%`, `%list_index%` and
+`%queue_index%` are *not* available through beefweb and return `?` — do not
+reach for them.
+
+**The query runs on a worker thread whichever source is used**, with the result
+returned through a `QObject`/`Signal` created on the GUI thread. Both an
+out-of-process COM call and an HTTP request block until the other program
+answers, and foobar2000 can be busy, minimised, rescanning its library or
+showing a modal dialog. On the GUI thread that is a freeze of the whole client —
+this project already tracks GUI-thread stalls as a bug class of its own
+(`hang_watchdog.py`, the history maintenance thread), and one caused by
+*another program* would be the hardest of them to attribute.
+
+**`/np -probe` reports every source, not the selected one.** The failure this
+plugin hands a user is "nothing happened", and the causes are many and
+unrelated: no component, the wrong component for their foobar2000's
+architecture, the player not running, a wrong URL or ProgID, a missing COM
+library. Probing only what is configured is how someone ends up installing
+pywin32 to fix a missing foo_beefweb.
+
+Sending goes through `commands.send_message` / `commands.send_action`, per the
+rule above; errors are always local and never reach the channel. The target
+window is captured when the key is pressed, not when the answer arrives, and
+`window._widget_alive()` (the same question `link_preview` asks) decides
+whether there is still anywhere to put it.
+
+Covered by `tests/test_plugin_commands.py`. The beefweb half runs end-to-end
+against a stdlib `HTTPServer` — escaping, JSON mapping, stopped/paused, negative
+position/duration, malformed body, HTTP error — because it speaks a protocol a
+test can actually reproduce. The COM half is still only a fake, which is exactly
+the limitation described above.
+
+**Tests must stub a *source*, never the module-level `_fetch`.** The originals
+assigned `mod._fetch` and never restored it, so every later test in the file ran
+against whichever stub was installed last — which is how the first version of
+the beefweb tests "passed" without making a single HTTP request. `stub_source()`
+registers an entry in `SOURCES` and removes it in a `finally`, which is both
+undoable and more faithful: it leaves the real selection, fallback and error
+handling in the path under test.
+
 ### Duplicate-render audit (`render_audit.py`)
 
 The instrumentation for "I keep seeing some of my messages twice", which is what

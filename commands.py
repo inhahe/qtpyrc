@@ -372,37 +372,7 @@ class Commands:
     if not conn:
       window.redmessage('[Not connected]')
       return
-    if window.type == "channel":
-      target = window.channel.name
-      pnick = conn._pnick(conn.nickname, target)
-      pfx = conn._nick_prefix(conn.nickname, target)
-      chnlower = conn.irclower(target)
-      # ACTION has extra overhead: \x01ACTION ...\x01 = 9 bytes
-      chunks = conn.split_message(target, text, extra_overhead=9)
-      for chunk in chunks:
-        conn.me(target, chunk)
-        conn._own_actions.record(chnlower, chunk)
-        window.addline_nick(["* ", (pnick,), " %s" % chunk], state.actionformat)
-        state.irclogger.log_channel(conn._log_network, target,
-                              "* %s %s" % (conn.nickname, chunk))
-        if state.historydb:
-          state.historydb.add(conn._log_network, target.lower(),
-                              'action', conn.nickname, chunk, prefix=pfx)
-    elif window.type == "query":
-      target = window.remotenick
-      chunks = conn.split_message(target, text, extra_overhead=9)
-      for chunk in chunks:
-        conn.me(target, chunk)
-        window.addline_nick(["* ", (conn.nickname,), " %s" % chunk], state.actionformat)
-        state.irclogger.log(conn._log_network, target,
-                            "* %s %s" % (conn.nickname, chunk))
-        if state.historydb and window.query:
-          from irc_client import _query_history_key
-          state.historydb.add(conn._log_network,
-                              _query_history_key(window.query.nick, window.query.ident),
-                              'action', conn.nickname, chunk)
-    else:
-      window.redmessage("[Error: /me only works in channel or query windows]")
+    send_action(window, conn, text)
   action = me
 
   def notice(window, text):
@@ -709,27 +679,15 @@ class Commands:
       window.redmessage('[Plugin "%s" is already loaded. Use /plugin -r %s to reload.]' % (name, name))
       return
     if flag in ('-u', '-r'):
-      # Unload
-      if name not in state.activescripts:
+      from plugins import unload_plugin
+      if not unload_plugin(name):
         if flag == '-u':
           window.redmessage("[Plugin \"%s\" is not loaded]" % name)
           return
-      else:
-        old = state.activescripts.pop(name)
-        if hasattr(old, 'instance') and hasattr(old.instance, 'die'):
-          try:
-            old.instance.die()
-          except Exception:
-            traceback.print_exc()
-        elif hasattr(old, 'script') and hasattr(old.script, 'die'):
-          try:
-            old.script.die()
-          except Exception:
-            traceback.print_exc()
-        if flag == '-u':
-          window.redmessage("[Unloaded plugin: %s]" % name)
-          return
-        # -r: fall through to reload
+      elif flag == '-u':
+        window.redmessage("[Unloaded plugin: %s]" % name)
+        return
+      # -r: fall through to reload
     from plugins import load_script_by_name
     load_script_by_name(name, report_window=window)
 
@@ -757,28 +715,29 @@ class Commands:
       else:
         window.redmessage("[No plugins in auto-load]")
       return
-    plugins_cfg = state.config._data.get('plugins') or {}
-    plugins_dir = plugins_cfg.get('dir', 'plugins')
-    if not os.path.isabs(plugins_dir):
-      plugins_dir = os.path.join(os.path.dirname(os.path.abspath(state.config.path)), plugins_dir)
-    available = []
-    if os.path.isdir(plugins_dir):
-      for f in sorted(os.listdir(plugins_dir)):
-        path = os.path.join(plugins_dir, f)
-        if f.endswith('.py') and not f.startswith('_'):
-          name = f[:-3]
-        elif os.path.isdir(path) and os.path.isfile(os.path.join(path, '__init__.py')):
-          name = f
-        else:
-          continue
-        loaded = '(loaded)' if name in state.activescripts else ''
-        available.append(name + (' ' + loaded if loaded else ''))
-    if available:
-      window.redmessage("[Plugins in %s:]" % plugins_dir)
-      for p in available:
-        window.redmessage("  %s" % p)
-    else:
-      window.redmessage("[No plugins in %s]" % plugins_dir)
+    # Listed per directory of the search path, and the directory is named on
+    # each -- with a search path, "which plugin is this?" has an answer only if
+    # you can see where it came from.
+    from plugins import plugin_search_path, available_plugins
+    dirs = plugin_search_path()
+    winners = available_plugins(dirs)
+    shown = False
+    for d in dirs:
+      here = available_plugins([d])
+      if not here:
+        continue
+      shown = True
+      window.redmessage("[Plugins in %s:]" % d)
+      for name in sorted(here):
+        notes = []
+        if name in state.activescripts:
+          notes.append('loaded')
+        if winners[name].path != here[name].path:
+          notes.append('shadowed by %s' % winners[name].path)
+        window.redmessage(
+          "  %s%s" % (name, (' (' + ', '.join(notes) + ')') if notes else ''))
+    if not shown:
+      window.redmessage("[No plugins in %s]" % ', '.join(dirs))
 
   def scripts(window, text):
     """List command scripts.  /scripts [-a] — -a for auto-load only."""
@@ -1756,6 +1715,12 @@ class Commands:
         if c not in cmds:
           cmds.append(c)
       window.addline('[Commands: %s]' % ', '.join(cmds))
+      # Plugin-registered commands are not in reference.md -- they do not exist
+      # until a plugin is loaded -- so they are listed from the live registry.
+      # A command you cannot discover is a command nobody uses.
+      if state.plugin_commands:
+        window.addline('[Plugin commands: %s]'
+                       % ', '.join('/' + n for n in sorted(state.plugin_commands)))
       window.addline('[Topics: events, variables, popups, plugin, objects, cli]')
       window.addline('[Use /help <command> or /help <topic> for details]')
       return
@@ -1771,6 +1736,8 @@ class Commands:
         m = section_pat.search(ref)
         if m:
           _show_help_section(window, ref, m.group(0), start_match=m)
+        return
+      if _show_plugin_command_help(window, cmd):
         return
       window.redmessage('[No help for: /%s]' % cmd)
       return
@@ -1849,6 +1816,8 @@ class Commands:
     lines_found = _find_command_rows(ref, cmd)
 
     if not lines_found:
+      if _show_plugin_command_help(window, cmd):
+        return
       window.redmessage('[No help for: /%s]' % cmd)
       return
 
@@ -1898,6 +1867,24 @@ class Commands:
     except Exception as e:
       window.redmessage("[Error reading file: %s]" % e)
 
+  def hotkeys(window, text):
+    """List hotkeys bound by plugins.  /hotkeys
+
+    Plugin bindings are application-wide and invisible otherwise: the only
+    other way to find out what F12 does is to press it.
+    """
+    if not state.plugin_keys:
+      window.redmessage('[No plugin hotkeys bound]')
+      return
+    width = max(len(k) for k in state.plugin_keys)
+    for seq in sorted(state.plugin_keys):
+      info = state.plugin_keys[seq]
+      window.redmessage('  %-*s  %s%s'
+                        % (width, seq, info.get('description') or '(no description)',
+                           '  [%s]' % info['owner'] if info.get('owner') else ''))
+
+  keys = hotkeys  # alias
+
   # --- /alias ---
 
   def alias(window, text):
@@ -1942,6 +1929,18 @@ class Commands:
     cmd = parts[1]
     state._aliases[name] = cmd
     window.redmessage('[Alias /%s = %s]' % (name, cmd))
+    # An alias is looked up last, so one that collides with a built-in or with
+    # a plugin command is defined successfully and then never runs.  Say so at
+    # the moment it is written -- the alternative is a user editing an alias
+    # that was never going to fire and concluding the alias system is broken.
+    if hasattr(Commands, name) and not name.startswith('_'):
+      window.redmessage('[  WARNING: /%s is a built-in command, which takes '
+                        'precedence -- this alias will never run]' % name)
+    elif name in state.plugin_commands:
+      owner = state.plugin_commands[name].get('owner') or 'a plugin'
+      window.redmessage('[  WARNING: /%s is registered by %s, which takes '
+                        'precedence -- this alias will never run]'
+                        % (name, owner))
 
   def set(window, text):
     """Define or list persistent user variables (saved to variables.ini).
@@ -2650,6 +2649,31 @@ def _unescape_md(s):
   return s.replace('\\|', '|').replace('\\\\', '\\')
 
 
+def _show_plugin_command_help(window, cmd):
+  """Print help for a plugin-registered command.  True if there was one.
+
+  `/help` answers out of `docs/reference.md`, which cannot describe a command
+  that does not exist until a plugin is loaded.  Without this, every plugin
+  command answered "[No help for: /x]" -- which reads as "no such command"
+  rather than "documented elsewhere", and is how a working feature gets
+  reported as broken.  The text is whatever the plugin passed to
+  `add_command(..., help=...)`, falling back to the handler's docstring.
+  """
+  entry = state.plugin_commands.get(cmd)
+  if not entry:
+    return False
+  text = entry.get('help') or ''
+  if not text:
+    text = (getattr(entry['func'], '__doc__', '') or '').strip()
+  owner = entry.get('owner')
+  window.addline('  /%s — %s' % (cmd, text.strip().splitlines()[0]
+                                 if text.strip() else '(no description)'))
+  for line in text.strip().splitlines()[1:]:
+    window.addline('    %s' % line.strip())
+  window.addline('  [registered by plugin: %s]' % (owner or 'unknown'))
+  return True
+
+
 def _find_command_rows(ref, cmd):
   """Find reference.md table rows for /cmd, handling escaped pipes (\\|).
 
@@ -2834,6 +2858,54 @@ def send_message(window, conn, target, text, display_window=None):
     from plugins import _dispatch_to_plugins
     user = '%s!%s@%s' % (conn.nickname, conn.username or '', '')
     _dispatch_to_plugins('chanmsg', conn, (user, target, text), {})
+
+
+def send_action(window, conn, text):
+  """Send a CTCP ACTION to *window*'s channel or query, and record it.
+
+  The body of `/me`, lifted out the moment it acquired a second caller (the
+  nowplaying plugin, which sends an action when configured to).  `/me` keeps
+  the parts that belong to *parsing a command line* -- `_unquote`, the empty
+  check, the "[Not connected]" message -- and this keeps the parts that belong
+  to *sending an action*: chunking with ACTION's 9 bytes of overhead, the
+  self-echo record, the echo, the log line and the history row.
+
+  A caller that is not entering a command must not go through `/me` itself:
+  `docommand` expands `{...}` in its argument, so a filename or title
+  containing braces would be silently rewritten, and `_unquote` would eat the
+  quotes off a title that legitimately starts and ends with one.
+  """
+  if window.type == "channel":
+    target = window.channel.name
+    pnick = conn._pnick(conn.nickname, target)
+    pfx = conn._nick_prefix(conn.nickname, target)
+    chnlower = conn.irclower(target)
+    # ACTION has extra overhead: \x01ACTION ...\x01 = 9 bytes
+    chunks = conn.split_message(target, text, extra_overhead=9)
+    for chunk in chunks:
+      conn.me(target, chunk)
+      conn._own_actions.record(chnlower, chunk)
+      window.addline_nick(["* ", (pnick,), " %s" % chunk], state.actionformat)
+      state.irclogger.log_channel(conn._log_network, target,
+                            "* %s %s" % (conn.nickname, chunk))
+      if state.historydb:
+        state.historydb.add(conn._log_network, target.lower(),
+                            'action', conn.nickname, chunk, prefix=pfx)
+  elif window.type == "query":
+    target = window.remotenick
+    chunks = conn.split_message(target, text, extra_overhead=9)
+    for chunk in chunks:
+      conn.me(target, chunk)
+      window.addline_nick(["* ", (conn.nickname,), " %s" % chunk], state.actionformat)
+      state.irclogger.log(conn._log_network, target,
+                          "* %s %s" % (conn.nickname, chunk))
+      if state.historydb and window.query:
+        from irc_client import _query_history_key
+        state.historydb.add(conn._log_network,
+                            _query_history_key(window.query.nick, window.query.ident),
+                            'action', conn.nickname, chunk)
+  else:
+    window.redmessage("[Error: /me only works in channel or query windows]")
 
 
 def _find_query(client, nick):
@@ -3196,10 +3268,23 @@ def docommand(window, command, text=""):
     text = TokenizedString(text)
   if hasattr(Commands, command) and not command.startswith("_"):
     getattr(Commands, command)(window, text)
+    return
+  # Plugin-registered commands (plugin.irc.add_command).  Between the built-ins
+  # and aliases: add_command refuses a built-in name outright, and /alias warns
+  # when it shadows either, so no name can be taken twice without somebody
+  # being told.
+  entry = state.plugin_commands.get(command)
+  if entry:
+    try:
+      entry['func'](window, text)
+    except Exception as e:
+      traceback.print_exc()
+      window.redmessage('[/%s failed: %s: %s]'
+                        % (command, type(e).__name__, e))
+    return
+  # Try user-defined alias
+  result = _expand_alias(command, text)
+  if result:
+    docommand(window, result[0], result[1])
   else:
-    # Try user-defined alias
-    result = _expand_alias(command, text)
-    if result:
-      docommand(window, result[0], result[1])
-    else:
-      window.redmessage("[Unknown command: /%s]" % command)
+    window.redmessage("[Unknown command: /%s]" % command)

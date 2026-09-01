@@ -86,6 +86,22 @@ _on_hooks = {}
 # _aliases[name] = command_string
 _aliases = {}
 
+# Slash commands registered by plugins (plugin.irc.add_command).
+# plugin_commands[name] = {'func': callable(window, text), 'help': str,
+#                          'owner': plugin name or None}
+# Looked up by commands.docommand *after* the built-in Commands class and
+# *before* aliases; registration refuses a name Commands already defines,
+# because a registration that silently never fires is the worst of the three
+# possible outcomes.
+plugin_commands = {}
+
+# Application hotkeys registered by plugins (plugin.irc.bind_key).
+# plugin_keys[canonical_sequence] = {'shortcut': QShortcut, 'func': callable,
+#                                    'description': str, 'owner': plugin name}
+# Keyed by QKeySequence.toString() rather than by what the caller typed, so
+# "f12", "F12" and "  F12  " are one binding rather than three.
+plugin_keys = {}
+
 # User-defined variables
 # _variables merges persistent + temporary for lookup.
 # _persistent_vars are saved to variables.ini (/set).

@@ -181,6 +181,46 @@ reproducing and identifying which five.
 
 ## Fixed, with a residue worth knowing
 
+### A profile's plugin directory shadowed the shipped one, with no fallback (fixed 2026-09-01)
+
+**Reported as:** two symptoms at once for `nowplaying`, neither of which names
+the cause — "nowplaying settings aren't showing up under plugins in the
+treeview" and "the checkbox line for nowplaying in the plugins page is indented
+a bit compared to the other 5 plugins listed".
+
+**Cause:** `plugins._resolve_scripts_dir()` joined `plugins.dir` to the *config
+file's* directory and that was the only place plugins were looked for. A client
+run with `me/config.yaml` loaded from `me/plugins/` and could not see the
+shipped `plugins/` at all. Both symptoms follow: the plugin never loaded, so
+`page_plugin_config.get_plugin_names()` (which lists only plugins that loaded
+with `config_fields`, or that already have a saved `plugins.<name>` block) had
+nothing to list; and a name in `auto_load` that is not in the directory was
+classified *external* and drawn by `_add_external_item` as a checkbox+X widget
+rather than a plain `QListWidgetItem`, whose margins are the indentation.
+
+**Fix:** `plugin_search_path()` — profile directory, then the application's own
+`plugins/` — with `find_plugin` / `available_plugins` as the single resolvers
+used by the loader, the settings pages and `/plugins` alike. See the "Plugins
+live on a search path" section of `CLAUDE.md`. Covered by
+`tests/test_plugin_search_path.py`.
+
+**Residue 1: the profile copies were made by us, at profile-creation time.**
+`qtpyrc._create_profile` copied the whole of `plugins/` into every new profile,
+which is what made the single-directory loader appear to work. Each copy is a
+fork that receives no fixes: the reporter's `me/plugins/triviabot` was six
+months behind (missing the `plugin_prefix` support added 2026-03-27) and nothing
+said so. The copying is gone, and the duplicates in `me/plugins/` were deleted
+on 2026-09-01 (`chess.py`, `nowplaying.py`, `rotate.py`, `secret.py`,
+`triviabot/`; `example.py` is the profile's own and stayed). **Any profile
+created before 2026-09-01 still has its copies** — they will keep winning over
+the shipped versions until deleted, which is now safe to do and is what the
+shadow markers in `/plugins` and the settings page are for.
+
+**Residue 2: a stale override and a deliberate one are the same file.** The
+difference is intent, which lives only in the user's head, so nothing can
+resolve this automatically — the shadowed path is reported instead, and the
+choice is left where it belongs.
+
 ### Bouncer playback appended a duplicate copy of every channel's tail to the log files (fixed 2026-08-31)
 
 **Reported as:** nothing. Found while adding notice logging, because the new

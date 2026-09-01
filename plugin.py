@@ -43,21 +43,59 @@ class _Irc:
     argument that every callback receives.
     """
 
-    def __init__(self):
-        self.clients = None
-        self.config = None
-        self.app = None
+    def __init__(self, owner=None):
         self._get_active_window = None
         self._get_networks = None
+        self._owner = owner
         self._owned_hooks = []  # (event, name) pairs registered via on()
+        self._owned_timers = []      # timer names created via timer()
+        self._owned_commands = []    # command names registered via add_command()
+        self._owned_keys = []        # canonical key sequences via bind_key()
 
-    def _init(self, *, clients, config, app, get_active_window, get_networks):
-        """Called once at startup to wire up live references."""
-        self.clients = clients
-        self.config = config
-        self.app = app
+    def for_plugin(self, owner):
+        """Return a view of this API that remembers *owner* registered things.
+
+        `plugin.irc` is a module-level singleton, so the registration lists
+        above are shared by everything that touches it -- which meant
+        `remove_all()` (reached from `Callbacks.die()`) tore down *every*
+        plugin's hooks, not just the hooks of the plugin being unloaded.
+        Reloading one plugin silently disarmed the others, and nothing said so.
+
+        The loader therefore hands each plugin its own bound view.  It shares
+        the live references (they are read from `_core`) and differs only in
+        who is recorded as the owner of a registration and thus in what
+        `remove_all()` takes away.
+        """
+        return _PluginIrc(self, owner)
+
+    def _init(self, *, get_active_window, get_networks):
+        """Called once at startup to wire up the two callables."""
         self._get_active_window = get_active_window
         self._get_networks = get_networks
+
+    # `clients`, `config` and `app` are read from `state` on every access
+    # rather than copied at startup.  `qtpyrc._reload_config` *replaces*
+    # `state.config` with a freshly parsed AppConfig, so a copy taken at
+    # startup silently goes stale the first time the user reloads the config
+    # or saves the settings dialog -- a plugin would then be reading the
+    # settings the client had when it launched, with nothing to say so.
+    @property
+    def clients(self):
+        """The live set of `Client` instances."""
+        import state
+        return state.clients
+
+    @property
+    def config(self):
+        """The current `AppConfig` (re-read after a config reload)."""
+        import state
+        return state.config
+
+    @property
+    def app(self):
+        """The QApplication."""
+        import state
+        return state.app
 
     @property
     def mainwin(self):
@@ -115,10 +153,9 @@ class _Irc:
         """Case-insensitive IRC string comparison using *conn*'s casemapping."""
         return conn.irclower(a) == conn.irclower(b)
 
-    @staticmethod
-    def msg(conn, target, message):
+    def msg(self, conn, target, message):
         """Send a PRIVMSG via *conn*. Also echoes to the local window."""
-        _Irc.say(conn, target, message)
+        self.say(conn, target, message)
 
     @staticmethod
     def notice(conn, target, message):
@@ -211,29 +248,34 @@ class _Irc:
 
     # --- convenience methods ---
 
-    @staticmethod
-    def say(conn, target, message):
+    def say(self, conn, target, message):
         """Send a message to *target* (channel or nick) via *conn*.
-        Also echoes to the local window and saves to history."""
-        import state
-        conn.say(target, message)
-        # Echo to local window
-        chnlower = conn.irclower(target)
-        chan = conn.client.channels.get(chnlower)
-        if chan and chan.window:
-            chan.window.addline_msg(conn.nickname, message)
-            # Save to history
-            if state.historydb:
-                state.historydb.add(conn._log_network, chnlower,
-                                    'message', conn.nickname, message)
-            state.irclogger.log_channel(conn._log_network, target,
-                                        '<%s> %s' % (conn.nickname, message))
-        else:
-            # Check queries
-            for qkey, q in conn.client.queries.items():
-                if conn.irclower(q.nick) == chnlower and q.window:
-                    q.window.addline_msg(conn.nickname, message)
-                    break
+
+        Echoes it, logs it, saves it to history, previews its links and
+        dispatches it to plugin hooks -- because it goes through
+        `commands.send_message`, which is the one place that knows what
+        sending a message means.
+
+        This used to be a sixth hand-written copy of that, and had drifted
+        exactly the way the other five did: it never chunked, so a long line
+        was silently truncated by the server; it recorded nothing with
+        `conn._own_messages`, so on a bouncer that echoes, every message a
+        plugin sent came back and was drawn and stored a second time; it
+        logged to the channel log but never to a query log; it saved a channel
+        row without the mode prefix; and it decided "is this a channel?" by
+        looking for the target in `conn.client.channels` rather than asking
+        `conn.is_channel()`, so a PM to a nick with no open query window fell
+        through the `else` branch and was displayed nowhere at all.
+        """
+        from commands import send_message
+        # The issuing window: send_message resolves the *display* window from
+        # the target itself, and uses this one only for `window.client` and as
+        # the fallback for a target with no window of its own.  It must
+        # therefore belong to `conn`'s client, which the active window need
+        # not -- a plugin can be sending to network A while the user is
+        # looking at network B.
+        window = conn.client.window or self.active_window
+        send_message(window, conn, target, message)
 
     @staticmethod
     def channel(window):
@@ -433,6 +475,8 @@ class _Irc:
         """
         from exec_system import _exec_set_timer
         _exec_set_timer(window, name, reps, secs, command)
+        if name not in self._owned_timers:
+            self._owned_timers.append(name)
 
     def cancel_timer(self, name):
         """Stop and remove a named timer."""
@@ -441,6 +485,179 @@ class _Irc:
         if info:
             info['timer'].stop()
             del state._timers[name]
+        try:
+            self._owned_timers.remove(name)
+        except ValueError:
+            pass
+
+    # --- slash commands ---
+
+    def add_command(self, name, func, help=''):
+        """Register a slash command.  ``func(window, text)``.
+
+        *name* is written without the command prefix (``'np'``, not ``'/np'``)
+        and is matched case-insensitively, like every built-in command.  *text*
+        arrives as a `commands.TokenizedString` with ``{variable}`` expansion
+        already applied, exactly as a built-in receives it.
+
+        Raises ValueError if *name* is already a built-in command.  A plugin
+        cannot override a built-in: the alternative -- registering it and
+        having the built-in win anyway -- is a registration that silently never
+        fires, and this project has paid for that kind of failure repeatedly.
+        Registering the same name twice from a plugin *is* allowed and replaces
+        the previous one, so reloading a plugin does not need a special case.
+
+        The lookup order is built-in, then plugin command, then `/alias`.
+        `/alias` warns when it shadows either of the first two.
+        """
+        import state
+        from commands import Commands
+        key = name.strip().lower().lstrip('/')
+        if not key:
+            raise ValueError('command name is empty')
+        if key.startswith('_') or ' ' in key:
+            raise ValueError('bad command name: %r' % name)
+        if hasattr(Commands, key) or key == 'exec':
+            raise ValueError('/%s is a built-in command and cannot be '
+                             'overridden by a plugin' % key)
+        if not callable(func):
+            raise ValueError('command handler for /%s is not callable' % key)
+        state.plugin_commands[key] = {
+            'func': func, 'help': help or '', 'owner': self._owner}
+        if key not in self._owned_commands:
+            self._owned_commands.append(key)
+        return key
+
+    def remove_command(self, name):
+        """Unregister a slash command added with `add_command`."""
+        import state
+        key = name.strip().lower().lstrip('/')
+        state.plugin_commands.pop(key, None)
+        try:
+            self._owned_commands.remove(key)
+        except ValueError:
+            pass
+
+    # --- hotkeys ---
+
+    def bind_key(self, sequence, func, description=''):
+        """Bind an application-wide hotkey.  ``func()`` takes no arguments.
+
+        *sequence* is anything `QKeySequence` understands: ``'F12'``,
+        ``'Ctrl+Shift+P'``, ``'Alt+N'``.  The binding is application-scoped, so
+        it fires from any window and while the input box has focus.
+
+        Returns the canonical form of the sequence (which is also the key it is
+        stored under, so ``'f12'`` and ``'F12'`` are one binding).  Raises
+        ValueError if Qt cannot parse *sequence* -- an unparseable sequence
+        yields a shortcut that silently never fires, which is the same
+        silent-failure shape `add_command` refuses.
+
+        **The test for "Qt could not parse this" is an empty `toString()`, not
+        `isEmpty()`.**  `QKeySequence('not a key')` is *not* empty: it holds one
+        key, `Qt.Key_unknown`, and reports `count() == 1`.  Only the round trip
+        back to text shows it up, by coming back blank.  Checking `isEmpty()`
+        caught a genuinely empty string and nothing else, so every typo in the
+        hotkey box installed a live QShortcut bound to a key that does not
+        exist -- registered, listed by `/hotkeys`, and unable to fire.
+
+        Binding a sequence that is already bound replaces the old binding, so a
+        plugin reload does not accumulate shortcuts.
+        """
+        import state
+        from PySide6.QtGui import QKeySequence, QShortcut
+        from PySide6.QtCore import Qt
+        if not callable(func):
+            raise ValueError('hotkey handler for %r is not callable' % sequence)
+        seq = QKeySequence(str(sequence).strip())
+        canonical = seq.toString()
+        if seq.isEmpty() or not canonical:
+            raise ValueError('cannot parse key sequence: %r' % sequence)
+        self.unbind_key(canonical)
+        parent = self.mainwin
+        if parent is None:
+            raise RuntimeError('no main window yet -- bind_key needs the GUI')
+        sc = QShortcut(seq, parent)
+        sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        sc.activated.connect(func)
+        state.plugin_keys[canonical] = {
+            'shortcut': sc, 'func': func, 'description': description or '',
+            'owner': self._owner}
+        if canonical not in self._owned_keys:
+            self._owned_keys.append(canonical)
+        return canonical
+
+    def unbind_key(self, sequence):
+        """Remove a hotkey bound with `bind_key`.  Returns True if there was one."""
+        import state
+        from PySide6.QtGui import QKeySequence
+        canonical = QKeySequence(str(sequence).strip()).toString()
+        if not canonical:
+            # Unparseable, so it can never have been bound (bind_key refuses
+            # it).  Returning early keeps '' from being usable as a lookup key
+            # that every unparseable spelling would share.
+            return False
+        entry = state.plugin_keys.pop(canonical, None)
+        try:
+            self._owned_keys.remove(canonical)
+        except ValueError:
+            pass
+        if entry is None:
+            return False
+        sc = entry['shortcut']
+        # setEnabled first: the QShortcut outlives this call until Qt gets round
+        # to deleting it, and an enabled orphan still fires.
+        sc.setEnabled(False)
+        sc.setParent(None)
+        sc.deleteLater()
+        return True
+
+    # --- teardown ---
+
+    def remove_all(self):
+        """Remove everything registered through this view: hooks, timers,
+        commands and hotkeys.
+
+        Called by the loader on unload and reload -- not from `Callbacks.die()`
+        -- so that a plugin which overrides `die()` without chaining up is
+        still cleaned up.  A plugin whose command outlives it would raise from
+        a dead instance; a hotkey that outlives it would do so invisibly.
+        """
+        self.remove_all_hooks()
+        for name in list(self._owned_timers):
+            self.cancel_timer(name)
+        for name in list(self._owned_commands):
+            self.remove_command(name)
+        for seq in list(self._owned_keys):
+            self.unbind_key(seq)
+
+
+class _PluginIrc(_Irc):
+    """One plugin's view of `_Irc`: same live state, its own ownership lists.
+
+    Everything not listed here is inherited.  `clients`, `config` and `app` are
+    already read from `state` on every access by the base class, so a view
+    never goes stale; the two callables wired up by `_init` are read through to
+    the singleton below for the same reason.  Only the registration bookkeeping
+    is per-plugin.
+    """
+
+    def __init__(self, core, owner):
+        # Deliberately *not* _Irc.__init__: that assigns
+        # `self._get_active_window = None`, which the read-through properties
+        # below refuse.
+        self._core = core
+        self._owner = owner
+        self._owned_hooks = []
+        self._owned_timers = []
+        self._owned_commands = []
+        self._owned_keys = []
+
+    _get_active_window = property(lambda self: self._core._get_active_window)
+    _get_networks = property(lambda self: self._core._get_networks)
+
+    def _init(self, **kw):
+        raise RuntimeError('_init() belongs to the plugin.irc singleton')
 
 
 # Module-level singleton — initialised by plugins.init_irc() at startup
@@ -536,6 +753,18 @@ class Callbacks:
         pass
 
     # --- lifecycle ---
+    def config_changed(self, irc):
+        """Called after the configuration is reloaded or the settings dialog
+        is applied, so a plugin can re-read `irc.get_config(...)`.
+
+        Only override this for settings that cannot be read lazily -- a hotkey
+        bound with `bind_key` or a name registered with `add_command` was
+        handed to something else at registration time, so it keeps the old
+        value until the plugin re-registers it.  Anything read at the point of
+        use is already current and needs nothing here.
+        """
+        pass
+
     def die(self):
         """Called when the plugin is unloaded.  Cleans up /on hooks."""
         self.irc.remove_all_hooks()
