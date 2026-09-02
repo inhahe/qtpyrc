@@ -558,6 +558,35 @@ def _trailing(line, skip):
     return rest.lstrip(":") if rest.startswith(":") else rest
 
 
+def wait_until_listening(*ports, timeout=60.0):
+    """Block until every port in *ports* accepts a connection.
+
+    Replaces the ``time.sleep(1.5)`` that five tests used after spawning this
+    server. A flat sleep is a guess about how long another process takes to
+    start, and the guess is wrong exactly when the machine is busy -- which is
+    when tests are most often run. The failure was not a clean timeout either:
+    the test carried on and hit ConnectionRefusedError several lines later, or
+    (worse) connected to the IRC port before the *control* port was up and
+    reported every event as "never fired".
+
+    Returns True if everything came up, False on timeout -- callers should say
+    so rather than proceeding, so a slow start never masquerades as a bug in
+    whatever they were testing.
+    """
+    import socket as _socket
+    deadline = time.monotonic() + timeout
+    for port in ports:
+        while True:
+            try:
+                with _socket.create_connection(('127.0.0.1', port), timeout=1):
+                    break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(0.05)
+    return True
+
+
 async def main():
     port = 6699
     cport = 6700

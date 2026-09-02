@@ -7,28 +7,26 @@ when the fix left a residue worth knowing about.
 
 ## Open
 
-### GUI stalls of 2–9s with no Python frame below `loop.run_forever()`
+### GUI stalls with no Python frame below `loop.run_forever()`
 
-**Where:** unknown — inside Qt/C++.
-**Evidence:** `me/hangs.log`. 239 of the first 315 samples bottom out at
-`qtpyrc.py … loop.run_forever()` → `qasync … self.__app.exec()` with no qtpyrc
-frame beneath, so whatever is blocking is native: layout, painting, font
-handling, or a native dialog. One sample (2026-08-16 10:44:54, 3.73s) landed in
-`window.py:199 paintEvent`, which suggests at least some are the chat-view
-layout cost below.
-**Diagnosis is now automatic (2026-08-26).** The watchdog escalates exactly
-these — and only these — to `py-spy dump --native`, recording the GUI thread's
-real Qt/Win32 frames. Gated on `logging.hang_watchdog.native_stacks`, needs
-`py-spy` installed, skipped when the Python stack already names the blocker
-(the sample suspends the process, so it lengthens the stall it measures) and
-rate-limited to one per 30s. See `hang_watchdog.py` and
-`tests/test_hang_watchdog.py`.
+**Where:** partly Qt/C++, partly the machine, and — until 2026-09-02 — partly
+the watchdog itself and the chat path's own disk writes.
+**Evidence:** `me/hangs.log`, now 474 stall reports (2026-08-16 → 2026-09-02).
+The great majority bottom out at `qtpyrc.py … loop.run_forever()` → `qasync …
+self.__app.exec()` with no qtpyrc frame beneath, so whatever is blocking is
+native: layout, painting, font handling, or a native dialog.
 
-**Answered 2026-08-26: there are two causes, and the larger one is not ours.**
-Fifteen native samples now exist. They split cleanly by what the GUI thread was
-doing at the moment it was sampled.
+**Diagnosis is automatic.** The watchdog escalates exactly these — and only
+these — to `py-spy dump --native`. Gated on
+`logging.hang_watchdog.native_stacks`, needs `py-spy` installed, skipped when
+the Python stack already names the blocker, and since 2026-09-02 gated on the
+stall *still happening* and on it having lasted 5s, at most one sample per 5
+minutes. See `hang_watchdog.py` and `tests/test_hang_watchdog.py`.
 
-**Six are `(idle)` — the GUI thread was not running at all.** The 12.51s stall
+**2026-08-26, over the first 15 native samples: two causes, and the larger one
+is not ours.**
+
+**Six were `(idle)` — the GUI thread was not running at all.** The 12.51s stall
 of 2026-08-26 19:35:57 has it parked in
 `NtUserMsgWaitForMultipleObjectsEx` inside `QEventDispatcherWin32::processEvents`:
 waiting for a message, exactly as an idle app should be, while a 500ms `QTimer`
@@ -37,28 +35,48 @@ the scheduler's, not the program's.** The machine was at **95.3% of its commit
 limit** (234,749MB of 246,244MB) with 13,557 page faults/sec, so every working
 set had been trimmed — python.exe showed 5.9MB resident against 25.6MB private.
 An idle thread whose pages are on disk still misses its timers while they fault
-back in. Corroboration: `py-spy` needed **3.61s** to take one sample of a
-suspended process.
+back in. Startup to first chat paint measured **3.886s cold vs 1.41s warm** on
+identical config and data, the gap being paging, not work. **Nothing to fix in
+qtpyrc for those.** The client cannot outrun a machine that is out of commit.
 
-That is also the whole of the "several seconds between hitting enter and
-anything happening" report, and of "it takes a long time between launch and
-anything appearing" — startup to first chat paint measured **3.886s cold vs
-1.41s warm** on identical config and data, the gap being paging, not work.
-**Nothing to fix in qtpyrc for these.** The client cannot outrun a machine that
-is out of commit.
+**Nine were `active`/`active+gil`.** Those are ours, and both are entries of
+their own below: `ChatOutput.paintEvent` (a `QTextDocumentLayout::draw` under
+`QTextBrowser::paintEvent`), and window construction on JOIN.
 
-**Nine are `active`/`active+gil` — those are ours**, and both are already
-entries of their own below: `ChatOutput.paintEvent` (a
-`QTextDocumentLayout::draw` under `QTextBrowser::paintEvent`), and window
-construction on JOIN. Note the second is *also* distorted by the paging above:
-a `Channelwindow` measured warm costs 13.6ms, and the sample that named it was
-an 8.18s stall.
+**2026-09-02, over all 474 reports: that reading was right about paging and
+wrong about the rest, in two ways.**
 
-**Still open:** whether an *active* sample ever accounts for a multi-second
-stall on an unloaded machine. Every one so far is either a known-cost operation
-(paint, tile) or an operation whose warm cost is three orders of magnitude
-below the stall it was blamed for. Re-check `me/hangs.log` after a session run
-with commit charge under, say, 70%.
+**1. Two of the three biggest contributors were ours after all**, and both are
+now fixed — see "The hang watchdog was the biggest single cause of the freezes
+it measured" and "Chat logging and history writes blocked the GUI thread on the
+filesystem" below. Briefly: the watchdog's own py-spy sampling accounted for
+**429 seconds** of suspended process across 109 samples, and the send/receive
+path ran up to three synchronous filesystem syscalls on the GUI thread per chat
+line. Both are exactly the sort of thing that *looks* like paging from the
+heartbeat, because both leave the GUI thread idle or in Qt with no Python frame.
+
+**2. The `idle` reading was over-generalised.** 68 of the 91 native samples are
+`idle`, which the 2026-08-26 analysis read as "the scheduler took the CPU away".
+Some of that is real paging. But the sample is taken *after* the report has been
+written to disk, so an `idle` stack is equally consistent with "the stall ended
+while we were writing about it" — and once the sampling was gated on the stall
+still being live, that alternative explains most of them. **An idle native stack
+does not distinguish "descheduled" from "already recovered", and the earlier
+entry treated it as though it did.**
+
+**Still open**, and now properly separable for the first time:
+
+* Whether an *active* sample ever accounts for a multi-second stall on an
+  unloaded machine. Every one so far is either a known-cost operation (paint,
+  tile) or one whose warm cost is three orders of magnitude below the stall it
+  was blamed for. The `active` samples name
+  `QTextDocumentLayout::ensureLayouted`, `QTextEngine::shapeTextWithHarfbuzzNG`,
+  `QRasterPaintEngine`, `QBackingStore::flush` and DWrite — i.e. the
+  `ChatOutput.paintEvent` entry below, not a filesystem stall.
+* Re-check `me/hangs.log` after a session run with commit charge under ~70%
+  **and** with the 2026-09-02 fixes in place. Until then there is no clean
+  measurement of the residual: every earlier number is contaminated by the
+  watchdog's own suspensions, and the log says by how much on each report.
 
 ### `ChatOutput.paintEvent` lays out the whole backscroll when the view is at the bottom
 
@@ -164,22 +182,186 @@ that is a deliberate choice rather than an oversight.
 echoed one could be drawn twice, exactly as with PMs. See the bouncer-echo entry
 above; `SelfEchoTracker` has no notice list yet.
 
-### `test_on_events.py` failed 5 of 22 once and has not repeated
-
-**Where:** `tests/test_on_events.py`.
-**Evidence (2026-08-26):** one run reported `Total: 22 | Passed: 16 | Failed: 5 |
-Skipped: 1`. Five subsequent runs — including one deliberately started
-immediately after `test_pm_activity_live.py`, to test the "leftover state from
-the previous test" theory — all reported `21 | 0 | 1`. The failing names were not
-recorded.
-**Suspected:** a timing race in the test harness rather than in `/on` itself; the
-test drives a live connection to `tests/irc_test_server.py` and waits on fixed
-delays. **Unconfirmed** — do not "fix" it by lengthening a sleep without first
-reproducing and identifying which five.
-
 ---
 
 ## Fixed, with a residue worth knowing
+
+### The hang watchdog was the biggest single cause of the freezes it measured (fixed 2026-09-02)
+
+**Where:** `hang_watchdog.py`, `_maybe_write_native()`.
+**Reported as:** part of "qtpyrc hangs for a few seconds every once in a while".
+
+`logging.hang_watchdog.native_stacks` escalates a stall with no Python frame to
+`py-spy dump --native`. py-spy **suspends every thread in the target process**
+while it walks them, and the target is qtpyrc itself. Measured over the whole of
+`me/hangs.log` (474 stall reports, 2026-08-16 → 2026-09-02):
+
+| | |
+|---|---|
+| total process suspension caused by sampling | **429s across 109 samples** |
+| median recovery, stalls where py-spy ran | **6.56s** |
+| median recovery, stalls where it did not | **3.66s** |
+| samples that beat the 10s subprocess timeout | 10, worst **50.5s** |
+| samples that caught the GUI thread `idle` | **68 of 91** (62 in `NtUserMsgWaitForMultipleObjectsEx`) |
+
+Three things were wrong at once:
+
+1. **The gate was "the Python stack is uninformative", never "the stall is still
+   happening".** The native sample is taken *after* the GUI stack and all
+   ~15 thread stacks have been written to disk and echoed to the console, and on
+   a loaded filesystem that write is itself slow — so by the time py-spy ran,
+   the GUI had usually recovered. That is what the 68 `idle` samples are: a
+   healthy, idle event loop, frozen for seconds to be photographed.
+2. **The 10s timeout could never fire.** `subprocess.run(timeout=…)` is enforced
+   by the calling thread, and py-spy suspends that thread along with the rest.
+   A timeout enforced from inside a process that the thing being timed has
+   frozen is not a timeout.
+3. **`--native` and `--nonblocking` are mutually exclusive** in py-spy ("Can't
+   get native stack traces with the --nonblocking option"), so there is no cheap
+   sample to fall back to. Verified against the running client, which is also
+   the only safe way to check: `--nonblocking` does not pause the target.
+
+Fixed by gating on liveness rather than on having-started: the heartbeat is
+re-read immediately before spawning py-spy and the sample is skipped if the GUI
+has recovered; the stall must have lasted `_NATIVE_MIN_STALL` (5s); and
+`_NATIVE_MIN_INTERVAL` went 30s → 300s. Every stall still gets its free Python
+stack. Skipped samples say which gate stopped them.
+
+**Residue 1 — the numbers in the entry above were measured through this.** Every
+"GUI recovered after Ns" in `me/hangs.log` before 2026-09-02 that has a py-spy
+block in it is inflated by that block, and the log says by how much. Do not
+compare a pre-2026-09-02 duration against a post- one without subtracting it.
+
+**Residue 2 — the general rule.** An instrument that perturbs what it measures
+must be gated on the measurement still being live, not on it having begun. The
+duplicate-render audit already obeys this in its own way (it ignores a call that
+drew nothing, so it never reports a held-back line against its own flush); the
+watchdog did not.
+
+### Chat logging and history writes blocked the GUI thread on the filesystem (fixed 2026-09-02)
+
+**Where:** `logger.py` (`IRCLogger.log`), `history.py` (`HistoryDB.add`,
+`add_url`), `render_audit.py` (`_write`).
+**Reported as:** "qtpyrc still hangs for a few seconds every once in a while
+before reacting after I hit enter on a post. i think it may be when the
+filesystem is under load." The reporter's diagnosis was correct.
+
+Sending one message ran three synchronous filesystem operations on the GUI
+thread, between putting the line on the wire and drawing it:
+
+```
+irclogger.log_channel(...)   write() + flush()      <- a WriteFile syscall
+historydb.add(...)           INSERT + commit()      <- a WriteFile syscall
+historydb.add_url(...)       INSERT + commit()      <- per URL in the line
+```
+
+Receiving one ran the same three. All of them read as free because each is a
+handful of microseconds against a healthy disk — but `flush()` and `commit()`
+are syscalls, and a syscall against a busy filesystem takes as long as the
+filesystem takes. `me/hangs.log` names all of them as GUI-thread stall sites:
+`logger.py log`, `history.py add`, `history.py add_url`, `render_audit _write`.
+
+A fourth wait was purely structural: `HistoryDB` had **two** write connections
+(the GUI thread's and the maintenance thread's), WAL permits one writer, and the
+two were serialised by `busy_timeout` — set to **15000**. Every 500 inserts the
+maintenance pass took a write transaction, and until it let go the GUI thread's
+next insert blocked. By design, for up to fifteen seconds.
+
+Fixed by moving all of it off the GUI thread:
+
+* New `bgwriter.py`: one background thread, one FIFO queue, shared by the chat
+  logs and the render audit. Callers compute the path and stamp the line (which
+  must happen at call time) and hand it over.
+* `HistoryDB` collapsed onto a **single writer thread** that owns the only write
+  connection and also does the pruning and the checkpoints, so the
+  `busy_timeout` contention no longer exists rather than being tuned. The GUI
+  thread gets a `query_only` connection.
+* Row ids are allocated on the calling thread so `current_max_id()` stays
+  correct immediately, and every read drains the write queue first
+  (`flush_pending()`) so a replay bounded by that id can still see the row.
+
+**Residue 1 — the trade is deliberate, and it moves the wait rather than
+abolishing it.** A *read* can now wait for the writer, where before every
+*message* waited for the disk. Reads happen on a join, on opening a window and
+on scrolling to the top; writes happen on every line of traffic. If a future
+report is "opening a window is slow when the disk is busy", this is why, and the
+answer is not to drop the barrier — dropping it makes a just-sent message vanish
+from its own backlog.
+
+**Residue 2 — the diagnostics that were left switched on.** Both the render
+audit and the watchdog's native stacks were enabled in `me/config.yaml`, and
+both had already answered the question they were installed for. The cheapest
+instrument is the one that is switched off once it has done its job.
+
+The render audit was the worse offender, because it shipped **on by default** —
+`config.py`, `settings/page_logging.py` and `defaults/config.defaults.yaml` all
+said `true`, and the defaults file is copied wholesale into every new profile,
+so every user ran it forever without asking. It is an instrument, not a feature:
+it wraps every render method, keys and retains every line drawn, and appends to
+a log file for the whole session (1.8 MB in one day here). **Default flipped to
+`false` on 2026-09-02** in all three, and the key taken out of both YAML files
+— in `defaults/config.defaults.yaml` as `#~ enabled: false`, the documented
+commented-out form, so the help text and the settings tooltip survive.
+
+`logging.hang_watchdog.native_stacks` is deliberately still on: unlike the
+render audit its question is still open (see the GUI-stalls entry), and it is
+now gated so it costs almost nothing until a real multi-second stall happens.
+
+**Residue 2a — a default that only lives in code is invisible.** Nothing tested
+that the render audit shipped enabled; `tests/test_settings_defaults.py` only
+checks that `config.py` and the settings page *agree*, which they did — on the
+wrong answer. Agreement is not correctness, and a shared wrong default is
+exactly the shape that test cannot see.
+
+**Residue 3 — `print(flush=True)` is still on the GUI thread** in both
+`render_audit._write` and `hang_watchdog._write`. Writing to a console is not
+free either. It is left alone because it is how the user sees a report at all
+when running with a console attached, and because neither is on the per-message
+path any more — but if console output ever becomes one, it goes through
+`bgwriter` too.
+
+### Six tests assumed they were the only thing running on the machine (fixed 2026-09-02)
+
+**Where:** `tests/test_msg_history.py`, `test_notice_log.py`,
+`test_pm_activity_live.py`, `test_register_once.py`, `test_on_events.py`; plus a
+separate `SLEEP 5` inside `test_on_events.py` waiting for the *client*, and
+`test_hang_watchdog.py` (below).
+
+A flat sleep is a guess about how long another process takes to start, and the
+guess is wrong exactly when the machine is busy — which is when tests are most
+often run. Under load on 2026-09-02 (a parallel OS build saturating the disk)
+`test_register_once.py` died with `ConnectionRefusedError` on the control port,
+and `test_on_events.py` reported every one of its 20 events as "never fired".
+**Neither message says "the fixture had not started yet"**, which is what makes
+this worth an entry: both look like failures of the thing under test. One run
+reported `join: expected 'bob', got 'alice'` — alice being the client's *own*
+join, still working its way through a client that had not finished connecting.
+
+**This closes a two-week-old open entry.** `test_on_events.py failed 5 of 22
+once and has not repeated` recorded a run of `22 | 16 | 5 | 1` on 2026-08-26
+that five later runs could not reproduce; the failing names were not recorded.
+Its guess was right -- "a timing race in the test harness rather than in `/on`
+itself; the test waits on fixed delays" -- and so was its instruction not to fix
+it by lengthening a sleep without first reproducing it. Reproducing it turned
+out to need only a loaded machine: under a parallel build it fails every time,
+and the fix is to delete the sleeps rather than to grow them.
+
+A sixth of the same kind, found while re-running the suite under that load:
+`test_hang_watchdog.py` read the recovery duration from the **first**
+`GUI recovered after` line in the log, assuming the only stall in it was the one
+the test caused. With `THRESHOLD` at 1.0s a loaded machine supplies its own, so
+the test measured a stall it did not cause and reported
+`recovery duration 1.19s not near expected 3.0s`. It now splits the log per
+stall and takes the block whose stack names `the_blocking_function`, and fails
+loudly if that is not exactly one block. **The general shape, three times over
+now: a test that assumes it is the only thing happening on the machine.**
+
+Fixed with `irc_test_server.wait_until_listening(*ports)`, shared by all five,
+and `test_on_events.wait_until_joined()`, which polls the client's own stdout
+for the `myjoined` marker instead of guessing. The client took **15.7s** to
+reach that point on the loaded machine, against the 5s the test used to allow.
+Both report a timeout explicitly, so a slow start can never again present as a
+bug in the events.
 
 ### A profile's plugin directory shadowed the shipped one, with no fallback (fixed 2026-09-01)
 

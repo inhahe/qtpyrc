@@ -92,7 +92,7 @@ class LoggingPage(QWidget):
         self.hw_native.setChecked(bool(hw.get('native_stacks', True)))
 
         ra = log.get('render_audit') or {}
-        self.ra_enabled.setChecked(bool(ra.get('enabled', True)))
+        self.ra_enabled.setChecked(bool(ra.get('enabled', False)))
         try:
             self.ra_window.setValue(float(ra.get('window', 120.0)))
         except (TypeError, ValueError):

@@ -112,11 +112,15 @@ if NO_BG:
   argv += ['-o', 'history_bg.enabled=false']
 sys.argv = argv
 
+sys.path.insert(0, os.path.join(ROOT, 'tests'))
+from irc_test_server import wait_until_listening
+
 server = subprocess.Popen(
     [sys.executable, os.path.join(ROOT, 'tests', 'irc_test_server.py'),
      '--port', str(PORT), '--control-port', str(CTRL_PORT)],
     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-time.sleep(1.5)
+if not wait_until_listening(PORT, CTRL_PORT):
+  raise SystemExit('the test IRC server never came up')
 
 import state
 import window as window_mod

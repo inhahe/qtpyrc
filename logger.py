@@ -3,20 +3,33 @@
 import os, re
 from datetime import datetime
 
+import bgwriter
 from config import _format_timestamp
-from state import dbg, LOG_ERROR
 
 
 class IRCLogger:
+  """Append chat lines to per-conversation log files.
+
+  **No method here touches the filesystem.** log() works out the path and
+  stamps the line -- both of which have to happen now, while the caller knows
+  what time it is -- and hands the result to the shared bgwriter thread, which
+  does the makedirs, the open, the write and the flush.
+
+  It used to do all of that inline. An early version paid os.makedirs() plus
+  open()+close() per line (~3% of GUI-thread time); caching the handles removed
+  most of that but left the part that actually hurts, because the cost of a
+  write is not the bookkeeping around it -- it is the flush, which is a
+  WriteFile syscall, and a syscall against a loaded filesystem blocks for as
+  long as the filesystem feels like. On the send path that sat between putting
+  the line on the wire and saving it to history, so a busy disk reached the
+  user as the client freezing for several seconds after they pressed Enter.
+  See bgwriter.py for the rest of the reasoning.
+  """
+
   def __init__(self, cfg, base_path):
     self.cfg = cfg
     self._base = os.path.join(base_path, cfg.log_dir) if not os.path.isabs(cfg.log_dir) else cfg.log_dir
-    # Caches so we don't hit the filesystem on every logged line. Previously
-    # log() called os.makedirs() and open()+close() per line, which was ~3% of
-    # GUI-thread time. Now we makedirs a directory at most once, and keep the
-    # log file open between writes (flushed each write, closed on shutdown).
-    self._dirs_made = set()      # directories we've already created
-    self._handles = {}           # path -> open file object
+    self._writer = bgwriter.shared()
 
   def _safename(self, s):
     return re.sub(r'[<>:"/\\|?*]', '_', s or 'unknown')
@@ -39,45 +52,34 @@ class IRCLogger:
       fn = ('%s_%s.log' % (name, month)) if month else ('%s.log' % name)
     return os.path.join(d, fn)
 
-  def _handle(self, p):
-    """Return an open append handle for path *p*, creating the directory (once)
-    and opening the file (once) as needed. Handles are cached and reused."""
-    f = self._handles.get(p)
-    if f is not None:
-      return f
-    d = os.path.dirname(p)
-    if d not in self._dirs_made:
-      os.makedirs(d, exist_ok=True)
-      self._dirs_made.add(d)
-    f = open(p, 'a', encoding='utf-8')
-    self._handles[p] = f
-    return f
-
   def log(self, network, target, line):
-    p = self._path(network, target)
-    try:
-      f = self._handle(p)
-      ts = _format_timestamp(self.cfg.log_timestamp_format)
-      f.write('[%s] %s\n' % (ts, line))
-      f.flush()
-    except Exception:
-      dbg(LOG_ERROR, 'Log write failed:', p)
-      # Drop a possibly-broken handle so we retry cleanly next time.
-      bad = self._handles.pop(p, None)
-      if bad is not None:
-        try:
-          bad.close()
-        except Exception:
-          pass
+    """Queue one line for *target*'s log file. Does no filesystem work.
+
+    The timestamp is taken here rather than by the writer thread: it records
+    when the line happened, which is not when the disk got round to accepting
+    it, and under exactly the load this class exists to survive those two are
+    seconds apart.
+    """
+    ts = _format_timestamp(self.cfg.log_timestamp_format)
+    self._writer.write(self._path(network, target), '[%s] %s' % (ts, line))
+
+  def flush(self, timeout=5.0):
+    """Block until every queued line has been written. Tests and shutdown only.
+
+    Never call this from the chat path -- waiting on the disk there is the one
+    thing this class was rearranged to stop doing.
+    """
+    return self._writer.flush(timeout)
 
   def close(self):
-    """Close all cached log file handles. Call on shutdown."""
-    for f in self._handles.values():
-      try:
-        f.close()
-      except Exception:
-        pass
-    self._handles.clear()
+    """Flush every queued line. Call on shutdown.
+
+    Flushes rather than closes: the writer thread is shared with the render
+    audit (bgwriter.shared()), so it is not this object's to shut down. The one
+    place that owns it is process shutdown, which calls bgwriter.close_shared()
+    after everything that might still want to log has stopped.
+    """
+    self.flush()
 
   def log_server(self, network, line):
     self.log(network, '_server_', line)

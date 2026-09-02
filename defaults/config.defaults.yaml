@@ -632,8 +632,20 @@ logging:
     # watchdog runs py-spy against qtpyrc to get the real Qt/Windows call.
     #
     # Requires py-spy (pip install py-spy); ignored if it isn't installed.
-    # Reading the native stack briefly suspends qtpyrc, which lengthens the very
-    # freeze being measured, so the report says how long that took.
+    #
+    # This is expensive and there is no cheap version of it: reading a native
+    # stack suspends every thread in qtpyrc for as long as it takes, so it
+    # lengthens the very freeze it is measuring, and py-spy refuses to combine
+    # native stacks with its non-suspending mode. The report says how long each
+    # sample cost.
+    #
+    # So it is taken sparingly, and only when it can still tell you something:
+    # the freeze has to be ongoing at the moment of sampling (not merely to
+    # have happened), it has to have lasted at least 5 seconds, and no more
+    # than one sample is taken every 5 minutes. Skipped samples say why. Every
+    # freeze is still reported with its Python stack either way, so turning
+    # this off costs you only the Qt/Windows detail on the freezes that Python
+    # cannot explain.
     native_stacks: true
 
   # Duplicate-message detection: notices when the same line is drawn into the
@@ -650,8 +662,12 @@ logging:
   # When enabled, a duplicate line is reported along with where in qtpyrc each
   # of the two copies came from, which is what makes it fixable.
   render_audit:
-    # Turn duplicate detection on or off.
-    enabled: true
+    # Turn duplicate detection on or off. Off by default: this is an
+    # instrument rather than a feature, and it costs something the whole time
+    # it is on - it wraps every render method, remembers every line drawn, and
+    # appends to a log file for the entire session. Switch it on while you are
+    # chasing a message that appears twice, and off again once you have it.
+    #~ enabled: false
     # How many seconds apart two identical lines may be and still count as a
     # duplicate. Raise it if you see doubles only after scrolling back; lower it
     # if ordinary repetition (the same join/part, the same short reply) is being

@@ -30,6 +30,7 @@ depends on `conn.split_message`, which needs the server's idea of our hostmask
   python tests/test_msg_history.py
 """
 
+import threading
 import atexit
 import os
 import runpy
@@ -124,11 +125,15 @@ sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 sys.argv = ['qtpyrc.py', '-c', cfg]
 
+sys.path.insert(0, os.path.join(ROOT, 'tests'))
+from irc_test_server import wait_until_listening
+
 server = subprocess.Popen(
     [sys.executable, os.path.join(ROOT, 'tests', 'irc_test_server.py'),
      '--port', str(PORT), '--control-port', str(CTRL_PORT)],
     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-time.sleep(1.5)
+if not wait_until_listening(PORT, CTRL_PORT):
+  raise SystemExit('the test IRC server never came up')
 
 import state
 import window as window_mod
@@ -144,8 +149,46 @@ def finish(code):
                            Qt.ConnectionType.QueuedConnection)
 
 
+# Every thread on which a chat line actually reached the disk during the sends
+# below. Sending is on the GUI thread, so none of these may be it -- see
+# _check_no_gui_thread_io().
+_io_threads = set()
+_gui_thread = None
+
+
+def _watch_disk_writes():
+  """Record which thread each queued write is really performed on.
+
+  The unit tests (test_bgwriter.py, test_history_maint.py) prove the log writer
+  and the history writer each work off the caller's thread. This ties that to
+  the path a user actually takes: `commands.send_message` is where the three
+  synchronous writes used to sit -- log line, history row, URL row -- between
+  putting the line on the wire and drawing it, which is the reported "I press
+  Enter and it freezes for a few seconds when the disk is busy".
+
+  Watching where the write *lands* rather than asserting on latency is what
+  makes this hold on a fast disk: a timing assertion here would pass against
+  the broken code every time the filesystem happened to be idle.
+  """
+  import bgwriter
+  import history as history_mod
+  for mod, name in ((bgwriter.BackgroundWriter, '_emit'),
+                    (history_mod.HistoryDB, '_w_insert_history'),
+                    (history_mod.HistoryDB, '_w_insert_url')):
+    real = getattr(mod, name)
+
+    def wrap(self, *a, _real=real, **k):
+      _io_threads.add(threading.get_ident())
+      return _real(self, *a, **k)
+
+    setattr(mod, name, wrap)
+
+
 def send_all():
   """Send one message by each of the routes, to a nick and to a channel."""
+  global _gui_thread
+  _gui_thread = threading.get_ident()
+  _watch_disk_writes()
   try:
     from commands import Commands, docommand
     client = next(iter(state.clients))
@@ -241,7 +284,23 @@ def inspect():
           'decided what the target was without asking conn.is_channel()'
           % (CHAN, _query_history_key(CHAN)))
 
-    # And the log file, the other half of "it was recorded".
+    # --- no disk write may have happened on the GUI thread ----------------
+    # The reported freeze, checked at the level the user meets it. Asserted
+    # before the log is read, because reading it flushes and would otherwise
+    # be a candidate for the very thing being measured.
+    check(_io_threads,
+          'nothing was written to disk at all during the sends, so this check '
+          'proves nothing')
+    check(_gui_thread not in _io_threads,
+          'a chat line was written to disk on the GUI thread during send: '
+          'that is a WriteFile syscall between putting the line on the wire '
+          'and drawing it, and on a busy filesystem it is the reported '
+          'several-second freeze after pressing Enter')
+
+    # And the log file, the other half of "it was recorded". Log writes are
+    # queued to the bgwriter thread, so ask for them to have landed before
+    # reading -- otherwise this passes or fails on how busy the disk is.
+    state.irclogger.flush()
     logged = ''
     for root, _dirs, files in os.walk(LOGDIR):
       for fn in files:

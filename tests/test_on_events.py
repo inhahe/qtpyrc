@@ -93,8 +93,9 @@ ON_HOOKS = [
 # "EXEC <cmd>" sends a /command to qtpyrc via the control mechanism (not used;
 #   we use -e flags at startup instead).
 CONTROL_SEQUENCE = [
-    # Wait for connection + join to complete
-    "SLEEP 5",
+    # Wait for connection + join to complete. Not a sleep: see
+    # wait_until_joined() -- the client is ready when it says it is.
+    "WAIT_JOINED",
 
     # Channel events
     "CHANMSG alice #test Hello from Alice!",
@@ -294,9 +295,51 @@ async def send_control(cmd):
     return resp.decode().strip()
 
 
-async def run_control_sequence():
+# The startup marker: the myjoined hook fires once the client has connected,
+# registered and joined #test, which is precisely the precondition every
+# command in the sequence has.
+JOINED_MARKER = "EVENT:myjoined:channel=#test"
+
+
+def wait_until_joined(stdout_path, timeout=120.0):
+    """Block until the client reports it has joined, or *timeout* elapses.
+
+    This replaced a flat ``SLEEP 5``, which is a guess about how long another
+    process takes to start -- and the guess is wrong exactly when the machine
+    is busy, which is when tests are most often run. The symptom was not a
+    clean timeout either: the control sequence ran anyway, against a client
+    that was still working through its own connect, so the failures blamed the
+    events. One run reported ``join: expected 'bob', got 'alice'`` -- alice
+    being the client's *own* join, still in the pipe -- and another reported
+    every event as "never fired". Neither says "the client had not started".
+
+    Waiting on the client's own statement that it is ready costs nothing when
+    it is fast and does not lie when it is slow.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with open(stdout_path, encoding="utf-8", errors="replace") as f:
+                if JOINED_MARKER in f.read():
+                    return True
+        except OSError:
+            pass
+        time.sleep(0.1)
+    return False
+
+
+async def run_control_sequence(stdout_path=None):
     """Execute the control sequence, pausing for SLEEP commands."""
     for cmd in CONTROL_SEQUENCE:
+        if cmd == "WAIT_JOINED":
+            t0 = time.monotonic()
+            ok = wait_until_joined(stdout_path) if stdout_path else False
+            print("  wait: client joined after %.1fs%s"
+                  % (time.monotonic() - t0,
+                     "" if ok else " -- TIMED OUT, the failures below are "
+                                   "probably that and not the events"),
+                  flush=True)
+            continue
         if cmd.startswith("SLEEP "):
             delay = float(cmd.split()[1])
             await asyncio.sleep(delay)
@@ -306,6 +349,10 @@ async def run_control_sequence():
                 print("  ctrl: %-50s -> %s" % (cmd[:50], resp), flush=True)
             except Exception as e:
                 print("  ctrl: %-50s -> ERROR: %s" % (cmd[:50], e), flush=True)
+
+
+sys.path.insert(0, TEST_DIR)
+from irc_test_server import wait_until_listening
 
 
 def build_exec_args():
@@ -330,8 +377,13 @@ def main():
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         cwd=QTPYRC_DIR,
     )
-    # Wait for server to be ready
-    time.sleep(1.5)
+    # Wait for the server to be ready -- both ports, not a fixed sleep. See
+    # wait_until_listening(); connecting to the IRC port while the control port
+    # was still coming up is one of the ways this test used to report every
+    # event as "never fired".
+    if not wait_until_listening(IRC_PORT, CTRL_PORT):
+        print("Server never started listening")
+        sys.exit(1)
     if server_proc.poll() is not None:
         out = server_proc.stdout.read().decode()
         print("Server failed to start:\n%s" % out)
@@ -375,7 +427,7 @@ def main():
     # 3. Run the control sequence
     print("\n[3] Running event trigger sequence...")
     try:
-        asyncio.run(run_control_sequence())
+        asyncio.run(run_control_sequence(stdout_file.name))
     except Exception as e:
         print("  Error during control sequence: %s" % e)
 

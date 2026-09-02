@@ -30,8 +30,9 @@ Entrypoint: `qtpyrc.py`
 | `tabbar.py` | Custom multi-row tab bar for tabbed mode (TabbedWorkspace) |
 | `exec_system.py` | `/timer` and `/on` hook execution |
 | `plugins.py` | Plugin/script loading system |
-| `logger.py` | File logging (IRCLogger) |
-| `hang_watchdog.py` | GUI-thread stall detector; Python stacks, py-spy native stacks |
+| `logger.py` | File logging (IRCLogger). Computes the path and stamps the line; the writing itself is `bgwriter` |
+| `bgwriter.py` | One background thread that appends to log files, so no filesystem syscall lands on the GUI thread |
+| `hang_watchdog.py` | GUI-thread stall detector; Python stacks, and (gated — it freezes the process) py-spy native stacks |
 | `render_audit.py` | Duplicate-render detector; wraps Window's `addline_*` and reports a line drawn twice, with both stacks |
 | `settings/` | Settings dialog pages. Pattern: `load_from_data(dict)` / `save_to_data(dict)` |
 | `docs/reference.md` | Command reference and scripting API docs. Update when adding/changing commands |
@@ -604,25 +605,67 @@ second `replay_bounds` query for what `rows[0][0]` already says. And
 `render_audit` uses it as the identity of a rendered line: see its section below
 for why nothing else it could compare on is unambiguous.
 
-**Three connections, and what may run on which thread.** `HistoryDB._conn`
-belongs to the GUI thread and does the writing; `HistoryReader` owns a
-`query_only` connection on its own thread for the drip-feed replay;
-`HistoryDB._maint_conn` belongs to the maintenance thread and does everything
-whose cost grows with the size of the database.
+**Three connections, and the rule is that the GUI thread never writes.**
+`HistoryDB._wconn` belongs to the writer thread and does every INSERT, DELETE
+and WAL checkpoint; `HistoryDB._rconn` belongs to the GUI thread and is
+`query_only`; `HistoryReader` owns a third, also `query_only`, on its own thread
+for the drip-feed replay.
 
-**Nothing unbounded may run on the GUI-thread connection.** A single indexed
-INSERT plus a WAL commit is fine and has to stay synchronous — a replay bounded
-by `current_max_id()` must be able to see the row that id names — but pruning
-and WAL checkpoints are not, and both used to run inline in `add()` every 500
-inserts. Between them they are 30 of the 39 history stall samples in
-`me/hangs.log`, the worst 33s. Specifically:
+**No filesystem work on the GUI thread, and "bounded" is not the same as
+"fast".** `add()` used to run the INSERT and the commit inline, on the argument
+that one indexed insert plus a WAL commit is bounded work. It is bounded in
+*rows touched*; it is not bounded in *time*, because the commit is a `WriteFile`
+against the WAL and a syscall against a loaded filesystem takes as long as the
+filesystem takes. That is the reported bug — "it hangs for a few seconds before
+reacting after I hit enter on a post... I think it may be when the filesystem is
+under load" — and on the send path this sat between putting the line on the wire
+and drawing it.
 
-- `PRAGMA wal_autocheckpoint=0` on the GUI connection. Otherwise SQLite runs
+It was not even the only wait. Two write connections existed (the GUI thread's
+and the maintenance thread's), WAL allows one writer, so the two were serialised
+by `busy_timeout` — set to **15000**. Every 500 inserts the maintenance pass took
+a write transaction to prune and checkpoint, and until it let go the GUI thread's
+next insert blocked. By design, for up to fifteen seconds. **One writer thread
+removes that rather than tuning it**: there is no second writer left to wait for,
+and `busy_timeout` stops being load-bearing (it now covers only an outside
+writer — a second qtpyrc, a `sqlite3` shell).
+
+**The visibility requirement is real, and it is satisfied by ordering the read,
+not by blocking the write.** A replay bounded by `current_max_id()` must be able
+to see the row that id names, or a line is written to the table, excluded from
+its own backlog by the cutoff, and never drawn again — a message that vanishes
+when the window is next opened. So:
+
+- **Ids are allocated on the calling thread**, before the write is queued, and
+  `current_max_id()` answers from that counter. One writer means they still
+  reach the table in order, and an explicit id on an `AUTOINCREMENT` column
+  keeps the sequence in step.
+- **Every read drains the queue first** (`flush_pending()`, a no-op job on the
+  single-worker FIFO executor — waiting on it *is* "the table has caught up").
+  Normally the queue is empty and it is free. When it is not — exactly when the
+  filesystem is misbehaving — a *read* waits, where the old code made every
+  *message* wait. Reads happen on a join, on opening a window and on scrolling
+  to the top; writes happen on every line of traffic. `HistoryReader` pays the
+  same barrier on its own thread, so the drip-feed never charges it to the GUI.
+- **Anything reading outside the named methods goes through `read_conn()`**,
+  which applies the barrier and hands back the `query_only` connection. Find in
+  All Windows is the one such caller; it used to reach into `db._conn` directly,
+  which after this change would have been the writer's connection, on the wrong
+  thread.
+
+`query_only` on the GUI connection is not decoration either: it is what turns a
+future "just one little write here" into an exception at the call site instead of
+a silent reintroduction of the second writer.
+
+**What stays true from before**, and still matters:
+
+- `PRAGMA wal_autocheckpoint=0` on the writing connection. Otherwise SQLite runs
   the checkpoint — and its fsync — inside whichever `commit()` pushes the WAL
-  past 1000 pages, i.e. on the GUI thread mid-message. Measured at 0.96s per
-  500 inserts warm; seconds when cold. `_maintain()` takes the checkpoint
-  (`PASSIVE`, so it never waits for a reader or blocks the GUI's writes), and
-  `close()` does a final `TRUNCATE` so the WAL doesn't survive the session.
+  past 1000 pages. That used to land on the GUI thread mid-message (0.96s per
+  500 inserts warm, seconds when cold); it would now land in the middle of the
+  write queue, which is better but still not chosen. `_maintain()` takes the
+  checkpoint (`PASSIVE`, so it never waits for a reader), and `close()` does a
+  final `TRUNCATE` so the WAL doesn't survive the session.
 - Pruning is **proportional**: `add()` records `(network, channel)` in
   `_dirty`, and a pass looks only at those. Per channel it is one indexed probe
   for the id of the keep-th newest row; if there is none the channel is under
@@ -632,11 +675,69 @@ inserts. Between them they are 30 of the 39 history stall samples in
   materialises up to *keep* ids into an ephemeral index — on the real database
   that was 188 channels, none of them over the limit, so the entire pass
   deleted nothing.
-- Both write connections need `busy_timeout`: WAL allows one writer at a time,
-  and without it an overlap raises "database is locked" and loses a line.
+- `close()` **drains, never cancels.** What is queued has already been shown to
+  the user, so dropping it makes the backlog disagree with what they read.
 
-Net: 500 messages cost 1.12s of GUI thread before, 0.06s after. Covered by
-`tests/test_history_maint.py`.
+Net: 500 messages cost 1.12s of GUI thread before the maintenance split and
+0.06s after it; none of it is on the GUI thread now. Covered by
+`tests/test_history_maint.py`, which stalls the writer deliberately — a
+benchmark against a healthy disk cannot fail, and would have passed against the
+code that produced the report.
+
+### Never put a filesystem syscall on the GUI thread (`bgwriter.py`)
+
+The general form of the bug above, and the reason `bgwriter.py` exists. qtpyrc
+runs asyncio on the Qt GUI thread, so **anything that thread waits for is a
+freeze of the whole client**, and a file write is such a wait. It reads as free
+because a buffered `write()` to an open handle is microseconds — but the
+`flush()` after it is a syscall, and the syscall is the part that stops.
+
+`BackgroundWriter` is one thread and one FIFO queue; `bgwriter.shared()` is the
+process-wide instance. `IRCLogger.log()` and `render_audit._write()` work out
+their path and their text and hand it over. Four things about it are
+load-bearing:
+
+- **One thread, not a pool.** A log file is read by a human as a transcript, so
+  submission order is the order the lines must appear in. A single consumer
+  gives that for every file at once, with no locking.
+- **Flush when the queue drains, not per line.** Idle — when an unexpected crash
+  is most likely to cost something — the queue empties after every line, so this
+  is exactly the old per-line durability. A burst batches, which is the case
+  where per-line flushing bought little anyway.
+- **`open()` and `os.makedirs()` are filesystem calls too.** `IRCLogger` cached
+  its handles, so that cost read as "once per file, negligible" — but once per
+  file means once per conversation partner, once per file *per month* under
+  `logging.separate_by_month`, and once more after every write error, since the
+  recovery path drops the handle so the next line reopens. All of it is on the
+  writer thread now.
+- **The queue is bounded and drops are reported.** A filesystem that has stopped
+  answering must not also become unbounded memory. Past the bound, lines are
+  dropped and counted, and the count is written into the file — a silent hole in
+  a log is how someone concludes a conversation never happened.
+
+Two rules for anything that joins it:
+
+- **The timestamp is taken by the caller, never by the writer thread.** It
+  records when the line happened, not when the disk accepted it, and under
+  exactly the load this exists to survive those two are seconds apart.
+- **Nothing on the chat path may call `flush()`.** It is for shutdown and for
+  tests. `IRCLogger.close()` only flushes; the shared writer is owned by process
+  shutdown (`bgwriter.close_shared()`, last in both shutdown paths in
+  `qtpyrc.py`), because the render audit shares it.
+
+Covered by `tests/test_bgwriter.py`, which stalls the writer and asserts that
+writing 200 lines still returns in milliseconds and that no `open`/`makedirs`
+runs on the caller's thread. It found two real bugs in the first version:
+`flush()` and `close()` used `put_nowait`, so both failed precisely when the
+queue was full — the one moment either is most needed.
+
+**`tests/test_msg_history.py` ties both halves to the path the user takes.** It
+already drives all six send routes against a live client; it now also records
+which thread `BackgroundWriter._emit`, `HistoryDB._w_insert_history` and
+`_w_insert_url` actually ran on, and fails if any of them is the GUI thread.
+Watching where the write *lands* rather than how long the send took is what
+makes it hold on a fast disk — a latency assertion there would pass against the
+broken code every time the filesystem happened to be idle.
 
 ### Chat view layout: never force a full document layout per geometry change
 
@@ -1067,6 +1168,57 @@ registers an entry in `SOURCES` and removes it in a `finally`, which is both
 undoable and more faithful: it leaves the real selection, fallback and error
 handling in the path under test.
 
+### Hang watchdog (`hang_watchdog.py`): the instrument must not be the fault
+
+A QTimer on the GUI thread bumps a monotonic heartbeat; a plain daemon thread
+(deliberately *not* an asyncio task — that would live on the very loop that is
+blocked) samples it, and a gap past `logging.hang_watchdog.threshold` is a
+stall. It records the GUI thread's Python stack via `sys._current_frames()`,
+which names the blocker even when the thread is deep inside C/Qt, because the
+last Python frame is whatever called in.
+
+**When the Python stack has nothing to say**, `logging.hang_watchdog.
+native_stacks` lets it shell out to `py-spy dump --native` against its own pid.
+That is the part with the trap in it, and the trap sprung: **the watchdog became
+the largest single source of the freezes it exists to find.**
+
+- py-spy freezes *every thread in the target process* while it walks them, and
+  the target is us. Measured across `me/hangs.log`: **429 seconds of
+  self-inflicted suspension over 109 samples.** Stalls where it ran took a
+  median 6.6s to recover; stalls where it did not, 3.7s.
+- **There is no cheap version.** `--native` and `--nonblocking` are mutually
+  exclusive ("Can't get native stack traces with the --nonblocking option"), so
+  the only lever is *when* to pay, never how much.
+- **The cost cannot be capped from inside.** `subprocess.run(timeout=...)` is
+  enforced by the calling thread, and that thread is one of the ones py-spy
+  suspends, so it cannot fire while the sample it was meant to bound is
+  running. Ten samples beat the 10s timeout; the worst ran **50.5s**.
+- **Most of it bought nothing.** 68 of the 91 samples caught the GUI thread
+  `idle`, 62 of those parked in `NtUserMsgWaitForMultipleObjectsEx` — the event
+  loop waiting for work, which is not a stall but the absence of one. The
+  sample was taken *after* the Python stacks had been written to disk, and on a
+  loaded filesystem that write is itself slow, so the GUI had usually recovered
+  in the meantime.
+
+Hence `_maybe_write_native()` has four gates, and the second is the one that
+matters: the Python stack must have nothing to say; **the heartbeat is re-read
+at the instant of sampling and the stall must still be happening**; it must have
+lasted `_NATIVE_MIN_STALL` (5s — freezing an already-frozen application is a far
+smaller sin than freezing a responsive one, but a 2.1s blip is not worth it);
+and not more often than `_NATIVE_MIN_INTERVAL` (300s, up from 30s — `me/hangs.log`
+has a 20-minute stretch on 2026-09-02 spending more time measured than running).
+
+The general rule, which the duplicate-render audit obeys for the same reason:
+**an instrument that perturbs the thing it measures must be gated on the
+measurement still being live, not on it having started.** Every stall still gets
+its free Python stack regardless — that gate is only on the expensive sample.
+
+Note also what the `active` samples said once the noise was gone: they are
+`QTextDocumentLayout::ensureLayouted`, `QTextEngine::shapeTextWithHarfbuzzNG`,
+`QRasterPaintEngine`, `QBackingStore::flush`, DWrite. That is the `ChatOutput`
+paint cost in `known-issues.md`, not a filesystem stall — the two look identical
+from the heartbeat and are told apart only here.
+
 ### Duplicate-render audit (`render_audit.py`)
 
 The instrumentation for "I keep seeing some of my messages twice", which is what
@@ -1081,8 +1233,19 @@ would show it) was sound and still pointed at the wrong half of the program.
 (`ENTRY_POINTS`), so `window.py` has no audit code in it and a future entry point
 is covered by adding its name there. Installed from `qtpyrc.py` right after the
 config loads — it creates no Qt object, so unlike the hang watchdog it can go
-ahead of the first window rather than behind it. Config: `logging.render_audit.*`
-(`enabled`, `window`, `file`), settings UI on the Logging page.
+ahead of the first window rather than behind it. Config:
+`logging.render_audit.*` (`enabled`, `window`, `file`), settings UI on the
+Logging page.
+
+**It is off by default, and that is the point of it being config at all.** It
+had shipped `enabled: true` in all three places that hold a default, so every
+user ran it permanently without ever asking for it — an instrument that wraps
+every render method, keys and retains every line drawn, and appends to a log
+file for the whole session (1.8 MB in a day on the reporter's machine). An
+instrument that ships switched on is one nobody remembers to switch off. Note
+that `tests/test_settings_defaults.py` did not catch this and could not: it
+checks that `config.py` and the settings page *agree*, and they did — on the
+wrong answer.
 
 Three rules decide whether it produces signal or noise, and all three are easy to
 get backwards:

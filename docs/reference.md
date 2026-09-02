@@ -1428,9 +1428,67 @@ Qt/Windows call:
 ```
 
 Install it with `pip install py-spy`; without it the report says so once and
-carries on as before. Reading a native stack suspends qtpyrc for a second or
-two, so the line says how long that took — that time is part of the freeze
-duration reported above it, not on top of it.
+carries on as before.
+
+**A native stack is expensive, so it is taken sparingly.** py-spy suspends
+every thread in qtpyrc while it reads them, so the sample lengthens the very
+freeze it is measuring — the line says how long that took, and that time is
+part of the freeze duration reported above it, not on top of it. There is no
+cheap version: py-spy refuses to combine `--native` with its non-suspending
+mode, so the only thing that can be adjusted is how often it is worth paying.
+
+Left ungated, that made the watchdog the biggest single cause of the freezes it
+exists to find. In one 17-day log it accounted for **429 seconds** of suspended
+qtpyrc across 109 samples, individual ones running as long as 50 seconds — and
+68 of 91 caught the interface *idle*, because the sample was taken after the
+Python part of the report had been written to disk, by which time the freeze
+was usually over.
+
+So a native stack is now taken only when it can still tell you something:
+
+* the freeze must still be happening at the moment of sampling, not merely to
+  have happened;
+* it must have lasted at least 5 seconds;
+* and no more than one sample is taken every 5 minutes.
+
+When a sample is skipped the report says which of those it was:
+
+```
+  (no Python frame below the event loop, but the GUI has recovered since the report
+   started -- last heartbeat 0.31s ago. Skipping the native sample rather than
+   freezing a process that is running.)
+```
+
+Every freeze is still reported with its Python stack either way, so turning
+`native_stacks` off costs you only the Qt/Windows detail on the freezes Python
+cannot explain.
+
+### Writing to disk is not on that thread any more
+
+The freeze most likely to be noticed was self-inflicted, and is fixed: sending a
+message used to write the log line and the history row **synchronously, on the
+drawing thread**, in between putting the line on the wire and showing it. Each
+write is microseconds against an idle disk, so it went unnoticed for a long
+time — but the flush at the end of it is a system call, and a system call
+against a filesystem that is busy (a backup, a virus scan, a compile, anything
+saturating the disk) takes as long as that filesystem takes. That was the
+"press Enter, wait several seconds, then the line appears" freeze.
+
+Chat logs and history rows are now handed to background threads. Nothing about
+the files changes: the same lines land in the same order in the same places, and
+they are flushed as soon as the writer runs out of work, so an idle client is as
+crash-safe as it was before.
+
+The one visible difference is in an extreme case. If the disk stops accepting
+writes for long enough to queue 100,000 lines, further lines are dropped rather
+than growing memory without limit — and when writing resumes the log says so:
+
+```
+[1234 log line(s) lost: the write queue filled up, which means the filesystem stopped accepting writes]
+```
+
+That is deliberate. A gap in a log with nothing to mark it is how someone
+concludes a conversation never happened.
 
 ## Duplicate-message detection (render audit)
 
@@ -1475,12 +1533,18 @@ as are colours and the `@`/`+` mode prefix. A line that was merely *queued* by
 the hold-back mechanism is not counted, so an ordinary held-back message is
 never reported against its own flush.
 
+**It is off by default.** This is an instrument rather than a feature, and it
+costs something the whole time it is on: it wraps every method that draws into a
+chat view, keys and remembers every line drawn, and appends to a log file for
+the length of the session. Turn it on while you are chasing a message that
+appears twice, and off again once you have it.
+
 Reports go to `renders.log` next to your config file, and are echoed to the
 console. Configured under `logging.render_audit` (also in Settings → Logging):
 
 | Option | Default | Meaning |
 |--------|---------|---------|
-| `enabled` | `true` | Turn duplicate detection on/off |
+| `enabled` | `false` | Turn duplicate detection on/off |
 | `window` | `120` | Seconds two identical lines may be apart and still count |
 | `file` | `renders.log` | Report file, relative to the config file |
 
