@@ -39,8 +39,10 @@ import hang_watchdog
 
 STALL_SECONDS = 3.0
 THRESHOLD = 1.0
-# Long enough for the watchdog to notice the rewound heartbeat, run py-spy
-# (2.5s cold) and write the report before the loop is stopped out from under it.
+# Long enough for the watchdog to notice the stalled heartbeat, wait out
+# _NATIVE_MIN_STALL (the first-detection sample is deliberately skipped now --
+# see test_native_gates), resample, run py-spy (2.5s cold) and write the report
+# before the loop is stopped out from under it.
 _NATIVE_WAIT = 15.0
 
 _failures = []
@@ -101,17 +103,27 @@ def test_python_stall(app):
           "a stall with a Python frame was sampled natively anyway -- that "
           "suspends the process for nothing")
 
-    for line in log.splitlines():
-        if 'GUI recovered after' in line:
-            try:
-                secs = float(line.split('after')[1].split('s')[0])
-            except (IndexError, ValueError):
-                check(False, "could not parse recovery duration: %r" % line)
-            else:
-                check((STALL_SECONDS - 1.0) <= secs <= (STALL_SECONDS + 1.5),
-                      "recovery duration %.2fs not near expected %.1fs"
-                      % (secs, STALL_SECONDS))
-            break
+    # Measure *our* stall, not whichever one is first in the file. On a loaded
+    # machine the client can genuinely stall before the deliberate block --
+    # THRESHOLD is 1.0s here -- and taking the first "GUI recovered after" line
+    # then reports someone else's number. That is what "recovery duration 1.19s
+    # not near expected 3.0s" was: a real 1.19s stall from machine load, parsed
+    # in place of the 3.0s one this test caused.
+    import re as _re
+    blocks = _re.split(r'(?=\*\*\* GUI STALL detected)', log)
+    ours = [b for b in blocks if 'the_blocking_function' in b]
+    check(len(ours) == 1,
+          "expected exactly one stall naming the_blocking_function, found %d "
+          "-- the log cannot be attributed" % len(ours))
+    for block in ours:
+        m = _re.search(r'GUI recovered after ([\d.]+)s', block)
+        if not m:
+            check(False, "the deliberate stall never reported a recovery")
+            continue
+        secs = float(m.group(1))
+        check((STALL_SECONDS - 1.0) <= secs <= (STALL_SECONDS + 1.5),
+              "recovery duration %.2fs not near expected %.1fs"
+              % (secs, STALL_SECONDS))
 
 
 # ---------------------------------------------------------------------------
@@ -248,12 +260,90 @@ def test_native_escalation(app):
           "the native stack was not the GUI thread's (no qasync frame in it)")
 
 
+# ---------------------------------------------------------------------------
+# 5. The gates on the native sample: it may only be paid for a stall that is
+#    still happening, has lasted long enough to be worth it, and has not just
+#    been sampled.
+#
+#    This is the fix for the watchdog having become the largest single cause of
+#    the freezes it exists to find. py-spy suspends every thread in this
+#    process while it reads them, so a sample taken against a GUI thread that
+#    has already recovered freezes a healthy application for seconds and
+#    photographs an idle event loop. Over me/hangs.log that was 429 seconds of
+#    self-inflicted suspension across 109 samples, 68 of which caught the GUI
+#    thread idle.
+#
+#    _native_stack is stubbed rather than really run: the question here is
+#    whether it is *called*, and stubbing it also means this runs in a second
+#    and needs no py-spy installed.
+# ---------------------------------------------------------------------------
+
+def test_native_gates():
+    calls = []
+    real_native_stack = hang_watchdog._native_stack
+    real_in_loop = hang_watchdog._stopped_in_the_event_loop
+
+    def fake_native_stack(tid):
+        calls.append(tid)
+        return ('  <stubbed native stack>', 0.01)
+
+    # Section 4 covers the real frame detection. Here it is forced true so the
+    # only thing deciding the outcome is the gate under test.
+    hang_watchdog._native_stack = fake_native_stack
+    hang_watchdog._stopped_in_the_event_loop = lambda tid: True
+
+    logpath = _fresh_log('qtpyrc_hangtest_gates.log')
+    try:
+        for label, last_beat_age, last_native_age, want_call, want_text in (
+            # The one that matters: the heartbeat is current, so whatever the
+            # stall was, it is over. Sampling now would freeze a running client.
+            ('recovered', 0.0, 0.0, False, 'the GUI has recovered'),
+            # Over the threshold but a mere blip. Not worth seconds of freeze.
+            ('too short', 2.5, 0.0, False, 'only worth it past'),
+            # A real, ongoing stall. This is what the sample is for.
+            ('ongoing', 8.0, 0.0, True, 'still stalled'),
+            # ...but not twice in a row.
+            ('too soon', 8.0, 5.0, False, 'minimum interval'),
+        ):
+            hang_watchdog._state.update({
+                'native': True,
+                'threshold': 2.0,
+                'logfile': logpath,
+                'gui_thread_id': threading.get_ident(),
+                'last_beat': time.monotonic() - last_beat_age,
+                'last_native': (time.monotonic() - last_native_age)
+                               if last_native_age else 0.0,
+            })
+            before = len(calls)
+            hang_watchdog._maybe_write_native(hang_watchdog._state['gui_thread_id'])
+            called = len(calls) > before
+            check(called == want_call,
+                  "native sample for a %r stall: py-spy %s called, expected %s"
+                  % (label, 'was' if called else 'was not',
+                     'called' if want_call else 'not called'))
+            with open(logpath, encoding='utf-8') as f:
+                log = f.read()
+            check(want_text in log,
+                  "the %r case did not say why in the log (looking for %r)"
+                  % (label, want_text))
+            # Each case must leave its own reason in the log, so truncate
+            # between them rather than searching a growing file.
+            open(logpath, 'w').close()
+    finally:
+        hang_watchdog._native_stack = real_native_stack
+        hang_watchdog._stopped_in_the_event_loop = real_in_loop
+        hang_watchdog._state['native'] = False
+        hang_watchdog._state['logfile'] = None
+        hang_watchdog._state['last_native'] = 0.0
+
+
 def main():
     app = QApplication([])
     test_python_stall(app)
     test_event_loop_detector()
     test_extract_thread_block()
     test_native_escalation(app)
+    test_native_gates()
 
     if _failures:
         for f_ in _failures:

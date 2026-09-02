@@ -1622,6 +1622,10 @@ def quit():
       state.irclogger.close()
     except Exception:
       pass
+  # Last, because everything above may still have had a line to write: the
+  # chat logs and the render audit share this one background writer thread.
+  import bgwriter
+  bgwriter.close_shared()
   loop.stop()
 
 
@@ -2208,8 +2212,10 @@ if __name__ == '__main__':
   state.historydb = HistoryDB(hf, keep_limit=state.config.backscroll_limit)
   # Separate read-only connection on a background thread. The background history
   # replay drip-feed reads through this so its disk I/O never blocks the GUI
-  # thread (WAL mode allows concurrent reader + writer connections).
-  state.historyreader = HistoryReader(hf)
+  # thread (WAL mode allows concurrent reader + writer connections). It is
+  # handed the HistoryDB so it can wait for that writer to catch up before
+  # reading -- on its own thread, so the wait is nobody else's problem.
+  state.historyreader = HistoryReader(hf, state.historydb)
   _mark('history DB open')
 
   # --- Pre-warm heavy lazy imports off the GUI thread ---
@@ -2319,6 +2325,9 @@ if __name__ == '__main__':
           state.irclogger.close()
         except Exception:
           pass
+      # Last: the chat logs and the render audit share this writer thread.
+      import bgwriter
+      bgwriter.close_shared()
       loop.stop()
 
     try:

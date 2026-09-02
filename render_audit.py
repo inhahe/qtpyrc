@@ -72,6 +72,7 @@
 # bug it is looking for is live in the field.  logging.render_audit.enabled
 # turns it off.
 
+import bgwriter
 import os
 import sys
 import time
@@ -154,8 +155,17 @@ def _stamp():
 
 
 def _write(text):
-  """Append *text* to the audit log and echo it to the console."""
-  line = text.rstrip('\n')
+  """Append *text* to the audit log and echo it to the console.
+
+  The file half goes through the shared bgwriter thread. It used to be an
+  open()+write()+close() per call, on the GUI thread, several calls per report
+  -- so an audit installed to explain why a line was drawn twice was itself
+  three filesystem round-trips in the middle of drawing one. See bgwriter.py.
+  """
+  # rstrip() of newlines only, never of spaces: a trailing space is exactly
+  # the thing this audit was installed to catch (see the self-echo bug), so
+  # the report must not quietly normalise one away.
+  line = text.rstrip(chr(10))
   try:
     print(line, flush=True)
   except Exception:
@@ -164,11 +174,7 @@ def _write(text):
   if not path:
     return
   try:
-    d = os.path.dirname(path)
-    if d and not os.path.isdir(d):
-      os.makedirs(d, exist_ok=True)
-    with open(path, 'a', encoding='utf-8', errors='replace') as f:
-      f.write(line + '\n')
+    bgwriter.shared().write(path, line)
   except Exception:
     pass
 

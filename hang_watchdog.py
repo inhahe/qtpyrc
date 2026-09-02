@@ -37,10 +37,38 @@
 # For exactly those, the watchdog shells out to py-spy (`py-spy dump --native`)
 # against its own pid and records the *native* stack, which names the Qt/Win32
 # call: QTextDocument layout, a DirectWrite font enumeration, a Shell_NotifyIcon
-# balloon, a blocking MessageBeep, and so on. py-spy suspends the process while
-# it samples, which lengthens the very stall being measured -- acceptable only
-# because it is limited to the case where the cheap Python sample is useless.
+# balloon, a blocking MessageBeep, and so on.
 # Controlled by logging.hang_watchdog.native_stacks.
+#
+# The native sample is expensive, and unboundably so
+# --------------------------------------------------
+# py-spy freezes every thread in the target process while it walks them, and
+# the target here is *us*. So the measurement is added to the stall it is
+# measuring, and to whatever the user was doing at the time.
+#
+# There is no cheap version: `--native` and `--nonblocking` are mutually
+# exclusive ("Can't get native stack traces with the --nonblocking option"), so
+# the only lever is *when* to pay, never how much. Nor can the cost be capped
+# from in here -- the subprocess timeout is enforced by the watchdog thread,
+# which is one of the threads py-spy suspends, so it cannot fire while the
+# sample it was meant to bound is running. Ten samples in me/hangs.log beat the
+# 10s timeout; the worst ran 50.5s.
+#
+# That made the watchdog the largest single source of the freezes it exists to
+# find: 429 seconds of self-inflicted suspension across 109 samples, and the
+# stalls where it ran took a median 6.6s to recover against 3.7s for the ones
+# where it did not. Worse, most of that bought nothing -- 68 of the 91 samples
+# caught the GUI thread `idle`, 62 of them parked in
+# NtUserMsgWaitForMultipleObjectsEx, which is the event loop waiting for work.
+# That is not a stall; it is the absence of one. The sample was being taken
+# after the report of the Python stacks had been written to disk, which takes
+# long enough that the GUI had usually recovered in the meantime.
+#
+# Hence the three gates in _maybe_write_native(): the stall must still be
+# happening at the instant of sampling, it must have lasted long enough to be
+# worth the price, and samples are rate-limited so a storm cannot spend more
+# time being measured than running. Every stall still gets its free Python
+# stack regardless.
 
 import os
 import shutil
@@ -58,15 +86,25 @@ _POLL_INTERVAL = 0.25
 # While a stall is ongoing, re-capture the stack this often (seconds) so we can
 # tell "stuck on one call" from "slowly grinding through work".
 _RESAMPLE_INTERVAL = 5.0
-# How long to let py-spy run before giving up on it. Measured against a running
-# qtpyrc: 0.6s warm, 2.5s on the first call of a session (loading symbols for
-# every module). Anything past this is a py-spy that has wedged, and waiting on
-# it would hold the watchdog thread -- and the process it has suspended.
+# How long to let py-spy run before giving up on it. This is a backstop for a
+# py-spy that never attaches at all, and NOT a bound on the cost of a sample:
+# subprocess timeouts are enforced by the calling thread, and py-spy suspends
+# that thread along with every other one in this process, so it cannot fire
+# while a sample is in progress. Ten of the samples in me/hangs.log ran past
+# it, the worst for 50.5s. The gates in _maybe_write_native are what actually
+# limit the damage.
 _NATIVE_TIMEOUT = 10.0
+# A stall must have lasted at least this long before it is worth freezing the
+# process to photograph. A blip a shade over the threshold recovers on its own
+# before py-spy has finished attaching; a stall still going after this many
+# seconds is the kind the native stack was added for.
+_NATIVE_MIN_STALL = 5.0
 # Don't take native samples faster than this. Each one suspends the process, so
 # a run of back-to-back stalls would otherwise spend more time being measured
-# than running. Every stall still gets its (free) Python stack.
-_NATIVE_MIN_INTERVAL = 30.0
+# than running -- me/hangs.log has a 20-minute stretch of 05:00-05:18 on
+# 2026-09-02 doing exactly that under the old 30s interval. Every stall still
+# gets its (free) Python stack.
+_NATIVE_MIN_INTERVAL = 300.0
 
 _state = {
   'last_beat': 0.0,
@@ -256,14 +294,46 @@ def _maybe_write_native(gui_tid):
   """Record a native stack if the Python one couldn't name the blocker.
 
   Deliberately not done for every stall: py-spy freezes this process to read it,
-  so it makes the stall it is measuring worse. When there *is* a Python frame
-  below the event loop, that frame already names the culprit and paying for a
-  native dump on top of it buys nothing."""
+  so it makes the stall it is measuring worse -- see "The native sample is
+  expensive, and unboundably so" at the top of this file for what that cost
+  measured, and why it cannot be capped from in here. When there *is* a Python
+  frame below the event loop, that frame already names the culprit and paying
+  for a native dump on top of it buys nothing.
+
+  Four things must hold before we pay:
+
+    * The Python stack has nothing to say (the check above).
+    * **The stall is still happening.** This is the gate that matters, and the
+      one that was missing. Everything above this call -- the GUI stack, every
+      other thread's stack -- has already been written to disk and echoed to
+      the console, and on a loaded filesystem that is itself slow, so by the
+      time we get here the GUI has usually recovered. Sampling then freezes a
+      healthy process for seconds to photograph an idle event loop, which is
+      what 68 of the 91 samples in me/hangs.log did.
+    * The stall has lasted _NATIVE_MIN_STALL. Freezing an already-frozen
+      application is a far smaller sin than freezing a responsive one, but a
+      2.1s blip still is not worth a multi-second suspension.
+    * We have not sampled in the last _NATIVE_MIN_INTERVAL.
+  """
   if not _state.get('native'):
     return
   if not _stopped_in_the_event_loop(gui_tid):
     return
   now = time.monotonic()
+  # Re-read the heartbeat here rather than trusting the one that opened the
+  # report: the two are separated by however long it took to write the report.
+  behind = now - _state['last_beat']
+  if behind < _state['threshold']:
+    _write('  (no Python frame below the event loop, but the GUI has recovered '
+           'since the report started -- last heartbeat %.2fs ago. Skipping the '
+           'native sample rather than freezing a process that is running.)'
+           % behind)
+    return
+  if behind < _NATIVE_MIN_STALL:
+    _write('  (no Python frame below the event loop; skipping the native sample '
+           '-- the stall is %.2fs and a sample costs seconds of frozen process, '
+           'which is only worth it past %.0fs)' % (behind, _NATIVE_MIN_STALL))
+    return
   since = now - _state['last_native']
   if _state['last_native'] and since < _NATIVE_MIN_INTERVAL:
     _write('  (no Python frame below the event loop; skipping the native sample '
@@ -271,8 +341,9 @@ def _maybe_write_native(gui_tid):
            % (since, _NATIVE_MIN_INTERVAL))
     return
   _state['last_native'] = now
-  _write('  (no Python frame below the event loop -- the GUI thread is inside '
-         'Qt/Win32. Sampling native stack with py-spy...)')
+  _write('  (no Python frame below the event loop and the GUI is still stalled '
+         '(%.2fs) -- it is inside Qt/Win32. Sampling native stack with '
+         'py-spy...)' % behind)
   text, spent = _native_stack(gui_tid)
   _state['last_native'] = time.monotonic()
   _write('  GUI thread native stack (py-spy, %.2fs -- this process was '

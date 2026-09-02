@@ -6,12 +6,13 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+from state import dbg, LOG_ERROR
+
 
 # ---------------------------------------------------------------------------
 # Shared read queries. These take an explicit connection so the exact same SQL
-# is used by both the GUI-thread writer connection (HistoryDB) and the
-# background-thread reader connection (HistoryReader) -- no risk of the two
-# drifting apart.
+# is used by every one of the three connections (see HistoryDB) -- no risk of
+# them drifting apart.
 # ---------------------------------------------------------------------------
 
 def _id_cap(cutoff_id):
@@ -119,11 +120,22 @@ class HistoryReader:
   is where the qasync asyncio loop runs); each hops to the worker thread for the
   actual query and returns the rows back on the GUI thread for rendering."""
 
-  def __init__(self, db_path):
+  def __init__(self, db_path, db=None):
     self._db_path = db_path
+    self._db = db      # the HistoryDB whose queued writes we must not overtake
     self._executor = ThreadPoolExecutor(
       max_workers=1, thread_name_prefix='history-reader')
     self._conn = None  # created lazily inside the worker thread
+
+  def _barrier(self):
+    """Wait for HistoryDB's writer to catch up before reading. Worker thread.
+
+    Same requirement as HistoryDB's own reads -- a replay bounded by
+    current_max_id() has to be able to see the row that id names -- but paid on
+    this thread rather than the GUI one, so the drip-feed waiting for the disk
+    costs the user nothing."""
+    if self._db is not None:
+      self._db.flush_pending()
 
   def _get_conn(self):
     # Runs IN the worker thread. Open a private read-only connection.
@@ -136,15 +148,19 @@ class HistoryReader:
 
   # --- worker-thread bodies -------------------------------------------------
   def _do_replay_bounds(self, network, channel, limit, cutoff_id):
+    self._barrier()
     return _q_replay_bounds(self._get_conn(), network, channel, limit, cutoff_id)
 
   def _do_get_chunk(self, network, channel, after_id, max_id, chunk):
+    self._barrier()
     return _q_get_chunk(self._get_conn(), network, channel, after_id, max_id, chunk)
 
   def _do_get_last(self, network, channel, limit, cutoff_id):
+    self._barrier()
     return _q_get_last(self._get_conn(), network, channel, limit, cutoff_id)
 
   def _do_get_before(self, network, channel, before_id, limit):
+    self._barrier()
     return _q_get_before(self._get_conn(), network, channel, before_id, limit)
 
   # --- async wrappers (await from the GUI thread) ---------------------------
@@ -187,16 +203,54 @@ class HistoryReader:
 class HistoryDB:
   """Persistent channel history stored in SQLite.
 
-  The GUI thread owns this connection and writes through it directly: a single
-  indexed INSERT plus a WAL commit is bounded work, and every caller of add()
-  reads back through the same connection (a replay bounded by current_max_id
-  must see the row that id names), so making the insert itself asynchronous
-  would trade a bounded cost for a visibility race.
+  Threading: the GUI thread never writes
+  --------------------------------------
+  Three connections, each owned by exactly one thread:
 
-  What is *not* bounded -- pruning the tables and checkpointing the WAL -- runs
-  on the maintenance thread below instead.  Both used to run inline in add(),
-  and between them they account for 30 of the 39 history stall samples in
-  me/hangs.log (up to 33s of frozen GUI); see _maintain()."""
+    * ``_wconn`` -- the writer thread. Every INSERT, every DELETE and every WAL
+      checkpoint happens here, one at a time, in submission order.
+    * ``_rconn`` -- the GUI thread, opened ``query_only``. WAL lets it read
+      while the writer writes, so a read never waits for a write.
+    * ``HistoryReader`` -- its own thread and its own read-only connection, for
+      the drip-feed replay.
+
+  add() used to run the INSERT and the commit inline on the GUI thread, on the
+  grounds that a single indexed insert plus a WAL commit is bounded work. It is
+  bounded in *rows touched*, which is not the same as bounded in *time*: a
+  commit is a WriteFile against the WAL, and a syscall against a loaded
+  filesystem takes as long as the filesystem takes. That is the reported bug --
+  press Enter, wait several seconds, watch the line appear -- because on the
+  send path this sits between putting the line on the wire and drawing it.
+
+  Nor was it the only wait. Two write connections existed (this one and the
+  maintenance thread's) and WAL allows one writer, so the two were serialised
+  by ``busy_timeout``, set to 15000. Every 500 inserts the maintenance thread
+  takes a write transaction to prune and to checkpoint, and for as long as it
+  holds it the GUI thread's next insert blocks -- by design, for up to fifteen
+  seconds. Collapsing both onto one writer thread removes that contention
+  rather than tuning it: there is no second writer left to wait for, and
+  busy_timeout stops being load-bearing.
+
+  What the old comment got right, and how it is kept
+  --------------------------------------------------
+  The visibility requirement is real: a replay bounded by current_max_id() must
+  be able to see the row that id names, or a line is written to the table,
+  excluded from its own backlog by the cutoff, and never rendered -- a message
+  that silently disappears when the window is next opened. It does not follow
+  that the *write* has to be synchronous, only that a *read* has to be ordered
+  after it. So:
+
+    * Row ids are allocated here, on the calling thread, before the write is
+      queued. current_max_id() answers from that counter, so it is correct the
+      instant add() returns and costs nothing. One writer thread means the ids
+      still reach the table in order, and an explicit id on an AUTOINCREMENT
+      column keeps the sequence in step.
+    * Every read drains the queue first (flush_pending). Normally the queue is
+      empty and the barrier is free. When it is not -- which is exactly when
+      the filesystem is misbehaving -- a read waits, where the old code made
+      every *message* wait. Reads happen on a join, on opening a window and on
+      scrolling to the top; writes happen on every line of traffic.
+  """
 
   # Inserts between maintenance passes. Only a bound on how stale the prune may
   # get: the pass itself costs one indexed probe per channel that received a
@@ -205,28 +259,73 @@ class HistoryDB:
 
   def __init__(self, db_path, keep_limit=10000):
     self._db_path = db_path
-    self._conn = sqlite3.connect(db_path)
-    self._conn.execute("PRAGMA journal_mode=WAL")
+    self._keep = keep_limit
+    self._url_keep = 50000
+    self._add_count = 0
+    self._closed = False
+    self._write_errors = 0
+    # (network, channel) pairs that have had rows added since the last prune.
+    # A prune of anything else can only re-discover that it is still under the
+    # limit, which is what made the old "prune every channel every time" pass
+    # scan the whole table for nothing 188 channels at a time.
+    self._dirty = set()
+    self._lock = threading.Lock()   # guards _dirty, _add_count and the ids
+
+    # Schema, migrations and the starting ids, done once on the calling thread
+    # before either worker connection exists. This connection is closed again
+    # immediately: sqlite3 connections are thread-affine, so the one that
+    # creates the schema is not one that may go on being used.
+    boot = sqlite3.connect(db_path)
+    self._configure_write_conn(boot)
+    self._create_schema(boot)
+    self._migrate(boot)
+    self._next_id = self._max_of(boot, 'history')
+    self._next_url_id = self._max_of(boot, 'urls')
+    boot.close()
+
+    # The GUI thread's read connection. query_only makes an accidental write
+    # fail loudly instead of quietly re-introducing the thing this class was
+    # rearranged to stop doing.
+    self._rconn = sqlite3.connect(db_path)
+    self._rconn.execute("PRAGMA query_only=1")
+    self._rconn.execute("PRAGMA busy_timeout=15000")
+
+    # The single writer. The worker count is the whole point: one thread means
+    # one writer, which means no lock contention with ourselves.
+    self._writer = ThreadPoolExecutor(
+      max_workers=1, thread_name_prefix='history-write')
+    self._wconn = None            # created lazily inside the writer thread
+
+  # ------------------------------------------------------------------
+  # Setup helpers
+  # ------------------------------------------------------------------
+
+  @staticmethod
+  def _configure_write_conn(conn):
+    """Apply the pragmas every writing connection needs."""
+    conn.execute("PRAGMA journal_mode=WAL")
     # synchronous=NORMAL: in WAL mode this is the SQLite-recommended setting.
     # Each commit no longer forces an fsync to disk (fsync happens only at
-    # checkpoints), which turns our commit-per-insert in add()/add_url() from a
-    # disk sync on the GUI thread into a cheap memory write. The DB stays
-    # consistent; only the last transaction or two could be lost on an OS/power
-    # crash -- fine for a replay cache. This was ~17% of GUI-thread time.
-    self._conn.execute("PRAGMA synchronous=NORMAL")
+    # checkpoints), which turns the commit-per-insert from a disk sync into a
+    # cheap memory write. The DB stays consistent; only the last transaction or
+    # two could be lost on an OS/power crash -- fine for a replay cache.
+    conn.execute("PRAGMA synchronous=NORMAL")
     # ...but synchronous=NORMAL only moves the fsync to the checkpoint, and by
     # default SQLite runs that checkpoint inline in whichever commit() pushes
-    # the WAL past 1000 pages -- i.e. on the GUI thread, in the middle of a
-    # message arriving. That is 9 of the stall samples in me/hangs.log (2.5s to
-    # 9s each). Turn the automatic checkpoint off here and let the maintenance
-    # thread take it, where a multi-second fsync costs nothing.
-    self._conn.execute("PRAGMA wal_autocheckpoint=0")
-    # Two write connections now exist (this one and the maintenance thread's),
-    # and WAL allows only one writer at a time. The maintenance writes are short
-    # indexed range deletes, so waiting is far better than failing; without a
-    # timeout an overlap would raise "database is locked" and lose a line.
-    self._conn.execute("PRAGMA busy_timeout=15000")
-    self._conn.execute("""
+    # the WAL past 1000 pages. That used to land on the GUI thread in the
+    # middle of a message arriving (9 of the stall samples in me/hangs.log,
+    # 2.5s to 9s each). It lands on the writer thread either way now, but the
+    # maintenance pass is still the right place for it: a checkpoint blocks
+    # this connection's own next insert, so we would rather choose when.
+    conn.execute("PRAGMA wal_autocheckpoint=0")
+    # There is only one writer now, so this no longer covers a self-inflicted
+    # collision. It still covers an outside one -- a second qtpyrc, or a
+    # sqlite3 shell open on the same file.
+    conn.execute("PRAGMA busy_timeout=15000")
+
+  @staticmethod
+  def _create_schema(conn):
+    conn.execute("""
       CREATE TABLE IF NOT EXISTS history (
         id        INTEGER PRIMARY KEY AUTOINCREMENT,
         ts        TEXT    NOT NULL,
@@ -238,12 +337,11 @@ class HistoryDB:
         prefix    TEXT    DEFAULT ''
       )
     """)
-    self._conn.execute("""
+    conn.execute("""
       CREATE INDEX IF NOT EXISTS idx_history_lookup
       ON history (network, channel, id)
     """)
-    # URL catcher table
-    self._conn.execute("""
+    conn.execute("""
       CREATE TABLE IF NOT EXISTS urls (
         id        INTEGER PRIMARY KEY AUTOINCREMENT,
         ts        TEXT    NOT NULL,
@@ -254,38 +352,22 @@ class HistoryDB:
         url       TEXT    NOT NULL
       )
     """)
-    self._conn.execute("""
+    conn.execute("""
       CREATE INDEX IF NOT EXISTS idx_urls_lookup
       ON urls (network, ts)
     """)
-    self._conn.commit()
-    self._migrate()
-    self._keep = keep_limit
-    self._url_keep = 50000
-    self._add_count = 0
-    # --- maintenance thread (pruning + WAL checkpoints) ---
-    self._maint = ThreadPoolExecutor(
-      max_workers=1, thread_name_prefix='history-maint')
-    self._maint_conn = None       # created lazily inside the worker thread
-    self._maint_lock = threading.Lock()
-    self._maint_busy = False      # a pass is queued or running
-    self._closed = False
-    # (network, channel) pairs that have had rows added since the last prune.
-    # A prune of anything else can only re-discover that it is still under the
-    # limit, which is what made the old "prune every channel every time" pass
-    # scan the whole table for nothing 188 channels at a time.
-    self._dirty = set()
-    # Highest row id in the table, kept current by add() so current_max_id() is
-    # free to call from the GUI thread (see _id_cap for what it is used for).
-    # Read once here because the table is usually non-empty at startup and no
-    # insert has happened yet to tell us where it left off.
-    try:
-      row = self._conn.execute("SELECT MAX(id) FROM history").fetchone()
-      self._max_id = (row[0] if row and row[0] is not None else 0)
-    except sqlite3.Error:
-      self._max_id = 0
+    conn.commit()
 
-  def _migrate(self):
+  @staticmethod
+  def _max_of(conn, table):
+    """Highest id currently in *table*, or 0. The id counter starts here."""
+    try:
+      row = conn.execute("SELECT MAX(id) FROM %s" % table).fetchone()
+      return row[0] if row and row[0] is not None else 0
+    except sqlite3.Error:
+      return 0
+
+  def _migrate(self, conn):
     """Apply one-time schema/data migrations, tracked via PRAGMA user_version.
 
     v1: query history used to be keyed by "=nick:ident", but query windows and
@@ -295,49 +377,149 @@ class HistoryDB:
     substr up to it yields "=nick". The predicate matches nothing once migrated,
     and user_version gates the (full-scan) UPDATE so it runs only once."""
     try:
-      ver = self._conn.execute("PRAGMA user_version").fetchone()[0]
+      ver = conn.execute("PRAGMA user_version").fetchone()[0]
     except sqlite3.Error:
       return
     if ver < 1:
       try:
-        self._conn.execute(
+        conn.execute(
           "UPDATE history SET channel = substr(channel, 1, instr(channel, ':') - 1) "
           "WHERE channel LIKE '=%:%'")
-        self._conn.execute("PRAGMA user_version = 1")
-        self._conn.commit()
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
       except sqlite3.Error:
         pass
 
-  def add(self, network, channel, event_type, nick=None, text=None, prefix=''):
-    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+  # ------------------------------------------------------------------
+  # Writer thread
+  # ------------------------------------------------------------------
+
+  def _wget(self):
+    """The writer thread's connection, opened there on first use."""
+    if self._wconn is None:
+      conn = sqlite3.connect(self._db_path)
+      self._configure_write_conn(conn)
+      self._wconn = conn
+    return self._wconn
+
+  def _submit(self, fn, *args):
+    """Queue *fn* on the writer thread. Returns a Future, or None if closed."""
+    if self._closed:
+      return None
     try:
-      cur = self._conn.execute(
-        "INSERT INTO history (ts, network, channel, type, nick, text, prefix) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (ts, network or '', channel, event_type, nick, text, prefix or ''))
-      self._conn.commit()
-      if cur.lastrowid:
-        self._max_id = cur.lastrowid
-    except sqlite3.ProgrammingError:
-      return  # DB already closed during shutdown
-    self._dirty.add((network or '', channel))
-    self._add_count += 1
-    if self._add_count >= self.MAINT_INTERVAL:
-      self._add_count = 0
+      return self._writer.submit(fn, *args)
+    except RuntimeError:        # executor shut down mid-flight
+      return None
+
+  def _w_insert_history(self, row):
+    try:
+      conn = self._wget()
+      conn.execute(
+        "INSERT INTO history (id, ts, network, channel, type, nick, text, prefix) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", row)
+      conn.commit()
+    except sqlite3.Error as e:
+      self._note_write_error('history', e)
+
+  def _w_insert_url(self, row):
+    try:
+      conn = self._wget()
+      conn.execute(
+        "INSERT INTO urls (id, ts, network, channel, nick, host, url) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)", row)
+      conn.commit()
+    except sqlite3.Error as e:
+      self._note_write_error('urls', e)
+
+  def _note_write_error(self, table, exc):
+    """A lost row is a lost chat line, so it is reported rather than swallowed.
+
+    Only the first is reported: if the disk has gone, every subsequent line
+    produces the same message and scrolls the useful one away."""
+    self._write_errors += 1
+    if self._write_errors == 1:
+      dbg(LOG_ERROR, 'History write failed (%s): %s' % (table, exc))
+
+  # ------------------------------------------------------------------
+  # Writing (called from the GUI thread; queues, never blocks)
+  # ------------------------------------------------------------------
+
+  def add(self, network, channel, event_type, nick=None, text=None, prefix=''):
+    """Queue one history row. Does no filesystem work and cannot block.
+
+    The id is allocated here so that current_max_id() is right the moment this
+    returns -- see the class docstring for why that matters."""
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with self._lock:
+      self._next_id += 1
+      rid = self._next_id
+      self._dirty.add((network or '', channel))
+      self._add_count += 1
+      due = self._add_count >= self.MAINT_INTERVAL
+      if due:
+        self._add_count = 0
+      # Submitted under the same lock that allocated the id, so submission
+      # order is id order. Only the GUI thread calls add() today, which makes
+      # this free -- but "the ids reach the table in order" is an invariant the
+      # class docstring leans on, and an invariant that holds only because of
+      # who happens to call it is one that breaks silently the day someone
+      # logs a line from a worker.
+      self._submit(self._w_insert_history,
+                   (rid, ts, network or '', channel, event_type, nick, text,
+                    prefix or ''))
+    # Outside the lock: _schedule_maintenance takes it, and it is not reentrant.
+    if due:
       self._schedule_maintenance()
+
+  def add_url(self, network, channel, nick, host, url):
+    """Queue one captured URL. Same contract as add()."""
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with self._lock:
+      self._next_url_id += 1
+      rid = self._next_url_id
+      self._submit(self._w_insert_url,
+                   (rid, ts, network or '', channel or '', nick or '',
+                    host or '', url))
 
   def current_max_id(self):
     """Return the id the table currently ends at (0 when empty).
 
-    Cheap: maintained by add(), not queried. Callers pass it back later as a
-    *cutoff_id* to read the table as it was at this moment -- see _id_cap."""
-    return self._max_id
+    Free: maintained by add(), never queried. Callers pass it back later as a
+    *cutoff_id* to read the table as it was at this moment -- see _id_cap. It
+    counts rows that are queued but not yet committed, which is the point;
+    flush_pending() below is what makes them readable."""
+    return self._next_id
+
+  def flush_pending(self, timeout=30.0):
+    """Block until every write queued so far has been committed.
+
+    Every read goes through this. The executor has a single worker and a FIFO
+    queue, so a job submitted now runs after everything submitted before it --
+    waiting on that job is exactly "the table has caught up with add()".
+
+    Returns False if the wait timed out or the writer is gone, in which case
+    the caller reads a table that may be missing its newest rows. That is
+    strictly better than the alternatives: hanging the GUI for as long as a
+    dead disk takes, or reading without anyone being able to tell."""
+    fut = self._submit(lambda: None)
+    if fut is None:
+      return False
+    try:
+      fut.result(timeout)
+      return True
+    except Exception:
+      return False
+
+  # ------------------------------------------------------------------
+  # Reading (GUI thread, read-only connection, ordered after the writer)
+  # ------------------------------------------------------------------
 
   def get_last(self, network, channel, limit, cutoff_id=None):
     """Return the last *limit* rows for a channel, oldest first.
 
     *cutoff_id* restricts the read to rows that existed at that id (_id_cap)."""
-    return _q_get_last(self._conn, network, channel, limit, cutoff_id)
+    self.flush_pending()
+    return _q_get_last(self._rconn, network, channel, limit, cutoff_id)
 
   def replay_bounds(self, network, channel, limit, cutoff_id=None):
     """Return (min_id, max_id) covering the newest *limit* rows for a channel,
@@ -352,7 +534,8 @@ class HistoryDB:
     query returns nothing, so we include everything from id 0.
 
     *cutoff_id* restricts the bounds to rows that existed at that id (_id_cap)."""
-    return _q_replay_bounds(self._conn, network, channel, limit, cutoff_id)
+    self.flush_pending()
+    return _q_replay_bounds(self._rconn, network, channel, limit, cutoff_id)
 
   def get_chunk(self, network, channel, after_id, max_id, chunk):
     """Return (rows, last_id) for the next ascending-id slice of a channel's
@@ -361,50 +544,47 @@ class HistoryDB:
     rows are 6-tuples (id, ts, type, nick, text, prefix) ready for rendering;
     last_id is the id to pass as *after_id* on the next call. When fewer than
     *chunk* rows come back the caller has reached max_id and replay is done."""
-    return _q_get_chunk(self._conn, network, channel, after_id, max_id, chunk)
+    self.flush_pending()
+    return _q_get_chunk(self._rconn, network, channel, after_id, max_id, chunk)
 
   def get_before(self, network, channel, before_id, limit):
     """Return (rows, oldest_id) for the *limit* rows older than *before_id*,
     oldest first. Used by the lazy scroll-up loader to prepend older lines."""
-    return _q_get_before(self._conn, network, channel, before_id, limit)
+    self.flush_pending()
+    return _q_get_before(self._rconn, network, channel, before_id, limit)
+
+  def read_conn(self):
+    """The GUI thread's read-only connection, with the writer drained first.
+
+    For queries that do not fit the fixed set above -- Find in All Windows
+    builds its own SQL and streams a cursor rather than materialising it. The
+    connection is query_only, so a caller that writes through it raises instead
+    of quietly reintroducing a second writer.
+
+    Reach for one of the named methods before this: they are what the barrier
+    and the row shape are documented against."""
+    self.flush_pending()
+    return self._rconn
 
   # ------------------------------------------------------------------
-  # Maintenance: pruning and WAL checkpoints, on a background thread
+  # Maintenance: pruning and WAL checkpoints, on the writer thread
   # ------------------------------------------------------------------
 
   def _schedule_maintenance(self):
-    """Queue a maintenance pass, unless one is already queued or running.
+    """Queue a maintenance pass behind the writes already submitted.
 
-    Called from the GUI thread. Never waits: if the previous pass is still
-    going, the rows this one would have pruned simply stay until the next
-    call, which is what the keep-limit already tolerates."""
-    if self._closed:
-      return
-    with self._maint_lock:
-      if self._maint_busy:
-        return
-      self._maint_busy = True
-      dirty = self._dirty
-      self._dirty = set()
-    try:
-      self._maint.submit(self._maintain, dirty)
-    except RuntimeError:      # executor shut down mid-flight
-      with self._maint_lock:
-        self._maint_busy = False
-
-  def _maint_get_conn(self):
-    """Return the maintenance thread's own write connection (created there)."""
-    if self._maint_conn is None:
-      conn = sqlite3.connect(self._db_path)
-      conn.execute("PRAGMA synchronous=NORMAL")
-      # This connection is the one allowed to checkpoint, and it is the one
-      # that can afford to: it is not the GUI thread.
-      conn.execute("PRAGMA busy_timeout=15000")
-      self._maint_conn = conn
-    return self._maint_conn
+    No busy flag and no lock against a concurrent pass: the executor has one
+    worker, so a pass cannot overlap an insert or another pass. It can only
+    delay them, and delaying a queued insert costs nobody anything -- which is
+    the difference between this and the two-connection arrangement it replaced,
+    where the same work blocked the GUI thread through busy_timeout."""
+    with self._lock:
+      dirty, self._dirty = self._dirty, set()
+    if dirty:
+      self._submit(self._maintain, dirty)
 
   def _maintain(self, dirty):
-    """One maintenance pass. Runs on the maintenance thread.
+    """One maintenance pass. Runs on the writer thread.
 
     Three things used to happen inline in add(), on the GUI thread, every 500
     inserts, and all three are unbounded in the size of the database:
@@ -419,7 +599,7 @@ class HistoryDB:
       * The same pattern over the urls table, with a 50000-row subquery
         (8 more samples).
       * The WAL checkpoint that commit() triggers -- see wal_autocheckpoint
-        in __init__ (9 more samples).
+        in _configure_write_conn (9 more samples).
 
     Here, each of the first two is one indexed probe for the id of the
     keep-th newest row: if there is none the table is under the limit and
@@ -427,21 +607,18 @@ class HistoryDB:
     at or below it goes in a single indexed range delete -- no subquery, no
     ephemeral index, no scan of the rows being kept."""
     try:
-      conn = self._maint_get_conn()
+      conn = self._wget()
       for network, channel in dirty:
         self._prune_one(conn, network, channel)
       self._prune_urls(conn)
       # PASSIVE does as much of the WAL as it can without ever waiting for a
-      # reader or blocking a writer, so this cannot stall the GUI's inserts.
+      # reader, so it cannot stall the GUI thread's reads.
       conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
     except sqlite3.Error:
       pass                    # a prune that fails is retried by the next pass
-    finally:
-      with self._maint_lock:
-        self._maint_busy = False
 
   def _prune_one(self, conn, network, channel):
-    """Trim one channel to at most self._keep rows. Maintenance thread only.
+    """Trim one channel to at most self._keep rows. Writer thread only.
 
     keep_limit comes from config.backscroll_limit, where 0 documented-ly means
     "unlimited" -- so it must mean "never prune" here. Taking it literally
@@ -462,7 +639,7 @@ class HistoryDB:
     conn.commit()
 
   def _prune_urls(self, conn):
-    """Trim the urls table to self._url_keep rows. Maintenance thread only."""
+    """Trim the urls table to self._url_keep rows. Writer thread only."""
     row = conn.execute("SELECT id FROM urls ORDER BY id DESC LIMIT 1 OFFSET ?",
                        (self._url_keep,)).fetchone()
     if row is None:
@@ -471,17 +648,6 @@ class HistoryDB:
     conn.commit()
 
   # -- URL catcher --
-
-  def add_url(self, network, channel, nick, host, url):
-    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    try:
-      self._conn.execute(
-        "INSERT INTO urls (ts, network, channel, nick, host, url) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (ts, network or '', channel or '', nick or '', host or '', url))
-      self._conn.commit()
-    except sqlite3.ProgrammingError:
-      return
 
   def search_urls(self, network=None, channel=None, nick=None,
                   host=None, date_from=None, date_to=None, limit=1000):
@@ -512,7 +678,8 @@ class HistoryDB:
       params.append(date_to + " 23:59:59")
     where = " AND ".join(clauses) if clauses else "1"
     params.append(limit)
-    cur = self._conn.execute(
+    self.flush_pending()
+    cur = self._rconn.execute(
       "SELECT ts, network, channel, nick, host, url FROM urls "
       "WHERE %s ORDER BY id DESC LIMIT ?" % where, params)
     rows = cur.fetchall()
@@ -521,52 +688,63 @@ class HistoryDB:
 
   def url_networks(self):
     """Return distinct network names from captured URLs."""
-    cur = self._conn.execute(
+    self.flush_pending()
+    cur = self._rconn.execute(
       "SELECT DISTINCT network FROM urls ORDER BY network")
     return [r[0] for r in cur.fetchall()]
 
   def url_channels(self, network=None):
     """Return distinct channels, optionally filtered by network."""
+    self.flush_pending()
     if network:
-      cur = self._conn.execute(
+      cur = self._rconn.execute(
         "SELECT DISTINCT channel FROM urls WHERE network = ? ORDER BY channel",
         (network,))
     else:
-      cur = self._conn.execute(
+      cur = self._rconn.execute(
         "SELECT DISTINCT channel FROM urls ORDER BY channel")
     return [r[0] for r in cur.fetchall()]
 
   def close(self):
-    """Stop maintenance, fold the WAL back into the DB, and close.
+    """Drain the writer, fold the WAL back into the DB, and close.
 
-    The WAL is only checkpointed by the maintenance thread now (see
-    wal_autocheckpoint in __init__), so shutdown is the one place that has to
-    make sure it does not grow without bound across runs. TRUNCATE empties it;
-    it is allowed to take its time here because the GUI is going away anyway.
-    Bounded by the executor's own wait, so a hung disk cannot hang the exit."""
+    The WAL is only checkpointed by the maintenance pass now (see
+    wal_autocheckpoint), so shutdown is the one place that has to make sure it
+    does not grow without bound across runs. TRUNCATE empties it, and it is
+    allowed to take its time because the GUI is going away anyway.
+
+    _closed is set first so nothing new is queued, then the executor is drained
+    -- not cancelled. What is queued is chat lines that have already been shown
+    to the user, and that would otherwise be missing from the backlog next
+    time."""
+    if self._closed:
+      return
     self._closed = True
 
-    def _close_maint_conn():
-      # Must run on the maintenance thread: sqlite3 connections are
-      # thread-affine, so closing this one from here would only raise.
-      if self._maint_conn is not None:
-        try:
-          self._maint_conn.close()
-        except sqlite3.Error:
-          pass
-        self._maint_conn = None
+    def _finish():
+      # Runs on the writer thread, after every queued insert: sqlite3
+      # connections are thread-affine, so this is the only place its own
+      # connection can be checkpointed and closed.
+      if self._wconn is None:
+        return
+      try:
+        self._wconn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+      except sqlite3.Error:
+        pass
+      try:
+        self._wconn.close()
+      except sqlite3.Error:
+        pass
+      self._wconn = None
 
     try:
-      self._maint.submit(_close_maint_conn)
+      self._writer.submit(_finish)
     except RuntimeError:
       pass
-    # Waits only for a pass already under way -- one indexed range delete and a
-    # PASSIVE checkpoint, both bounded -- because _closed now stops new ones and
-    # _maint_busy allows at most one outstanding. Not cancel_futures: that would
-    # cancel the close job queued just above and leak the connection.
-    self._maint.shutdown(wait=True)
+    # Not cancel_futures: that would drop the queued inserts, and the close job
+    # along with them.
+    self._writer.shutdown(wait=True)
     try:
-      self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+      self._rconn.close()
     except sqlite3.Error:
       pass
-    self._conn.close()

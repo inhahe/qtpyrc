@@ -938,8 +938,15 @@ class AppConfig:
 
     # Render audit: catches the same line being drawn into a chat view twice,
     # and records the stack of both renders. See render_audit.py.
+    #
+    # Off unless asked for. It is an instrument, not a feature: it wraps every
+    # render method, keys and retains every line drawn, and appends to a log
+    # file for the whole session. That is a fair price while chasing a
+    # duplicate and pure overhead once the duplicate is found -- and the bug it
+    # was written for (self-echo doubling) is fixed. An instrument that ships
+    # switched on is one nobody remembers to switch off.
     ra = log.get('render_audit') or {}
-    self.render_audit_enabled = bool(ra.get('enabled', True))
+    self.render_audit_enabled = bool(ra.get('enabled', False))
     self.render_audit_file = ra.get('file', 'renders.log')
     self.render_audit_window = float(ra.get('window', 120.0))
 
