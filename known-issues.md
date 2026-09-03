@@ -186,6 +186,67 @@ above; `SelfEchoTracker` has no notice list yet.
 
 ## Fixed, with a residue worth knowing
 
+### Right-clicking a nick scrolled the channel to the top (fixed 2026-09-02)
+
+**Where:** `window.py`, `ChatOutput._highlight_anchor_at` / `contextMenuEvent`.
+**Reported as:** "every time i right-click whois someone, the channel window
+scrolls way up. i don't think it did this before."
+
+`contextMenuEvent` highlighted the nick under the pointer by *selecting* it
+with `setTextCursor()`, kept the previous cursor, and restored it once the menu
+closed. **`setTextCursor()` scrolls the view to the cursor**, so the restore
+scrolled to wherever that cursor happened to be — measured in the test at
+`7589 → 0`, i.e. from the bottom of the backscroll to the very top.
+
+**The reporter's "I don't think it did this before" was right, and the reason
+is a fix.** Chat lines are appended through `Window.cur`, a *separate*
+`QTextCursor`, so nothing in normal operation moves the widget's own cursor.
+`_on_range_changed` and `_scroll_to_bottom` used to call `moveCursor(End)`,
+which dragged it back to the bottom on every incoming line — and that was
+removed (correctly) because it dropped the anchor of a selection the user was
+making. The cursor move was load-bearing by accident: once it was gone, a
+cursor parked anywhere stayed parked for the rest of the session, and every
+right-click jumped back to it.
+
+**What parks it** is ordinary use: clicking anywhere in the chat text, or
+either find path — `SearchBar._apply_found` and `find_in_all._apply_highlight`
+both call `setTextCursor()` on the match. So "every time" is accurate: one
+click or one Ctrl+F earlier in the session is enough to make every subsequent
+right-click jump there.
+
+**The same code had a second bug, and it is the more insidious one.** The Copy
+item appears on that menu *because* the user has a selection
+(`copy_action=has_selection`), and `popups.show_popup` implements it as
+`output.copy()` — which copies whatever is selected **when the menu closes**.
+Selecting the nick replaced their selection, so Copy silently copied the nick
+instead of the text they had picked. Nobody reported this, presumably because
+the result looks like a mis-click rather than a bug.
+
+Fixed by highlighting through `setExtraSelections()` instead: an extra
+selection draws and does nothing else — it does not move the cursor, does not
+scroll, and does not touch the user's selection. `_highlight_anchor_at` now
+returns a bool and is paired with `_clear_anchor_highlight()`.
+
+**Residue 1 — the extra-selections list has three owners now.**
+`SearchBar._apply_found`, `find_in_all._apply_highlight` and this. The first
+two *replace* the whole list; the popup highlight appends to it and puts back
+what it displaced, so a find result survives a right-click. If a fourth owner
+appears, that convention has to be made explicit rather than inferred.
+
+**Residue 2 — the general rule.** `setTextCursor()` is not a way to highlight
+text; it is a way to move the caret, which scrolls and clobbers the selection
+as side effects. Anything that wants to mark a range *visually* wants
+`setExtraSelections()`. The two are easy to confuse because on an empty
+document they look identical.
+
+**Residue 3 — how the first version of the test missed it.** It made a
+selection (for the Copy half) and then checked the scroll in the same window —
+but making a selection *moves the cursor to the selection*, near the bottom,
+which is precisely the state in which this bug does not occur. It passed
+against the broken code. The two cases need separate windows, and the file says
+so. A test whose own setup destroys the precondition is worse than no test: it
+reports that the bug is absent.
+
 ### The hang watchdog was the biggest single cause of the freezes it measured (fixed 2026-09-02)
 
 **Where:** `hang_watchdog.py`, `_maybe_write_native()`.
