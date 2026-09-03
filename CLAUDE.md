@@ -582,6 +582,25 @@ into a doubled one.
 
 `_pnick(nick, channel)` prepends mode symbol when `show_mode_prefix` enabled. `_nick_prefix(nick, channel)` returns just the symbol. Stored in `User.prefix[irclower(channel)]`, updated by NAMES reply and MODE changes. Saved to history DB `prefix` column for replay.
 
+**The prefix belongs to a membership, so it dies with one.** `User` objects
+live in `client.users` for the whole session and are shared by every channel,
+so an entry left in `User.prefix` outlives the thing it described: someone
+parts as an op and rejoins still wearing the "@", and `userJoined` stamps that
+stale symbol into the join line and the history row. `Channel.removenick` and
+`Channel.rejoined` now drop it (`Channel._chnlower()` is the key, `irclower`
+like everywhere else), and **`names()` assigns unconditionally** — a NAMES
+token *without* a symbol has to clear one, because NAMES is the authority on
+who holds what and the absence of a prefix is as much a statement as its
+presence. Setting only when non-empty, as it used to, meant nothing could ever
+clear a prefix except an explicit `-o` that arrived while you were watching.
+
+**A client cannot distinguish a stale prefix from a current one, so do not try
+to.** The "i'm in #ops and it doesn't show me as having ops" report was Wicket
+(`irc bouncer`) never applying MODE to its own member table and replaying a
+months-old NAMES on attach. The fix belongs there; re-issuing NAMES from
+qtpyrc on attach would hide the bug rather than fix it, and would hide the next
+one too. See `known-issues.md`.
+
 ### History DB
 
 - Channel key: `"#channel"` (lowercase)
