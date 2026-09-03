@@ -78,6 +78,69 @@ entry treated it as though it did.**
   measurement of the residual: every earlier number is contaminated by the
   watchdog's own suspensions, and the log says by how much on each report.
 
+### History and logs are keyed by a network name that changes spelling mid-session
+
+**Where:** `irc_client.IRCClient._log_network` (irc_client.py:750).
+**Status:** open. Found 2026-09-03 while investigating the missing "@" in
+`#ops`; not caused by it and not fixed with it, because the fix needs a
+decision about existing data.
+
+```python
+return self.client.network or self.client.network_key or self.client.hostname or 'unknown'
+```
+
+`client.network` is the ISUPPORT `NETWORK=` value, which is not known until the
+005 burst arrives. Anything written before that falls back to the config key,
+so **the same network is written under two different names depending on when a
+line happened**, and the history table is keyed by that name.
+
+Measured on `me/history.db`:
+
+| network value | rows |
+|---|---|
+| `Libera.Chat` | 41,117 |
+| `undernet` | 20,325 |
+| `UnderNet` | 14,067 |
+| `EFNet` | 3,933 |
+| `DALnet` | 3,149 |
+| `EFnet` | 863 |
+| `irc.undernet.org` | 139 |
+| `dalnet` | 48 |
+| `libera` | 40 |
+| `efnet` | 30 |
+| `''` | 9 |
+
+Five spellings of Undernet, three of EFnet, two each of DALnet and Libera. The
+two Undernet spellings interleave by hours, not by era — `UnderNet` at
+2026-09-02 11:14, `undernet` at 14:37, `UnderNet` again on 09-01 06:12 — so
+this is a race with registration, not a rename. At least eight channels
+(`#anxiety`, `#cinema`, `#forum`, `#life`, `#mentalhealth`, …) have rows under
+both.
+
+**Why it matters: a replay reads one key.** `_history_replay` looks up
+`(network, channel)`, so a channel whose history is split across two spellings
+replays only the half that matches whichever name is current *now*. Lines are
+not lost from the table, but they are invisible in the window, which is
+indistinguishable from lost. The log files split the same way
+(`UnderNet_#Philosophy_2026-09.log` beside `undernet_#philosophy_2026-09.log`),
+which is at least visible in a directory listing.
+
+**The fix is not just "normalise the key",** because that leaves 14,067 rows
+unreadable under the new key. It needs both:
+
+1. A stable key — the config's `network_key` is the only name known before
+   registration and the only one that cannot change under us. `NETWORK=` is
+   still the right thing to *display*.
+2. A migration that folds existing rows onto it, case-insensitively, plus the
+   hostname spellings (`irc.undernet.org`) — and the same for the log tree,
+   where the merge has to interleave by timestamp rather than concatenate.
+
+Both halves are the user's call, hence open rather than done. Note the bouncer
+project's `bugs.txt` carries a report — "I sent some stuff in a channel maybe
+in another irc client and rejoined the channel using a client connecting to
+Wicket and my latest messages aren't there" — that has the same shape as this,
+and it is worth checking whether some of it is this rather than a bouncer bug.
+
 ### `ChatOutput.paintEvent` lays out the whole backscroll when the view is at the bottom
 
 **Where:** `window.py`, `ChatOutput.paintEvent` — inherent to `QTextEdit`.
@@ -185,6 +248,96 @@ above; `SelfEchoTracker` has no notice list yet.
 ---
 
 ## Fixed, with a residue worth knowing
+
+### A mode prefix outlived the membership it belonged to (fixed 2026-09-03)
+
+**Where:** `models.py` (`Channel.removenick`, `Channel.rejoined`),
+`irc_client.py` (`IRCClient.names`).
+**Found while investigating:** "i'm in #ops and it doesn't show me as having
+ops in the user list even though my friend saw that i have ops and doing /op on
+her worked." That report turned out to be a Wicket bug, not a qtpyrc one (see
+below) — but the investigation found this, which is the same bug pointing the
+other way.
+
+`User` objects live in `client.users` for the whole session and are shared by
+every channel; `User.prefix` is a dict keyed by channel. **Nothing ever removed
+an entry from it.** `modeChanged` clears one only when told to by an explicit
+`-o`, `Channel.removenick` dropped the user from the channel without touching
+it, and `Channel.rejoined` cleared `chan.users` — which does not own the
+prefixes. So a symbol, once granted, survived a part, a quit, a rejoin and a
+reconnect.
+
+`names()` could not correct it either, because it read
+
+```python
+if prefix:
+    user.prefix[chnlower] = prefix
+```
+
+— a token *without* a prefix left the old value in place. NAMES is the
+authority on who holds what, so the absence of a symbol is as much a statement
+as its presence. It now assigns unconditionally, popping the entry when the
+token is bare.
+
+The visible failure: an op parts and rejoins without ops and is still shown
+with "@". It also reaches the history, because `userJoined` stamps
+`_nick_prefix()` into the join row — `me/history.db` has
+`2026-08-31 03:09:37 | join | nick=inhahe prefix='@' | #ops`, a join line
+recording ops the user did not yet have in that session.
+
+**Residue 1 — this was invisible in the common case.** A channel you stay in
+gets its prefixes refreshed by MODE, and a channel you rejoin normally gets a
+NAMES that re-asserts the "@" for whoever still has it. The bug only shows for
+someone whose status *changed while you were not looking*, which is exactly the
+case nobody tests by hand.
+
+**Residue 2 — `Channel.addnick`/`removenick` key `self.users` with
+`nick.lower()`, not `conn.irclower()`.** Everything else in this codebase uses
+the server's casemapping. It does not bite today because the two differ only
+for `[]\^` in nicks, but the new `Channel._chnlower()` deliberately uses
+`irclower` because it has to match the key `names()` and `modeChanged` write
+under. The `nick.lower()` calls are older and should be brought into line.
+
+### The nick list showed no ops for the user themselves — Wicket, not qtpyrc (diagnosed 2026-09-03)
+
+**Where:** `D:\visual studio projects\irc bouncer` — `user.py`,
+`UserSession._update_state`.
+**Reported as:** "i'm in #ops and it doesn't show me as having ops in the user
+list even though my friend saw that i have ops and doing /op on her worked."
+
+Not a qtpyrc bug. Wicket's `ChannelState.members` (nick -> prefix) is populated
+from the upstream RPL_NAMREPLY and then maintained for JOIN, PART, KICK, QUIT,
+NICK, TOPIC and 353 — **but there was no MODE branch at all**, so every op and
+deop after the channel was first joined was never recorded. That table is what
+`_replay_channel_state` turns back into the NAMES it sends each attaching
+client, so every client that attached was handed the prefixes as they were when
+Wicket joined the channel, possibly days earlier.
+
+The reporter had been opped during an earlier session — their client saw that
+MODE live and displayed it correctly at the time — Wicket never wrote it down,
+and the next attach replayed a NAMES without the "@". qtpyrc was showing
+exactly what it was told, which is why `/op` still worked and their friend still
+saw the "@".
+
+The evidence that settled it is in `me/history.db`: between the reporter's join
+of `#ops` at `2026-09-03 10:44:00` and their `sets mode +o Sophie\`` at
+`13:40:35` there is **no `+o inhahe` row at all**, so no MODE granting them ops
+was ever received in that session — while the same table shows `Sophie\`` and
+others carrying `prefix='@'` correctly, ruling out a general failure of prefix
+handling.
+
+Fixed in Wicket: `UserSession._apply_member_modes` plus `PREFIX` letter and
+`CHANMODES` parsing in `upstream.py`. See
+`irc bouncer/tests/test_member_modes.py`.
+
+**Residue — the same shape can hide anywhere a client trusts a bouncer's
+replayed state.** Topic, away status and channel modes are all replayed from
+tables Wicket maintains by hand from selected commands. A missing branch there
+is invisible to the client by construction: it cannot tell a stale fact from a
+current one. qtpyrc should not paper over it (a client that re-issues NAMES on
+attach would hide the bug rather than fix it), but it is worth knowing that
+"the client shows the wrong thing" and "the bouncer told it the wrong thing"
+look identical from the client end.
 
 ### Right-clicking a nick scrolled the channel to the top (fixed 2026-09-02)
 

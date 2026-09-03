@@ -182,12 +182,25 @@ class Channel:
     except RuntimeError:
       pass  # widget already deleted (shutdown)
 
+  def _chnlower(self):
+    """This channel's name under the server's casemapping (User.prefix key)."""
+    conn = self.client.conn if self.client else None
+    return conn.irclower(self.name) if conn else self.name.lower()
+
   def removenick(self, nick):
     self.nicks.discard(nick)
     lnick = nick.lower()
     user = self.users.pop(lnick, None)
     if user:
       user.channels.discard(self.name)
+      # A mode prefix belongs to a *membership*, so it dies with it. User
+      # objects live in client.users for the whole session and are shared by
+      # every channel, so a prefix left behind here comes back the next time
+      # this nick is seen: they part as an op and rejoin still wearing the
+      # "@", or -- via _nick_prefix() -- get a join line and a history row
+      # stamped with an op status they no longer hold. Nothing else clears
+      # this; modeChanged only removes a prefix it is explicitly told to.
+      user.prefix.pop(self._chnlower(), None)
     try:
       nl = self.window.nickslist
       for i in range(nl.count()):
@@ -226,7 +239,17 @@ class Channel:
       ws.set_disconnected(self.window.subwindow, not self.active)
 
   def rejoined(self):
+    """Reset membership state, keeping the window and its backscroll.
+
+    Same reasoning as removenick: everyone in the channel is about to be
+    re-announced by NAMES, so their old prefixes must not survive to be
+    believed in the meantime -- or, if NAMES no longer lists them as opped,
+    for good.
+    """
     self.active = True
+    chnlower = self._chnlower()
+    for user in self.users.values():
+      user.prefix.pop(chnlower, None)
     self.nicks.clear()
     self.users.clear()
     self.window.nickslist.clear()

@@ -1821,8 +1821,16 @@ class IRCClient(asyncirc.IRCClient):
       if not nick:
         continue
       user = self._get_user(nick, ident, host)
+      # Assigned unconditionally: NAMES is the authority on who holds what in
+      # this channel, so a token *without* a prefix has to clear one as surely
+      # as a token with one sets it. Setting only when non-empty leaves a stale
+      # symbol on a User that survives from an earlier membership -- the same
+      # object lives in client.users for the whole session -- and the user is
+      # then shown as an op the server no longer thinks they are.
       if prefix:
         user.prefix[chnlower] = prefix
+      else:
+        user.prefix.pop(chnlower, None)
       chan.addnick(nick, user)
 
   def privmsg(self, user, message):
