@@ -764,7 +764,32 @@ What is left is `ChatOutput.paintEvent` (~100-170ms per window per width),
 which is inherent to `QTextEdit`: painting a view scrolled to the bottom
 requires laying out everything above the viewport. See `known-issues.md`.
 
-Covered by `tests/test_autoscroll.py`.
+**Removing the cursor move had a consequence, and it is a rule of its own: use
+`setExtraSelections()` to mark text, never `setTextCursor()`.** Chat lines are
+appended through `Window.cur`, a *separate* `QTextCursor`, so the widget's own
+cursor is moved by nothing in normal operation — `moveCursor(End)` was the only
+thing dragging it back to the bottom, by accident. Once that was gone, a cursor
+parked by a click or by either find path (`SearchBar._apply_found`,
+`find_in_all._apply_highlight`) stayed parked for the session, and
+`ChatOutput.contextMenuEvent` — which selected the nick under the pointer and
+restored the previous cursor when its popup closed — began scrolling the view
+there on every right-click. Reported as "every time i right-click whois
+someone, the channel window scrolls way up".
+
+`setTextCursor()` is not a way to highlight text. It moves the caret, and
+scrolling to it and replacing the selection are side effects, not options. The
+second of those was the quieter bug in the same three lines: the popup's Copy
+item exists *because* the user has a selection, and `popups.show_popup`
+implements it as `output.copy()` — so selecting the nick made Copy copy the
+nick instead of what they had picked. `_highlight_anchor_at` /
+`_clear_anchor_highlight` now use an extra selection, which draws and does
+nothing else, and which is *appended* to the list rather than replacing it so a
+find result survives a right-click.
+
+Covered by `tests/test_autoscroll.py`, whose sections 6a and 6b are deliberately
+two separate windows: making a selection moves the cursor to it, near the
+bottom, which is exactly the state in which the scroll bug does not happen. The
+first version did both in one window and passed against the broken code.
 
 ### View modes
 

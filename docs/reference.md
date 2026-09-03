@@ -584,6 +584,17 @@ Right-click context menus are defined in `popups.ini` (mIRC-compatible format �
 - `[status]` — right-click in the server window
 - `[query]` — right-click in a query/PM window
 
+Two things are added automatically, so `popups.ini` does not mention them:
+
+- **A `Copy` item appears at the top whenever you have text selected**, and it
+  copies that selection. (Until 2026-09-02 it copied the nick you had
+  right-clicked instead, because highlighting the nick replaced your
+  selection.)
+- **The nick or link under the pointer is highlighted while the menu is open**,
+  so you can see what the menu applies to. The highlight is drawn over the text
+  without moving the cursor or the view — right-clicking never scrolls the
+  window.
+
 ### Syntax
 
 ```ini

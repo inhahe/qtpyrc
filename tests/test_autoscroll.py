@@ -24,6 +24,13 @@ stick to the bottom while at the bottom, stay put when the user has scrolled
 up, and still bottom-align a document that genuinely is shorter than the
 viewport.
 
+Section 6 is the sting in the tail of the first of those. Removing the cursor
+move was right, but it was also the only thing dragging the widget's own text
+cursor back to the bottom -- so a cursor parked by a click or a find stayed
+parked, and ChatOutput.contextMenuEvent, which restored that cursor after its
+popup closed, started scrolling the view to it. "Every time i right-click whois
+someone, the channel window scrolls way up."
+
 Usage:
   python tests/test_autoscroll.py     # from the qtpyrc root directory
 """
@@ -138,6 +145,32 @@ def at_bottom(w):
   return w.vs.value() == w.vs.maximum()
 
 
+def settle(app, w, timeout=10.0):
+  """Process events until the scrollbar range stops changing.
+
+  QTextEdit lays a document out lazily, so vs.maximum() is not meaningful the
+  instant after content is added -- and a single processEvents() is a guess
+  about how much of that layout the machine got through. Under load the guess
+  is wrong, and the failure does not look like a timing problem: section 2 sets
+  the scrollbar to maximum()//2 to simulate scrolling up, and against a
+  maximum() still at 0 that is a no-op, so it reported "scrolling up did not
+  disengage auto-scroll" -- which reads as a bug in the auto-scroll code.
+  Returns True if it settled, False on timeout.
+  """
+  deadline = time.monotonic() + timeout
+  last = None
+  stable = 0
+  while time.monotonic() < deadline:
+    app.processEvents()
+    now = w.vs.maximum()
+    stable = stable + 1 if now == last else 0
+    last = now
+    if stable >= 3 and now > 0:
+      return True
+    time.sleep(0.01)
+  return False
+
+
 def run():
   from PySide6.QtWidgets import QApplication
   app = QApplication.instance()
@@ -179,6 +212,9 @@ def run():
 
   # ---------------------------------------------------------------- 2
   # A user who has scrolled up must be left where they are.
+  check(settle(app, w),
+        'the scrollbar range never settled, so "scroll up" below cannot be '
+        'expressed (maximum=%d)' % w.vs.maximum())
   w.vs.setValue(w.vs.maximum() // 2)
   app.processEvents()
   parked = w.vs.value()
@@ -285,6 +321,146 @@ def run():
       break
   ws.maximizeActive()
   app.processEvents()
+
+
+  # ---------------------------------------------------------------- 6
+  # Right-clicking a nick must not move the view, and must not touch the
+  # user's selection.
+  #
+  # This is the sting in the tail of section 3. `_on_range_changed` and
+  # `_scroll_to_bottom` used to move the *widget's* text cursor to the end of
+  # the document, and that was removed because it dropped the anchor of a
+  # selection the user was making. Correct -- but it was also, by accident, the
+  # only thing keeping that cursor down at the bottom. Chat lines are appended
+  # through `Window.cur`, a separate QTextCursor, so nothing moves the widget's
+  # own cursor now: in a window the user has never clicked in it sits at
+  # position 0, the top of the document.
+  #
+  # ChatOutput.contextMenuEvent used to select the nick under the pointer with
+  # setTextCursor() and restore the previous cursor when the menu closed --
+  # and setTextCursor() scrolls the view to the cursor. Reported as "every time
+  # i right-click whois someone, the channel window scrolls way up".
+  #
+  # **The two cases below have to be separate windows.** Making a selection
+  # moves the widget's cursor to the selection, which is near the bottom -- so
+  # a single window that does both hides the scroll bug behind its own setup.
+  # An earlier version of this section did exactly that and passed against the
+  # broken code.
+  def nick_point(w):
+    """A viewport point inside a visible nick anchor, found the way a
+    right-click finds one: by asking what is under the pixel."""
+    doc = w.output.document()
+    blk = doc.lastBlock()
+    while blk.isValid():
+      it = blk.begin()
+      while not it.atEnd():
+        frag = it.fragment()
+        if frag.isValid() and frag.charFormat().isAnchor():
+          href = frag.charFormat().anchorHref() or ''
+          if href.startswith('nick:'):
+            cur = QTextCursor(doc)
+            cur.setPosition(frag.position() + 1)
+            r = w.output.cursorRect(cur)
+            if w.output.viewport().rect().contains(r.center()):
+              return r.center()
+        it += 1
+      blk = blk.previous()
+    return None
+
+  # --- 6a: the reported bug. No selection, so the cursor is still at 0. ---
+  pop = make_window(client, '#popup')
+  pop.resize(700, 400)
+  fill(pop, 120)
+  app.processEvents()
+  settle(app, pop)
+  pop._scroll_to_bottom()
+  app.processEvents()
+  check(at_bottom(pop), 'the popup window did not start at the bottom')
+
+  # Park the widget's cursor away from the bottom, then come back down. That is
+  # the ordinary state of a chat view in use: clicking anywhere in the text
+  # leaves the cursor there, and so do both find paths (SearchBar._apply_found
+  # and find_in_all._apply_highlight call setTextCursor on a match). Nothing
+  # moves it back -- lines are appended through Window.cur, a separate cursor,
+  # and the moveCursor(End) that used to drag it along was removed in section 3
+  # for dropping selections. So the cursor stays wherever it was last put, for
+  # the rest of the session.
+  parked = QTextCursor(pop.output.document())
+  parked.setPosition(0)
+  pop.output.setTextCursor(parked)
+  app.processEvents()
+  settle(app, pop)
+  pop._scroll_to_bottom()
+  app.processEvents()
+  check(at_bottom(pop),
+        'could not get back to the bottom after parking the cursor, so the '
+        'check below would prove nothing')
+
+  pt = nick_point(pop)
+  check(pt is not None,
+        'no nick anchor was visible in the viewport, so this proves nothing')
+  if pt is not None:
+    check((pop.output.anchorAt(pt) or '').startswith('nick:'),
+          'the point found is not on a nick anchor, so the right-click path '
+          'would not be taken')
+    before = (pop.vs.value(), pop.vs.maximum())
+    # Exactly what contextMenuEvent does around popups.show_popup(), which is
+    # modal and so cannot be driven from here.
+    highlighted = pop.output._highlight_anchor_at(pt)
+    app.processEvents()
+    check(highlighted,
+          'the nick under the pointer was not highlighted at all, so the menu '
+          'would not show which nick it applies to')
+    during = (pop.vs.value(), pop.vs.maximum())
+    at_bottom_during = at_bottom(pop)
+    pop.output._clear_anchor_highlight()
+    app.processEvents()
+    # "Still at the bottom", not "the same number". A window that is following
+    # its newest line legitimately moves when a pending layout changes the
+    # scrollbar maximum, and pinning the literal value makes this fail on
+    # whether the layout happened to have settled -- which is not the bug.
+    check(at_bottom_during and at_bottom(pop),
+          'right-clicking a nick took the view off the bottom '
+          '(%d/%d -> %d/%d while the menu is open -> %d/%d after it closes). '
+          'That is the "channel window scrolls way up" report: the highlight, '
+          'or putting it back, moved the view.'
+          % (before + during + (pop.vs.value(), pop.vs.maximum())))
+
+  # --- 6b: the same bug's other half. Copy must copy what the user picked. ---
+  # `copy_action` is on that menu *because* there is a selection, and
+  # popups.show_popup implements Copy as output.copy() -- which copies whatever
+  # is selected when the menu closes. Replacing the selection with the nick
+  # therefore made Copy silently copy the nick.
+  sel2 = make_window(client, '#popupsel')
+  sel2.resize(700, 400)
+  fill(sel2, 120)
+  app.processEvents()
+  cur = sel2.output.textCursor()
+  cur.movePosition(QTextCursor.MoveOperation.End)
+  cur.movePosition(QTextCursor.MoveOperation.Up,
+                   QTextCursor.MoveMode.MoveAnchor, 3)
+  cur.movePosition(QTextCursor.MoveOperation.Down,
+                   QTextCursor.MoveMode.KeepAnchor, 2)
+  sel2.output.setTextCursor(cur)
+  app.processEvents()
+  picked = sel2.output.textCursor().selectedText()
+  check(picked, 'the test could not make a selection to begin with')
+
+  pt2 = nick_point(sel2)
+  check(pt2 is not None, 'no nick anchor visible in the selection window')
+  if pt2 is not None:
+    sel2.output._highlight_anchor_at(pt2)
+    app.processEvents()
+    during_sel = sel2.output.textCursor().selectedText()
+    sel2.output._clear_anchor_highlight()
+    app.processEvents()
+    check(during_sel == picked,
+          'right-clicking a nick replaced the selection while the menu was '
+          'open (%r became %r), so Copy on that menu copies the nick instead '
+          'of what the user picked' % (picked, during_sel))
+    check(sel2.output.textCursor().selectedText() == picked,
+          'the selection did not survive the popup (%r became %r)'
+          % (picked, sel2.output.textCursor().selectedText()))
 
 
 def main():

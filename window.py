@@ -194,6 +194,9 @@ class ChatOutput(QTextEdit):
     super().__init__(parent_window)
     self._parent_window = parent_window
     self.setMouseTracking(True)
+    # Extra selections displaced by _highlight_anchor_at, to be put back by
+    # _clear_anchor_highlight. None means no popup highlight is in effect.
+    self._saved_extra_selections = None
 
   def paintEvent(self, event):
     super().paintEvent(event)
@@ -264,11 +267,36 @@ class ChatOutput(QTextEdit):
       self._refocus_input()
 
   def _highlight_anchor_at(self, pos):
-    """Select the anchor text at pos to visually highlight it.
-    Returns the old cursor to restore later, or None."""
+    """Highlight the anchor under *pos* while its popup menu is open.
+
+    Paired with _clear_anchor_highlight(); returns True if it highlighted
+    something.
+
+    **This goes through setExtraSelections, and must not go through the text
+    cursor.** It used to select the fragment with setTextCursor() and hand the
+    previous cursor back for the caller to restore afterwards, which was wrong
+    twice over:
+
+      * `setTextCursor()` scrolls the view to wherever the cursor is, so
+        restoring it scrolled the view to wherever the cursor happened to be.
+        Chat lines are appended through `Window.cur`, a *separate* QTextCursor,
+        so the widget's own cursor never moves off position 0 unless the user
+        clicks -- it is at the top of the document. `_scroll_to_bottom` used to
+        drag it to the end as a side effect, which hid this; that was removed
+        because it dropped the anchor of a selection the user was making (see
+        tests/test_autoscroll.py section 3). Reported as "every time i
+        right-click whois someone, the channel window scrolls way up".
+      * Selecting the fragment *replaces the user's selection*. The Copy item
+        is on that menu precisely because they had one, and `popups.show_popup`
+        implements it as `output.copy()` -- which copies whatever is selected
+        when the menu closes. So Copy quietly copied the nick instead of what
+        they had picked.
+
+    An extra selection has neither problem: it draws, and does nothing else.
+    """
     cursor = self.cursorForPosition(pos)
     if not cursor:
-      return None
+      return False
     block = cursor.block()
     # Find the fragment containing the anchor
     it = block.begin()
@@ -277,15 +305,40 @@ class ChatOutput(QTextEdit):
       if frag.isValid():
         fmt = frag.charFormat()
         if fmt.isAnchor() and frag.position() <= cursor.position() < frag.position() + frag.length():
-          # Select this fragment
-          old_cursor = self.textCursor()
-          sel = QTextCursor(self.document())
-          sel.setPosition(frag.position())
-          sel.setPosition(frag.position() + frag.length(), QTextCursor.MoveMode.KeepAnchor)
-          self.setTextCursor(sel)
-          return old_cursor
+          span = QTextCursor(self.document())
+          span.setPosition(frag.position())
+          span.setPosition(frag.position() + frag.length(),
+                           QTextCursor.MoveMode.KeepAnchor)
+          sel = QTextEdit.ExtraSelection()
+          sel.cursor = span
+          hl = QTextCharFormat()
+          pal = self.palette()
+          hl.setBackground(pal.highlight())
+          hl.setForeground(pal.highlightedText())
+          sel.format = hl
+          # Added to whatever is already there rather than replacing it: the
+          # search bar owns this list too (SearchBar._apply_found), and a find
+          # result must not be wiped by a right-click.
+          try:
+            self._saved_extra_selections = list(self.extraSelections())
+            self.setExtraSelections(self._saved_extra_selections + [sel])
+          except RuntimeError:
+            self._saved_extra_selections = None
+            return False
+          return True
       it += 1
-    return None
+    return False
+
+  def _clear_anchor_highlight(self):
+    """Undo _highlight_anchor_at, restoring whatever it displaced."""
+    saved = self._saved_extra_selections
+    if saved is None:
+      return
+    self._saved_extra_selections = None
+    try:
+      self.setExtraSelections(saved)
+    except RuntimeError:
+      pass  # C++ object deleted
 
   def contextMenuEvent(self, event):
     import popups
@@ -296,24 +349,22 @@ class ChatOutput(QTextEdit):
       wtype = getattr(self._parent_window, 'type', '')
       parent_section = {'channel': 'channel', 'server': 'status',
                         'query': 'query'}.get(wtype)
-      old_cursor = self._highlight_anchor_at(event.pos())
+      self._highlight_anchor_at(event.pos())
       popups.show_popup('nicklist', self._parent_window, event.globalPos(),
                         extra_vars={'nick': nick, '1': nick},
                         copy_action=has_selection,
                         parent_section=parent_section)
-      if old_cursor is not None:
-        self.setTextCursor(old_cursor)
+      self._clear_anchor_highlight()
     elif anchor and anchor.startswith('http'):
       wtype = getattr(self._parent_window, 'type', '')
       parent_section = {'channel': 'channel', 'server': 'status',
                         'query': 'query'}.get(wtype)
-      old_cursor = self._highlight_anchor_at(event.pos())
+      self._highlight_anchor_at(event.pos())
       popups.show_popup('link', self._parent_window, event.globalPos(),
                         extra_vars={'link': anchor},
                         copy_action=has_selection,
                         parent_section=parent_section)
-      if old_cursor is not None:
-        self.setTextCursor(old_cursor)
+      self._clear_anchor_highlight()
     else:
       # Try window-type-specific popup
       wtype = getattr(self._parent_window, 'type', '')
