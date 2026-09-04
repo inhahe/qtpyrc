@@ -406,6 +406,35 @@ def _highlight_event_window(conn, channel):
 
 # --- /exec evaluation context ---
 
+def _exec_mode(window, conn, ch, modes, target, as_mask=False):
+  """One `MODE <channel> <modes> <target>` for the /exec convenience helpers.
+
+  *as_mask* uses config.ban_mask, the same expansion the /ban command and
+  plugin.irc.ban use -- so "ban this nick" means the same thing from a slash
+  command, a plugin and an /exec script. Three spellings of one operation is
+  how they end up banning three different masks.
+  """
+  if not conn:
+    return None
+  if as_mask:
+    from config import ban_mask
+    target = ban_mask(target)
+  return conn.sendLine('MODE %s %s %s'
+                       % (ch or _exec_target(window), modes, target))
+
+
+def _exec_kban(window, conn, ch, nick, reason=None):
+  """Ban the nick's mask, then kick it -- in that order, so there is no window
+  in which they can rejoin before the ban lands."""
+  if not conn:
+    return None
+  channel = ch or _exec_target(window)
+  _exec_mode(window, conn, channel, '+b', nick, True)
+  if reason:
+    return conn.sendLine('KICK %s %s :%s' % (channel, nick, reason))
+  return conn.sendLine('KICK %s %s' % (channel, nick))
+
+
 def _build_exec_context(window):
   """Build the globals dict for /exec evaluation."""
   from commands import docommand
@@ -433,6 +462,20 @@ def _build_exec_context(window):
       "KICK %s %s :%s" % (ch or _exec_target(window), nick, reason) if reason
       else "KICK %s %s" % (ch or _exec_target(window), nick)) if conn else None,
     'mode': lambda modestr, ch=None: conn.sendLine("MODE %s %s" % (ch or _exec_target(window), modestr)) if conn else None,
+    # The same mode shortcuts the slash commands and plugin.irc offer, so a
+    # script does not have to build mode strings by hand (and get the ban
+    # expansion wrong). `mode` remains the general form.
+    'op': lambda nick, ch=None: _exec_mode(window, conn, ch, '+o', nick),
+    'deop': lambda nick, ch=None: _exec_mode(window, conn, ch, '-o', nick),
+    'halfop': lambda nick, ch=None: _exec_mode(window, conn, ch, '+h', nick),
+    'dehalfop': lambda nick, ch=None: _exec_mode(window, conn, ch, '-h', nick),
+    'voice': lambda nick, ch=None: _exec_mode(window, conn, ch, '+v', nick),
+    'devoice': lambda nick, ch=None: _exec_mode(window, conn, ch, '-v', nick),
+    'quiet': lambda target, ch=None: _exec_mode(window, conn, ch, '+q', target),
+    'unquiet': lambda target, ch=None: _exec_mode(window, conn, ch, '-q', target),
+    'ban': lambda mask, ch=None: _exec_mode(window, conn, ch, '+b', mask, True),
+    'unban': lambda mask, ch=None: _exec_mode(window, conn, ch, '-b', mask, True),
+    'kban': lambda nick, reason=None, ch=None: _exec_kban(window, conn, ch, nick, reason),
     'echo': lambda text: window.addline(str(text)),
     'error': lambda text: window.redmessage(str(text)),
     'nick': lambda n=None: conn.setNick(n) if n and conn else (conn.nickname if conn else None),

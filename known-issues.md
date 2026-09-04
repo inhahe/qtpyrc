@@ -249,6 +249,62 @@ above; `SelfEchoTracker` has no notice list yet.
 
 ## Fixed, with a residue worth knowing
 
+### `/mode` was documented but never implemented (fixed 2026-09-03)
+
+**Where:** `commands.py`.
+**Reported as:** "Apparently, the /mode command was never added."
+
+It never was, and `docommand` has no raw pass-through — an unrecognised name
+gets `[Unknown command: /%s]`. So `/mode` did not quietly reach the server; it
+did nothing. Meanwhile `docs/reference.md` used it in two shipped examples,
+`Kick+Ban:/mode # +b $$1!*@* | /kick # $$1` under Popup Menus and the same
+pairing under `/on Events`, plus a third in the `plugin.irc` section. Anyone who
+copied those got a popup that silently did half of nothing.
+
+**The second half was worse, and nobody had reported it.** `/kick` took a nick
+only, so the `# $$1` in those examples — with `#` already expanded to the
+channel by `popups.show_popup` — sent `KICK #chan #chan :alice`: the channel as
+the nick to kick, the real nick as the reason. It reported no error. Verified
+against the old code on the wire: `KICK #ops # :bob`.
+
+Fixed by adding `/mode` (target rule, `#` resolution and the refusal cases are
+described in `CLAUDE.md`) and by giving `/kick` an optional leading channel
+argument. That addition cannot change the meaning of any line that worked
+before, because no valid nick can begin with a channel prefix.
+
+**Residue 1 and 2 — both swept 2026-09-04.** `/ban`, `/kban`, `/op`, `/deop`,
+`/halfop`, `/dehalfop`, `/voice`, `/devoice`, `/quiet` and `/unquiet` all took a
+nick only and all read `window.channel.name`, and none of them checked whether
+there *was* a connection — so every one raised `AttributeError` on
+`None.sendLine` while disconnected instead of saying `[Not connected]`, which
+`CLAUDE.md`'s own "Adding a new slash command" recipe has always shown. Nine
+copies of one twelve-line function is how both happened at once. They now share
+`commands._channel_mode_command`, take an optional leading channel, and refuse
+cleanly. `/unban` was added at the same time: `/ban` was the only shortcut with
+no inverse, so the one thing you could not undo without dropping to `/mode` was
+a ban — and undoing one is exactly where the mask expansion has to match.
+
+**Residue 3 (was 1) — `/ban alice@host` banned nobody, and nothing said so.**
+The old rule expanded a bare nick to `nick!*@*` but left anything containing
+`!` or `@` alone, so `alice@host` went out verbatim — and that is not a mask:
+the server reads the whole string as a nick and bans `alice@host!*@*`. It is now
+`alice!*@host`, via `config.ban_mask`, which is the same reading of `x@y`
+(nick@host, never ident@host) that `split_mask` documents and that `/ignore`
+and `/aop` already used. The three surfaces that can ban — the command,
+`plugin.irc.ban` and the `/exec` `ban()` — all call it, so they cannot drift.
+
+**Residue 4 — a missing command was invisible to the test suite by
+construction**, since the failure is an *absence*: no code to review, no test
+to fail, and the documentation the only place the command is mentioned. Now
+covered by `tests/test_documented_commands.py`, which extracts every `/word`
+from `docs/reference.md` and asserts the client would find something to run.
+86 resolve; three do not and are allowlisted *with reasons* (`/name` is a
+placeholder in the `add_command` docs, `/np` is a plugin command, `/regex` is
+the `/regex/` highlight syntax). The allowlist is checked in both directions —
+an entry naming something that does exist, or something the reference no longer
+mentions, fails the test, because a list nobody has to justify is how the next
+real one gets waved through.
+
 ### A mode prefix outlived the membership it belonged to (fixed 2026-09-03)
 
 **Where:** `models.py` (`Channel.removenick`, `Channel.rejoined`),
