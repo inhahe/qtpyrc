@@ -2150,6 +2150,24 @@ class Querywindow(Window):
 
 class NicksList(QListWidget):
   """Sorted nick list for channel windows with no persistent selection."""
+
+  def find_row(self, nick, conn=None):
+    """Return (index, item) for *nick*, or (None, None). Case-insensitive.
+
+    Four separate places used to scan this widget with ``item._nick == nick``,
+    which is the wrong comparison for a nick: IRC nick identity ignores case,
+    so a row created from one spelling is invisible to a lookup holding the
+    other -- and every one of those scans then quietly did nothing.
+    """
+    low = conn.irclower(nick) if conn else nick.lower()
+    for i in range(self.count()):
+      item = self.item(i)
+      if not item:
+        continue
+      other = item._nick
+      if (conn.irclower(other) if conn else other.lower()) == low:
+        return i, item
+    return None, None
   def __init__(self, channelwindow):
     super().__init__(parent=channelwindow)
     self.setObjectName("nicklist")
@@ -2444,12 +2462,10 @@ class Channelwindow(Window):
 
   def _update_nick_typing(self, nick, typing):
     """Update the nick list item's typing indicator."""
-    nl = self.nickslist
-    for i in range(nl.count()):
-      item = nl.item(i)
-      if item and item._nick == nick:
-        item.set_typing(typing)
-        break
+    conn = self.client.conn if getattr(self, 'client', None) else None
+    _i, item = self.nickslist.find_row(nick, conn)
+    if item:
+      item.set_typing(typing)
 
   def _update_nick_count(self):
     """Refresh the 'N users' label above the nicks list."""

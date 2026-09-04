@@ -444,12 +444,21 @@ class HistoryDB:
   # Writing (called from the GUI thread; queues, never blocks)
   # ------------------------------------------------------------------
 
-  def add(self, network, channel, event_type, nick=None, text=None, prefix=''):
+  def add(self, network, channel, event_type, nick=None, text=None, prefix='',
+          ts=None):
     """Queue one history row. Does no filesystem work and cannot block.
 
     The id is allocated here so that current_max_id() is right the moment this
-    returns -- see the class docstring for why that matters."""
-    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    returns -- see the class docstring for why that matters.
+
+    *ts* is `%Y-%m-%d %H:%M:%S` local, and defaults to now. Callers pass it
+    when they know better than the clock: a line replayed from a bouncer
+    happened hours ago, and stamping it with the time it *arrived* dates the
+    whole backlog to the moment of reconnection. The window already shows the
+    server-time (addline's timestamp_override), so without this the stored row
+    and the line the user is looking at disagree.
+    """
+    ts = ts or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     with self._lock:
       self._next_id += 1
       rid = self._next_id

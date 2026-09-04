@@ -349,6 +349,10 @@ class IRCClient:
         self._cap_enabled = set()         # caps that have been ACK'd
         self._cap_ls_buffer = []          # for multi-line CAP LS
         self._batches = {}                # ref -> {type, params}
+        # batch ref -> {history key -> newest ts already recorded}.
+        # Filled lazily by IRCClient._playback_cutoff, one query per
+        # target per replay rather than one per line.
+        self._pb_cutoff = {}
 
     def irclower(self, text):
         return irclower(text, self._casemapping)

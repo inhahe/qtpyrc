@@ -1570,6 +1570,31 @@ than growing memory without limit — and when writing resumes the log says so:
 That is deliberate. A gap in a log with nothing to mark it is how someone
 concludes a conversation never happened.
 
+## Importing history from a bouncer
+
+Versions before 2026-09-04 recorded nothing that arrived in a bouncer playback
+batch, so anything said while the client was closed was shown on reconnect and
+then forgotten. That is fixed, but it leaves a hole in the history and logs of
+anyone who ran an affected version behind a bouncer that buffers.
+
+`tools/import_wicket_history.py` fills it from the bouncer's own archive:
+
+```
+python tools/import_wicket_history.py              # dry run: reports, writes nothing
+python tools/import_wicket_history.py --apply      # do it
+python tools/import_wicket_history.py --days 60 --apply
+```
+
+Close qtpyrc first — it rewrites `history.db`, and the tool refuses while the
+database is locked. It backs up everything it touches (`history.db.pre-import-*`
+and `<log>.pre-import`) and imports only messages, actions and notices that are
+not already present. Lines older than the oldest one qtpyrc still keeps for that
+channel are left alone: `backscroll_limit` removed those on purpose.
+
+It is written for Wicket's schema. Another bouncer's archive would need the
+`messages` query and `parse_line` adjusting, which is most of an hour's work,
+not a rewrite.
+
 ## Duplicate-message detection (render audit)
 
 A chat line can reach the screen by several different routes: as it arrives,

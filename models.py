@@ -143,7 +143,15 @@ class HistoryTopicChange:
 
 class Channel:
   def __init__(self, client, name):
+    # Display spellings, as the server last gave them. Read it, iterate it,
+    # take its len -- but do not test membership against it and do not mutate
+    # it directly: IRC nicks are case-insensitive and case-*preserving*, so
+    # "rockwood" and "Rockwood" are one person spelled two ways, and a `in`
+    # test against this set answers "no" for the second spelling. Go through
+    # has_nick / find_nick / addnick / removenick, which are keyed by
+    # irclower.
     self.nicks = set()
+    self._nick_by_lower = {}   # irclower(nick) -> the spelling in self.nicks
     self.users = {}  # irclower(nick) -> User — per-channel references
     self.history = deque(maxlen=HISTORY_MAX)
     self.topic = None
@@ -166,11 +174,17 @@ class Channel:
       tree.add_channel(client, self)
 
   def addnick(self, nick, user=None):
-    already_present = nick in self.nicks
+    low = self._low(nick)
+    stored = self._nick_by_lower.get(low)
+    already_present = stored is not None
+    if already_present and stored != nick:
+      # Same person, new spelling (a case-only NICK, or a NAMES that differs
+      # from the JOIN that created the row). Keep the server's latest.
+      self.nicks.discard(stored)
     self.nicks.add(nick)
+    self._nick_by_lower[low] = nick
     if user:
-      lnick = nick.lower()
-      self.users[lnick] = user
+      self.users[low] = user
       user.channels.add(self.name)
     if already_present:
       return  # don't add a duplicate row to the listwidget
@@ -182,15 +196,34 @@ class Channel:
     except RuntimeError:
       pass  # widget already deleted (shutdown)
 
+  def _low(self, nick):
+    """*nick* under the server's casemapping, for keying."""
+    conn = self.client.conn if self.client else None
+    return conn.irclower(nick) if conn else nick.lower()
+
+  def find_nick(self, nick):
+    """Return this channel's stored spelling of *nick*, or None.
+
+    The spelling matters: it is what the nick list shows and what every
+    display path prints. The *identity* is case-insensitive, so this is how a
+    caller holding one spelling finds the other.
+    """
+    return self._nick_by_lower.get(self._low(nick))
+
+  def has_nick(self, nick):
+    """Is *nick* in this channel? Case-insensitively, as IRC defines it."""
+    return self._low(nick) in self._nick_by_lower
+
   def _chnlower(self):
     """This channel's name under the server's casemapping (User.prefix key)."""
     conn = self.client.conn if self.client else None
     return conn.irclower(self.name) if conn else self.name.lower()
 
   def removenick(self, nick):
-    self.nicks.discard(nick)
-    lnick = nick.lower()
-    user = self.users.pop(lnick, None)
+    low = self._low(nick)
+    stored = self._nick_by_lower.pop(low, None)
+    self.nicks.discard(stored if stored is not None else nick)
+    user = self.users.pop(low, None)
     if user:
       user.channels.discard(self.name)
       # A mode prefix belongs to a *membership*, so it dies with it. User
@@ -202,14 +235,38 @@ class Channel:
       # this; modeChanged only removes a prefix it is explicitly told to.
       user.prefix.pop(self._chnlower(), None)
     try:
-      nl = self.window.nickslist
-      for i in range(nl.count()):
-        item = nl.item(i)
-        if item and item._nick == nick:
-          nl.takeItem(i)
-          break
+      conn = self.client.conn if self.client else None
+      idx, _item = self.window.nickslist.find_row(nick, conn)
+      if idx is not None:
+        self.window.nickslist.takeItem(idx)
     except RuntimeError:
       pass  # widget already deleted (shutdown)
+
+  def rename_nick(self, old, new):
+    """Re-key a membership from *old* to *new*; returns the old spelling.
+
+    Returns None when this channel does not have *old*, so a caller can skip
+    the channel without a second lookup.
+
+    Deliberately not removenick() + addnick(): a rename does not end the
+    membership, so the things that belong to the membership have to survive
+    it. removenick() drops the mode prefix (see the comment there) and takes
+    the nick-list row away; both must still be there afterwards, wearing the
+    new name.
+    """
+    low_old = self._low(old)
+    stored = self._nick_by_lower.pop(low_old, None)
+    if stored is None:
+      return None
+    low_new = self._low(new)
+    self.nicks.discard(stored)
+    self.nicks.add(new)
+    self._nick_by_lower[low_new] = new
+    u = self.users.pop(low_old, None)
+    if u is not None:
+      self.users[low_new] = u
+      u.nick = new
+    return stored
 
   def updatenicklist(self):
     from window import NickItem
@@ -251,6 +308,7 @@ class Channel:
     for user in self.users.values():
       user.prefix.pop(chnlower, None)
     self.nicks.clear()
+    self._nick_by_lower.clear()
     self.users.clear()
     self.window.nickslist.clear()
     self.update_title()

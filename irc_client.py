@@ -231,11 +231,17 @@ def notice_log_line(nick, message):
   return '-%s- %s' % (nick, message)
 
 
-def _history_save(network, channel, event_type, nick=None, text=None, prefix=''):
-  """Save an event to the history database if available."""
+def _history_save(network, channel, event_type, nick=None, text=None, prefix='',
+                  ts=None):
+  """Save an event to the history database if available.
+
+  *ts* is `%Y-%m-%d %H:%M:%S` local; callers pass IRCClient._server_time_full()
+  so a replayed line is stored under the time it happened rather than the time
+  it arrived. See HistoryDB.add.
+  """
   db = state.historydb
   if db:
-    db.add(network, channel.lower(), event_type, nick, text, prefix)
+    db.add(network, channel.lower(), event_type, nick, text, prefix, ts)
 
 
 def _render_history_row(window, channel, row, show_prefix):
@@ -681,6 +687,103 @@ class IRCClient(asyncirc.IRCClient):
       return self._batches[batch_ref]['type'] in _PLAYBACK_BATCH_TYPES
     return False
 
+  def _record_time(self):
+    """The datetime a line should be *recorded* under, or None for "now".
+
+    The server-time tag when there is one, which is right for a live line and
+    essential for a replayed one: a bouncer backlog happened hours ago, and
+    stamping it with the moment it arrived dates the whole thing to the
+    reconnection. The window already draws it with the server-time, so using
+    anything else here makes the stored row disagree with the line the user is
+    looking at.
+    """
+    time_str = self._current_tags.get('time')
+    if not time_str:
+      return None
+    try:
+      return datetime.fromisoformat(time_str.replace('Z', '+00:00')).astimezone()
+    except Exception:
+      return None
+
+  def _server_time_full(self):
+    """The server-time tag as a full local `%Y-%m-%d %H:%M:%S`, or None.
+
+    Same source as _get_server_time, which returns only HH:MM for display.
+    Comparing against what is already stored needs the date as well, and the
+    history table stores local time in exactly this format.
+    """
+    dt = self._record_time()
+    return dt.strftime('%Y-%m-%d %H:%M:%S') if dt else None
+
+  def _playback_cutoff(self, hist_key):
+    """The newest timestamp already recorded for *hist_key*, or None.
+
+    Cached per batch: one indexed query per target per replay, not per line.
+    """
+    batch_ref = self._current_tags.get('batch') or ''
+    cache = self._pb_cutoff.get(batch_ref)
+    if cache is None:
+      cache = self._pb_cutoff[batch_ref] = {}
+      # A replay is one batch; keeping only the current one bounds this.
+      for old in [k for k in self._pb_cutoff if k != batch_ref]:
+        del self._pb_cutoff[old]
+    if hist_key in cache:
+      return cache[hist_key]
+    cutoff = None
+    db = state.historydb
+    if db is not None:
+      try:
+        row = db.read_conn().execute(
+          "SELECT MAX(ts) FROM history WHERE network = ? AND channel = ?",
+          (self._log_network or '', hist_key)).fetchone()
+        cutoff = row[0] if row else None
+      except Exception:
+        cutoff = None
+    cache[hist_key] = cutoff
+    return cutoff
+
+  def _should_record(self, hist_key):
+    """May the current line be written to the log file and the history table?
+
+    Live lines: always. **Replayed lines: when they are newer than anything
+    already recorded for that target**, which is the question the old rule --
+    "never, during a playback batch" -- was a blunt stand-in for.
+
+    That rule was written for ZNC, which replays a fixed tail of every channel
+    on each reconnect: those lines really had been recorded already, and
+    logging them again appended a duplicate copy of the tail per reconnect.
+    But it is wrong for a bouncer that replays *what you missed*, which is what
+    Wicket does -- there the replay is the only time those lines ever reach the
+    client, so suppressing it loses them for good. On the reporter's machine
+    that was five hours of one day: the client was closed from 08:00, Wicket
+    buffered, and on reattach every line was drawn on screen and written
+    nowhere.
+
+    A client cannot know which kind of bouncer it is talking to, so it does not
+    guess: it compares. The comparison needs the server-time tag; without one
+    there is nothing to compare and the old rule stands, because a duplicated
+    log is the lesser fault of the two.
+    """
+    if not self._in_playback_batch():
+      return True
+    ts_full = self._server_time_full()
+    if ts_full is None:
+      return False
+    cutoff = self._playback_cutoff(hist_key)
+    # Strictly newer: `ts` has one-second granularity, and a replayed line in
+    # the same second as the newest stored one is far more likely to be that
+    # line coming round again than a second line nobody recorded.
+    return cutoff is None or ts_full > cutoff
+
+  def _hist_key_for(self, target):
+    """The history key a chat target is recorded under -- the same mapping
+    commands.send_message makes, and for the same reason: a channel and a nick
+    are stored under different keys, so the cutoff has to be read from the one
+    the writes actually use."""
+    if self.is_channel(target):
+      return target.lower()
+    return _query_history_key(target)
+
   def _playback_window(self, params):
     """Return the window a playback batch targets, or None."""
     target = params[0] if params else None
@@ -770,9 +873,9 @@ class IRCClient(asyncirc.IRCClient):
     somewhere the conversation is not, which is only noticed much later, if at
     all. (See `_log_chat_server` for the third case, where there is no partner.)
     """
-    if self._in_playback_batch():
+    if not self._should_record(self._hist_key_for(target)):
       return
-    state.irclogger.log(self._log_network, target, line)
+    state.irclogger.log(self._log_network, target, line, self._record_time())
 
   def _log_chat_server(self, line):
     """`_log_chat` for a line whose partner is the server itself.
@@ -1131,7 +1234,7 @@ class IRCClient(asyncirc.IRCClient):
     """Check if nick is in one of our channels or has an open query."""
     lnick = self.irclower(nick)
     for chan in self.client.channels.values():
-      if lnick in {self.irclower(n) for n in chan.nicks}:
+      if chan.has_nick(nick):
         return True
     for q in self.client.queries.values():
       if q.nick and self.irclower(q.nick) == lnick:
@@ -1623,9 +1726,10 @@ class IRCClient(asyncirc.IRCClient):
                               timestamp_override=ts)
       self._hook_activity(target_win, Window.ACTIVITY_MESSAGE)
       self._log_chat(channel, notice_log_line(nick, message))
-      if not self._in_playback_batch():
+      if self._should_record(channel.lower()):
         _history_save(self._log_network, channel, 'notice', nick, message,
-                      prefix=self._nick_prefix(nick, channel))
+                      prefix=self._nick_prefix(nick, channel),
+                      ts=self._server_time_full())
         _save_urls(self._log_network, channel, nick, notice_host, message)
     else:
       # Show in active window if it belongs to this network, else server window
@@ -1675,8 +1779,9 @@ class IRCClient(asyncirc.IRCClient):
       chan.window.addline_nick(["* ", (self._pnick(nick, channel),), " %s" % data], state.actionformat,
                               timestamp_override=ts)
       self._log_chat(channel, "* %s %s" % (nick, data))
-      if not playback:
+      if self._should_record(channel.lower()):
         _history_save(self._log_network, channel, 'action', nick, data,
+                      ts=self._server_time_full(),
                       prefix=pfx)
         _save_urls(self._log_network, channel,
                    nick, '%s@%s' % (ident, host), data)
@@ -1695,8 +1800,9 @@ class IRCClient(asyncirc.IRCClient):
                                                     timestamp_override=ts)
       self._log_chat(nick, "* %s %s" % (nick, data))
       self._hook_activity(q.window, Window.ACTIVITY_HIGHLIGHT)
-      if not playback:
-        _history_save(self._log_network, _query_history_key(nick, ident), 'action', nick, data)
+      if self._should_record(_query_history_key(nick, ident)):
+        _history_save(self._log_network, _query_history_key(nick, ident),
+                      'action', nick, data, ts=self._server_time_full())
         _save_urls(self._log_network, _query_history_key(nick, ident),
                    nick, '%s@%s' % (ident, host), data)
 
@@ -1846,10 +1952,12 @@ class IRCClient(asyncirc.IRCClient):
     if hasattr(qwin, '_typing_timer') and qwin._typing_timer is not None:
       qwin.set_nick_typing(nick, False)
     self._log_chat(nick, "<%s> %s" % (nick, message))
-    if not self._in_playback_batch():
-      _history_save(self._log_network, _query_history_key(nick, ident), 'message', nick, message)
+    if self._should_record(_query_history_key(nick, ident)):
+      _history_save(self._log_network, _query_history_key(nick, ident),
+                    'message', nick, message, ts=self._server_time_full())
       _save_urls(self._log_network, _query_history_key(nick, ident),
                  nick, '%s@%s' % (ident, host), message)
+    if not self._in_playback_batch():
       # Notify for all private messages unless the app is focused and the
       # query is the active window (same behavior as channel highlights).
       app_focused = state.app and state.app.mainwin.isActiveWindow()
@@ -1880,9 +1988,9 @@ class IRCClient(asyncirc.IRCClient):
       chan.history.append(HistoryMessage(uobj, nick, message, 'message', prefix=pfx))
       chan.window.addline_msg(self._pnick(nick, channel), message, timestamp_override=ts)
       self._log_chat(channel, "<%s> %s" % (nick, message))
-      if not self._in_playback_batch():
+      if self._should_record(channel.lower()):
         _history_save(self._log_network, channel, 'message', nick, message,
-                      prefix=pfx)
+                      prefix=pfx, ts=self._server_time_full())
         _save_urls(self._log_network, channel,
                    nick, '%s@%s' % (ident, host), message)
       # Activity: highlight if our nick or custom patterns match
@@ -1943,7 +2051,7 @@ class IRCClient(asyncirc.IRCClient):
     playback = self._in_playback_batch()
     lnick = self.irclower(nick)
     for chnlower, chan in self.client.channels.items():
-      if nick in chan.nicks:
+      if chan.has_nick(nick):
         if nick in chan.window._typing_nicks:
           chan.window._clear_nick_typing(nick)
           chan.window._update_typing_bar()
@@ -1979,30 +2087,31 @@ class IRCClient(asyncirc.IRCClient):
       self.client.users[lnewname] = user
     # Update per-channel nicks and nick list items
     for chnlower, chan in self.client.channels.items():
-      if oldname not in chan.nicks:
+      # Case-insensitively: this is where "rockwood -> Rockwood" was lost.
+      # The membership test used to be `oldname not in chan.nicks`, a
+      # case-*sensitive* test against a set holding whatever spelling the
+      # server last used -- so a rename that only changed case, or one whose
+      # prefix spelling differed from the NAMES that filled the list (a
+      # bouncer replaying an old NICK after sending a current NAMES), skipped
+      # this whole body: no "is now known as" line, no nick list update, no
+      # history row. The next message from that person simply appeared under
+      # the new spelling, with nothing to say why.
+      new_already = chan.has_nick(newname)
+      stored_old = chan.rename_nick(oldname, newname)
+      if stored_old is None:
         continue
-      new_already = newname in chan.nicks
-      chan.nicks.discard(oldname)
-      chan.nicks.add(newname)
-      # Re-key in channel users dict
-      u = chan.users.pop(loldname, None)
-      if u and lnewname not in chan.users:
-        chan.users[lnewname] = u
+      # (the channel users dict is re-keyed by rename_nick)
       # Update nick list widget. Dedup-safe: if a row for newname already
       # exists (e.g. a bouncer reconnect left a stale oldname row beside a
       # freshly-joined newname row), drop the old row instead of creating a
       # duplicate.
       nl = chan.window.nickslist
-      old_idx = None
-      new_exists = False
-      for i in range(nl.count()):
-        item = nl.item(i)
-        if not item:
-          continue
-        if item._nick == oldname and old_idx is None:
-          old_idx = i
-        elif item._nick == newname:
-          new_exists = True
+      old_idx, _old_item = nl.find_row(oldname, self)
+      new_idx, _new_item = nl.find_row(newname, self)
+      # A row for the new name can exist beside the old one after a bouncer
+      # reconnect; find_row returns the first match, so only treat it as a
+      # separate row when it is not the one we are about to rename.
+      new_exists = new_idx is not None and new_idx != old_idx
       if old_idx is not None:
         if new_exists:
           nl.takeItem(old_idx)

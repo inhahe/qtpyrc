@@ -35,6 +35,7 @@ Entrypoint: `qtpyrc.py`
 | `hang_watchdog.py` | GUI-thread stall detector; Python stacks, and (gated — it freezes the process) py-spy native stacks |
 | `render_audit.py` | Duplicate-render detector; wraps Window's `addline_*` and reports a line drawn twice, with both stacks |
 | `settings/` | Settings dialog pages. Pattern: `load_from_data(dict)` / `save_to_data(dict)` |
+| `settings/page_registry.py` | The settings tree's shape and the `settings.*` UI path names. Imports nothing heavy, so naming the pages does not import them |
 | `docs/reference.md` | Command reference and scripting API docs. Update when adding/changing commands |
 | `config.defaults.yaml` | Documents every config option. Update when adding new options |
 
@@ -305,6 +306,43 @@ multi-family chat font above, and `_prewarm_imports` (the HTTP/email stack warme
 for link previews), which now starts from a 0ms timer instead of competing for
 the GIL and the disk with the GUI thread that is building the first window.
 
+**The rule is about imports too, and that is where it keeps being broken.** An
+`import` at module level in anything on the startup path is startup cost, and it
+is invisible: nothing in the diff says "this adds four seconds". Two regressions,
+both found by `python -X importtime` against the real profile:
+
+- **`plugins/nowplaying.py` imported `urllib.request`** when it gained its
+  beefweb source. It is in `plugins.auto_load`, so every launch dragged in
+  http.client, email.\* and ssl — **4.8s** — to have a hotkey ready that most
+  launches never press. That is the very stack `_prewarm_imports` exists to keep
+  off the startup path, so the plugin quietly undid the fix. Both call sites
+  already run on a worker thread, so the import now happens there, on first use.
+- **`_register_settings_paths` imported `settings.settings_dialog`** to
+  enumerate the `settings.*` UI path names, and that module imports all
+  seventeen page classes: **2.4s** to build a list of strings nothing had asked
+  for. The two tables and the generator now live in `settings.page_registry`,
+  which imports nothing heavy; `settings_dialog` re-exports them so callers see
+  no change.
+
+**`show()` does not draw anything.** It makes the window visible; until
+something processes the paint event the user has a blank rectangle. `makeapp()`
+returns several seconds before the event loop is entered — font validation,
+clients, tray, plugins all run in between — so it ends with one
+`processEvents(ExcludeUserInputEvents)` to paint the window it just showed.
+That is the "it shows up, then it's blank for a while before any widgets load"
+half of the report. User input is excluded deliberately: a click that arrived
+during startup must wait for the real event loop rather than be delivered to an
+application whose clients and plugins do not exist yet.
+
+**Do not test this with a stopwatch.** Measured on the reporter's machine, the
+same build varied between 11.2s and 23.3s depending on what else was running —
+a time assertion there cannot fail on a fast machine and cannot pass on a busy
+one. `tests/test_startup_imports.py` asserts on **`sys.modules` at the instant
+before the event loop is entered** instead, which is the same answer every run.
+It captures by wrapping `qasync.QEventLoop.run_forever`, because that is
+literally the line the rule is about — hooking a paint or a 0ms timer would race
+the prewarm, which is *allowed* to import these.
+
 ### Startup scripts: a file runs once, however many ways name it
 
 There are four ways to ask for a command script at startup — `--startup`,
@@ -480,6 +518,29 @@ of one conversation sitting in two files.
 
 Log line shapes, all distinguishable on sight: `<nick> text` (message),
 `* nick text` (action), `-nick- text` (notice).
+
+**A replay is recorded when it is new, not never.** The gate used to be "skip
+everything inside a playback batch", which is right for **ZNC** -- it replays a
+fixed tail of every channel on each reconnect, so those lines had already been
+recorded and logging them again duplicated the tail. It is wrong for a bouncer
+that replays *what you missed*, which is what Wicket does: there the replay is
+the only time those lines ever reach the client, so skipping it loses them for
+good. On the reporter's database that was five hours of one day -- the client
+was closed, Wicket buffered, and on reattach every line was drawn on screen and
+written nowhere.
+
+A client cannot know which kind of bouncer it is talking to, so it compares
+instead of guessing. `_should_record(hist_key)` returns True for a live line,
+and for a replayed one only when its **server-time is newer than the newest
+timestamp already stored for that target** (`_playback_cutoff`, one indexed
+query per target per batch, cached on the batch reference). Without a
+server-time tag there is nothing to compare and the old rule stands, because a
+duplicated log is the lesser of the two failures.
+
+**Only the recording moved.** Notifications, link previews and the activity
+marks are still gated on `_in_playback_batch()` outright -- a five-hour backlog
+must not fire five hours of desktop alerts. In `privmsg` the two had shared one
+`if` block, so the fix had to split it rather than widen it.
 
 Left deliberately outside `_log_chat`: `connectionMade` / `connectionLost` call
 `irclogger.log_server` directly. Those are not chat, cannot arrive inside a
@@ -693,6 +754,41 @@ nothing, and that is *currently* harmless only by accident — see the
 `known-issues.md`. Anything that changes how an echoed PM is routed has to add
 the `record()`/`claim()` pair in the same change, or it turns a missing message
 into a doubled one.
+
+### A nick is case-insensitive, so every lookup of one must be
+
+`irclower()` decides nick identity; the spelling is presentation only, and the
+server may spell the same person two ways in one session. **Nothing may test
+nick membership with `==` or `in`.**
+
+`Channel` owns the identity: `_nick_by_lower` maps `irclower(nick)` to the
+spelling stored in `nicks`, and `has_nick` / `find_nick` / `rename_nick` /
+`addnick` / `removenick` are the only ways in. `NicksList.find_row(nick, conn)`
+does the same job for the list widget, which four separate places used to scan
+with `item._nick == nick`.
+
+**What it cost:** `userRenamed` skipped any channel where
+`oldname not in chan.nicks`, so a rename the set could not match by exact
+string vanished — no "is now known as" line, no list update, no history row,
+no error, and the next message from that person simply appeared under a new
+name. Reported as "it changed from rockwood to Rockwood without ever showing a
+nick change". `userQuit` had the identical test, and there the row stayed in
+the nick list for good.
+
+**The mismatch is normal on a bouncer**, which is why it surfaced there: the
+bouncer sends a *current* NAMES on attach and then replays the backlog, so the
+list holds the new spelling while a replayed NICK carries the old one. Nothing
+is wrong with either; only the comparison was.
+
+**`rename_nick` is not `removenick` + `addnick`.** A rename does not end the
+membership, so the mode prefix and the nick-list row have to survive it, and
+`removenick` deliberately drops both. Composing it out of those two silently
+deopped everyone who changed nick.
+
+Covered by `tests/test_nick_case.py`, which sets up the *mismatch* — the set
+holding one spelling, the event carrying the other — because a rename where
+both agree works fine under the old code, and a first version that tested only
+that passed against the bug.
 
 ### Mode prefixes
 
