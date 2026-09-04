@@ -240,6 +240,28 @@ def expand_mask(mask):
   return '%s!%s@%s' % (nick, ident, host)
 
 
+def ban_mask(mask):
+  """Return *mask* as something usable in a +b/-b, expanding what was omitted.
+
+  `expand_mask` deliberately leaves a **nick-only** mask alone, because for a
+  match list "alice" means "whoever holds that nick" and filling it out would
+  change what the entry asserts. A ban is the opposite: the server has no
+  reading of a bare "alice" as a mask, so `/ban alice` has to mean
+  `alice!*@*` or it means nothing.
+
+  Everything else follows expand_mask, which is what fixes `/ban alice@host`.
+  That used to be sent verbatim -- it has an '@', so the old rule left it --
+  and `alice@host` is not a mask: the server reads the whole string as a nick
+  and bans `alice@host!*@*`, i.e. nobody. It is now `alice!*@host`, which is
+  the same reading of `x@y` (nick@host, never ident@host) that split_mask
+  documents above and that /ignore and /aop already use.
+  """
+  expanded = expand_mask(mask)
+  if '!' not in expanded and '@' not in expanded:
+    return expanded + '!*@*'
+  return expanded
+
+
 def _match_any(user, masks):
   """Return True if *user* matches any entry in *masks*.
 

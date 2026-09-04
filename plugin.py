@@ -181,8 +181,112 @@ class _Irc:
             conn.sendLine("KICK %s %s" % (channel, nick))
 
     @staticmethod
-    def mode(conn, channel, modestring):
-        conn.sendLine("MODE %s %s" % (channel, modestring))
+    def mode(conn, target, modestring='', *params):
+        """Send a MODE. *target* is a channel or a nick.
+
+        ``mode(conn, '#chan')``                  -> MODE #chan   (a query)
+        ``mode(conn, '#chan', '+o', 'alice')``   -> MODE #chan +o alice
+        ``mode(conn, '#chan', '+o alice')``      -> the same, older spelling
+        ``mode(conn, 'mynick', '+x')``           -> a user mode
+
+        Parameters may be passed separately or packed into *modestring*; the
+        second form is what this took before *params existed and still works.
+        Mode letters are not validated -- which ones exist is per-network, so
+        checking them here would reject exactly the ones a plugin needs this
+        for. Same rule as the /mode command.
+        """
+        parts = [p for p in ((modestring,) + params) if p]
+        conn.sendLine(' '.join(['MODE', target] + parts) if parts
+                      else 'MODE %s' % target)
+
+    # --- channel mode shortcuts -------------------------------------------
+    # The same set the slash commands offer, so a plugin does not have to
+    # build mode strings by hand or know that a ban takes a mask where an op
+    # takes a nick. Each is `(conn, channel, target)` in the order the rest of
+    # this API uses; they are thin on purpose -- mode() is there for anything
+    # they do not cover.
+
+    @staticmethod
+    def _target_mode(conn, channel, modes, target):
+        conn.sendLine('MODE %s %s %s' % (channel, modes, target))
+
+    @classmethod
+    def op(cls, conn, channel, nick):
+        """Give operator status (+o)."""
+        cls._target_mode(conn, channel, '+o', nick)
+
+    @classmethod
+    def deop(cls, conn, channel, nick):
+        """Take operator status (-o)."""
+        cls._target_mode(conn, channel, '-o', nick)
+
+    @classmethod
+    def halfop(cls, conn, channel, nick):
+        """Give halfop status (+h)."""
+        cls._target_mode(conn, channel, '+h', nick)
+
+    @classmethod
+    def dehalfop(cls, conn, channel, nick):
+        """Take halfop status (-h)."""
+        cls._target_mode(conn, channel, '-h', nick)
+
+    @classmethod
+    def voice(cls, conn, channel, nick):
+        """Give voice (+v)."""
+        cls._target_mode(conn, channel, '+v', nick)
+
+    @classmethod
+    def devoice(cls, conn, channel, nick):
+        """Take voice (-v)."""
+        cls._target_mode(conn, channel, '-v', nick)
+
+    @classmethod
+    def quiet(cls, conn, channel, target):
+        """Set +q on *target*, passed through as given.
+
+        Not expanded to a mask, unlike ban(): +q is a ban-style mask mode on
+        Libera and the *owner* prefix mode on UnrealIRCd and InspIRCd, where it
+        takes a nick. Expanding would be right on one and wrong on the other.
+        """
+        cls._target_mode(conn, channel, '+q', target)
+
+    @classmethod
+    def unquiet(cls, conn, channel, target):
+        """Unset +q on *target*. See quiet()."""
+        cls._target_mode(conn, channel, '-q', target)
+
+    @classmethod
+    def ban(cls, conn, channel, mask):
+        """Ban *mask* (+b), filling in whatever was left out.
+
+        Uses the same rule as the /ban command (config.ban_mask), so a plugin
+        and the user cannot end up banning different things from the same
+        text: 'alice' becomes 'alice!*@*', and 'alice@host' becomes
+        'alice!*@host' -- the leftmost component of a mask is the nick, never
+        the ident.
+        """
+        from config import ban_mask
+        cls._target_mode(conn, channel, '+b', ban_mask(mask))
+
+    @classmethod
+    def unban(cls, conn, channel, mask):
+        """Remove a ban (-b), expanding *mask* exactly as ban() does.
+
+        The expansion is the part that has to match: a ban set from 'alice' is
+        on 'alice!*@*', so unbanning needs the same reading to find it.
+        """
+        from config import ban_mask
+        cls._target_mode(conn, channel, '-b', ban_mask(mask))
+
+    @classmethod
+    def kban(cls, conn, channel, nick, reason=None):
+        """Ban the nick's mask and then kick it, in that order.
+
+        The order matters: kicking first leaves a window in which the user can
+        rejoin before the ban lands.
+        """
+        cls.ban(conn, channel, nick)
+        cls.kick(conn, channel, nick, reason)
 
     @staticmethod
     def nick(conn):

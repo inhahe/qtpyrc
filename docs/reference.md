@@ -147,19 +147,70 @@ server log for a notice from the server itself, which has no user behind it.
 
 | Command | Syntax | Description |
 |---------|--------|-------------|
-| `/kick` | `/kick <nick> [reason]` | Kick a user from the current channel |
-| `/ban` | `/ban <nick\|mask>` | Ban a user (nicks are expanded to `nick!*@*`) |
-| `/kban` | `/kban <nick> [reason]` | Ban and kick a user in one command |
+| `/mode` | `/mode [target] [modes [params]]` | Set or query modes. See below. |
+| `/kick` | `/kick [#channel] <nick> [reason]` | Kick a user (channel defaults to the current one) |
+| `/ban` | `/ban [#channel] <nick\|mask>` | Ban (+b). See the mask rule below. |
+| `/unban` | `/unban [#channel] <nick\|mask>` | Remove a ban (-b), expanding the mask the same way |
+| `/kban` | `/kban [#channel] <nick> [reason]` | Ban then kick, in that order |
 | `/chaninfo` | `/chaninfo` | Show channel details dialog (modes, bans, topic) |
 | `/list` | `/list [params]` | Open the channel list browser. See ELIST params below. |
-| `/op` | `/op <nick>` | Give operator status (+o) |
-| `/deop` | `/deop <nick>` | Remove operator status (-o) |
-| `/halfop` | `/halfop <nick>` | Give halfop status (+h) |
-| `/dehalfop` | `/dehalfop <nick>` | Remove halfop status (-h) |
-| `/voice` | `/voice <nick>` | Give voice (+v) |
-| `/devoice` | `/devoice <nick>` | Remove voice (-v) |
-| `/quiet` | `/quiet <nick>` | Quiet a user (+q) |
-| `/unquiet` | `/unquiet <nick>` | Remove quiet (-q) |
+| `/op` | `/op [#channel] <nick>` | Give operator status (+o) |
+| `/deop` | `/deop [#channel] <nick>` | Remove operator status (-o) |
+| `/halfop` | `/halfop [#channel] <nick>` | Give halfop status (+h) |
+| `/dehalfop` | `/dehalfop [#channel] <nick>` | Remove halfop status (-h) |
+| `/voice` | `/voice [#channel] <nick>` | Give voice (+v) |
+| `/devoice` | `/devoice [#channel] <nick>` | Remove voice (-v) |
+| `/quiet` | `/quiet [#channel] <nick\|mask>` | Set +q (passed through as typed — see below) |
+| `/unquiet` | `/unquiet [#channel] <nick\|mask>` | Unset +q |
+
+**All of these take an optional leading channel**, so they work from any window
+and `#` means the current one — `/op #other alice`, `/ban # alice`. Without one
+they act on the window's channel, which is how they have always behaved.
+
+**`/ban` and `/unban` fill in what you leave out**, and both use the same rule,
+so an unban can always find the ban it matches:
+
+| You type | The mask used |
+|---|---|
+| `alice` | `alice!*@*` |
+| `alice@host` | `alice!*@host` — the leftmost part is the **nick**, not the ident |
+| `*@host` | `*!*@host` |
+| `alice!~a@h` | unchanged |
+
+`/quiet` is **not** expanded, deliberately: `+q` is a ban-style mask mode on
+Libera and the *owner* prefix mode on UnrealIRCd and InspIRCd, where it takes a
+nick. Expanding would be right on one and wrong on the other, so what you type
+is what is sent.
+
+#### /mode
+
+The general form the commands above are shortcuts for: `/op alice` is
+`/mode +o alice`, `/ban alice` is `/mode +b alice!*@*`. Use it for anything the
+shortcuts do not cover — `+m`, `+i`, `+k`, `+l`, a network-specific mode like
+Undernet's `+x` — or to set several at once, which is also the only way to set
+them in a single atomic change.
+
+| You type | Sent |
+|---|---|
+| `/mode` | `MODE #channel` — query the current channel's modes |
+| `/mode +imnt` | `MODE #channel +imnt` |
+| `/mode +o alice` | `MODE #channel +o alice` |
+| `/mode +ovl alice bob 50` | `MODE #channel +ovl alice bob 50` |
+| `/mode #other +o alice` | `MODE #other +o alice` |
+| `/mode # +b alice!*@*` | `MODE #channel +b alice!*@*` — `#` is the current channel |
+| `/mode yournick +x` | `MODE yournick +x` — a user mode |
+| `/mode #channel` | `MODE #channel` — query |
+
+**The first word is the target unless it starts with `+` or `-`.** That is what
+tells `/mode +o alice` (apply to this channel; alice is a parameter) apart from
+`/mode alice +o` (alice is the target). If it starts with `+` or `-` there is no
+target in the line, so the current channel is used — and outside a channel
+window that is an error rather than a guess, because `MODE +imnt` would be read
+by the server as a *user* mode on a nick called `+imnt`.
+
+Mode letters are not checked. Which ones exist is decided by the network
+(ISUPPORT `CHANMODES` and `PREFIX`), so validating them here would reject
+exactly the modes this command exists to reach.
 
 #### /list ELIST Parameters
 
@@ -538,6 +589,12 @@ When you run `/exec <code>`, the following names are available:
 | `part` | `part(ch=None, reason=None)` | Leave a channel |
 | `kick` | `kick(nick, reason=None, ch=None)` | Kick a user |
 | `mode` | `mode(modestr, ch=None)` | Send MODE command |
+| `op` / `deop` | `op(nick, ch=None)` | Give / take operator status |
+| `halfop` / `dehalfop` | `halfop(nick, ch=None)` | Give / take halfop |
+| `voice` / `devoice` | `voice(nick, ch=None)` | Give / take voice |
+| `quiet` / `unquiet` | `quiet(target, ch=None)` | Set / unset +q, passed through as given |
+| `ban` / `unban` | `ban(mask, ch=None)` | Set / remove +b, expanding the mask as `/ban` does |
+| `kban` | `kban(nick, reason=None, ch=None)` | Ban then kick |
 | `echo` | `echo(text)` | Print text to the current window |
 | `error` | `error(text)` | Print red error text to the current window |
 | `nick` | `nick(n=None)` | Get current nick, or set nick if `n` given |
@@ -794,7 +851,19 @@ All methods below take `conn` (an IRCClient connection) as their first argument.
 | `join` | `join(conn, channel, key=None)` | Join a channel |
 | `part` | `part(conn, channel, reason=None)` | Leave a channel |
 | `kick` | `kick(conn, channel, nick, reason=None)` | Kick a user |
-| `mode` | `mode(conn, channel, modestring)` | Send a MODE command |
+| `mode` | `mode(conn, target, modestring='', *params)` | Send a MODE. *target* may be a channel or a nick; with no modes it is a query. |
+| `op` / `deop` | `op(conn, channel, nick)` | Give / take operator status (+o / -o) |
+| `halfop` / `dehalfop` | `halfop(conn, channel, nick)` | Give / take halfop (+h / -h) |
+| `voice` / `devoice` | `voice(conn, channel, nick)` | Give / take voice (+v / -v) |
+| `quiet` / `unquiet` | `quiet(conn, channel, target)` | Set / unset +q, passed through as given |
+| `ban` / `unban` | `ban(conn, channel, mask)` | Set / remove +b, expanding the mask as `/ban` does |
+| `kban` | `kban(conn, channel, nick, reason=None)` | Ban then kick |
+
+The mode shortcuts send exactly what the matching slash command sends — same
+mask expansion, same order for `kban` — so a plugin and a user cannot end up
+banning different things from the same text. `mode()` remains the general form
+for anything they do not cover, and does not validate mode letters, because
+which ones exist is decided by the network.
 | `nick` | `nick(conn)` | Get conn's current nickname |
 | `network_key` | `network_key(conn)` | Get the config network key for conn |
 

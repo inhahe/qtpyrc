@@ -153,6 +153,122 @@ def mycommand(window, text):
 ```
 Dispatched automatically by name. Alias: `othername = mycommand`
 
+### `/mode`, and the rule for a command that takes an optional channel
+
+`/mode` did not exist until 2026-09-03, and `docommand` has no raw pass-through
+— an unrecognised name gets `[Unknown command: /%s]` — so it was not "silently
+sent to the server", it did nothing at all. `docs/reference.md` had been using
+it in examples the whole time (the `Kick+Ban` popup and the kick-ban `/on`
+example, both `/mode # +b … | /kick # …`), so the documentation taught a command
+that could not work.
+
+**The target rule: the first word is the target unless it starts with `+` or
+`-`.** That is the whole of it, and it is what separates `/mode +o alice`
+(apply to this channel, alice is a *parameter*) from `/mode alice +o` (alice is
+the *target*, so this is a user mode). Every other client uses the same rule and
+it is unambiguous, because no mode string can begin with anything else. Get it
+backwards and nothing errors — the server simply does something other than what
+was asked.
+
+Modes are **passed through unparsed**, deliberately. Which letters exist is
+per-network (ISUPPORT `CHANMODES` / `PREFIX`), so a client that validated them
+would reject exactly the modes the command exists to reach — Undernet's `+x`,
+say. The one thing it will not do is guess a target: `/mode +imnt` outside a
+channel window is an error, because sending `MODE +imnt` has the server read
+`+imnt` as a *nick* and apply a user mode to it.
+
+**`#` means the current channel, and the command has to resolve it itself**
+(`commands._resolve_hash`). `docs/reference.md` documents `#` as usable in
+commands and `popups.show_popup` substitutes it before running one — but the
+`/on` hook path does not, and neither does a line typed by hand, so a command
+that relied on the caller would work from a popup and fail from an `/on`. Both
+appear in the shipped examples.
+
+**A command that names a channel accepts one; it does not merely tolerate the
+window's.** `/kick` took a nick only, so the documented `/kick # $$1` sent
+`KICK #chan #chan :alice` — the expanded channel became the nick and the real
+nick became the reason — and reported nothing wrong. It now takes an optional
+leading channel. This is safe to add to any such command because **no valid
+nick can begin with a channel prefix**, so no line that worked before can change
+meaning. `/ban`, `/kban`, `/op` and the rest were swept onto the same footing
+on 2026-09-04 — see the next section — so all of them now take one, and all of
+them report `[Not connected]` instead of raising.
+
+Covered by `tests/test_mode_command.py`, which asserts on **the wire** (the test
+server's `RECEIVED` control command) rather than on client state: a command that
+builds the wrong MODE and one that builds none are indistinguishable from
+inside the client. Two things it does that are worth copying:
+
+- **It waits for arrival rather than sleeping.** `sendLine` is flood-controlled,
+  so eleven commands issued at once are released over several seconds; a fixed
+  delay reports a slow queue as a wrong MODE line.
+- **It proves a negative with a sentinel.** For the forms that must *refuse*, it
+  issues them and then one that must send, and waits for that one. Anything the
+  refused forms wrongly sent is queued ahead of it, so "the sentinel arrived and
+  nothing else did" is a deterministic way to check that nothing was sent —
+  where waiting a fixed time for an absence is not.
+
+**A documented command that does not exist is invisible to every other kind of
+test**, because the failure is an absence: no code to review, no call site to
+break. `tests/test_documented_commands.py` extracts every `/word` from
+`docs/reference.md` and asserts the client would find something to run — which
+is how this would have been caught the day the example was written. Its
+allowlist of `/word`-shaped non-commands (`/name`, `/np`, `/regex`) carries a
+reason per entry and is checked in *both* directions: an entry naming something
+that does exist, or something the reference no longer mentions, fails the test.
+An allowlist nobody has to justify is how the next real one gets waved through.
+
+### One operation, three surfaces: command, `plugin.irc`, `/exec` script
+
+Opping somebody can be spelled three ways — `/op alice`,
+`irc.op(conn, chan, 'alice')`, and `op('alice')` inside an `/exec` script — and
+**all three must put the same bytes on the wire**. They are not three features;
+they are three doors onto one.
+
+Until 2026-09-04 only the first existed for most of the set. `plugin.irc` had
+`kick` and a bare `mode`, and the `/exec` context the same, so anything else
+meant building the mode string by hand — to *your own* rule. A ban is where
+that bites: `/ban alice` bans `alice!*@*`, so a plugin sending `+b alice` bans
+nothing and a plugin unbanning `alice` cannot remove what the command set.
+
+The expansion therefore lives in **one** function, `config.ban_mask`, which all
+three call:
+
+| typed | banned |
+|---|---|
+| `alice` | `alice!*@*` |
+| `alice@host` | `alice!*@host` |
+| `*@host` | `*!*@host` |
+
+`ban_mask` is `expand_mask` plus the one thing a ban needs that a match list
+does not: `expand_mask` deliberately leaves a bare nick alone (for `/ignore`,
+"alice" means whoever holds that nick), but a server has no reading of a bare
+nick as a *mask*, so `/ban alice` has to mean `alice!*@*` or it means nothing.
+`alice@host` is the case that was silently broken: it has an `@`, so the old
+rule left it, and `alice@host` is not a mask — the server reads the whole
+string as a nick and bans nobody.
+
+**`/quiet` is passed through unexpanded, and that is deliberate.** `+q` is a
+ban-style mask mode on Libera and the *owner* prefix mode on UnrealIRCd and
+InspIRCd, where it takes a nick. Expanding would be right on one and wrong on
+the other, so it does neither — the same rule `/mode` follows about not
+interpreting modes whose meaning is the network's to decide.
+
+**The nine shortcuts share one body** (`commands._channel_mode_command`). They
+were nine near-identical copies, and they agreed on everything except the two
+things that mattered: not one checked whether there was a connection, so every
+one raised `AttributeError` on `None.sendLine` while disconnected instead of
+saying `[Not connected]`, and not one accepted the channel argument the
+documentation hands them. Nine copies is how that happens.
+
+Covered by `tests/test_mode_api.py`, which runs the command and the API method
+over the same inputs and **compares the wire**, rather than checking each
+separately — "both produce a MODE line" is not the property that matters, "both
+produce the same one" is. It needs no Qt loop and no server (stub window, stub
+conn), so it is cheap enough to run every time. Verified against a reverted
+`/op`: it reports the channel swallowed into the target
+(`MODE #ops +o #other alice`) and the `AttributeError` when disconnected.
+
 ### Chat font (`window.py`)
 
 One shared `QFont` for every chat view, cached in `_chat_font_cache` and reached

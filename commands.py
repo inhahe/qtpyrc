@@ -910,48 +910,72 @@ class Commands:
                         % (scope_label(nk, None), nick))
 
   def kick(window, text):
-    if window.type != "channel":
-      window.redmessage("[Error: /kick only works in a channel window]")
+    """/kick [#channel] <nick> [reason]
+
+    The channel is optional and defaults to the window's, which is how this
+    has always worked -- but it is *accepted*, because `docs/reference.md`
+    documents the mIRC spelling in two places (the `Kick+Ban` popup and the
+    kick-ban /on example, both `... | /kick # $$1`). Without it "#chan" was
+    read as the nick to kick and the real nick became the reason: the command
+    sent `KICK #chan #chan :alice` and reported nothing wrong.
+    """
+    conn = window.client.conn if window.client else None
+    if not conn:
+      window.redmessage('[Not connected]')
       return
-    parts = text.split(None, 1)
+    channel, rest = _split_channel_arg(window, conn, text, 'kick')
+    if channel is None:
+      return
+    parts = rest.split(None, 1)
     if not parts:
       window.redmessage("[Error: /kick requires a nick]")
       return
     target = parts[0]
     reason = _unquote(parts[1]) if len(parts) > 1 else None
     if reason:
-      window.client.conn.sendLine("KICK %s %s :%s" % (window.channel.name, target, reason))
+      conn.sendLine("KICK %s %s :%s" % (channel, target, reason))
     else:
-      window.client.conn.sendLine("KICK %s %s" % (window.channel.name, target))
+      conn.sendLine("KICK %s %s" % (channel, target))
 
   def ban(window, text):
-    if window.type != "channel":
-      window.redmessage("[Error: /ban only works in a channel window]")
-      return
-    mask = text.strip()
-    if not mask:
-      window.redmessage("[Error: /ban requires a nick or mask]")
-      return
-    if '!' not in mask and '@' not in mask:
-      mask = mask + "!*@*"
-    window.client.conn.sendLine("MODE %s +b %s" % (window.channel.name, mask))
+    """/ban [#channel] <nick|mask> -- +b, expanding a bare nick to nick!*@*."""
+    _channel_mode_command(window, text, '+b', 'ban', as_mask=True)
+
+  def unban(window, text):
+    """/unban [#channel] <nick|mask> -- -b, the inverse of /ban.
+
+    /ban had no opposite, which made it the only one of these shortcuts you
+    could not undo without dropping to /mode -- and the expansion rule is the
+    part you have to get right to undo one, since the ban that was set from
+    `/ban alice` is on `alice!*@*`.
+    """
+    _channel_mode_command(window, text, '-b', 'unban', as_mask=True)
 
   def kban(window, text):
-    if window.type != "channel":
-      window.redmessage("[Error: /kban only works in a channel window]")
+    """/kban [#channel] <nick> [reason] -- ban the nick's mask, then kick.
+
+    Two lines on the wire, in that order: the ban first, so there is no window
+    in which the kicked user can rejoin before it lands.
+    """
+    conn = window.client.conn if window.client else None
+    if not conn:
+      window.redmessage('[Not connected]')
       return
-    parts = text.split(None, 1)
+    channel, rest = _split_channel_arg(window, conn, text, 'kban')
+    if channel is None:
+      return
+    parts = rest.split(None, 1)
     if not parts:
       window.redmessage("[Error: /kban requires a nick]")
       return
     target = parts[0]
     reason = _unquote(parts[1]) if len(parts) > 1 else None
-    mask = target + "!*@*"
-    window.client.conn.sendLine("MODE %s +b %s" % (window.channel.name, mask))
+    from config import ban_mask
+    conn.sendLine("MODE %s +b %s" % (channel, ban_mask(target)))
     if reason:
-      window.client.conn.sendLine("KICK %s %s :%s" % (window.channel.name, target, reason))
+      conn.sendLine("KICK %s %s :%s" % (channel, target, reason))
     else:
-      window.client.conn.sendLine("KICK %s %s" % (window.channel.name, target))
+      conn.sendLine("KICK %s %s" % (channel, target))
 
   def debuglog(window, text):
     """Toggle debug output logging to a file.
@@ -1018,85 +1042,119 @@ class Commands:
     from channel_details import show_channel_details
     show_channel_details(window.channel, parent=state.app.mainwin)
 
+  def mode(window, text):
+    """/mode [target] [modes [params]] -- send a raw MODE, or query one.
+
+    The general form that /op, /ban, /voice and the rest are shortcuts for.
+    It has to exist because the shortcuts cannot cover the space: there is no
+    command for +m, +i, +k, +l, none for a network-specific mode like
+    Undernet's +x, and no way to set several at once -- which is also the only
+    way to set them atomically.
+
+    Shapes accepted, and how the target is decided:
+
+      /mode                    query the current channel's modes
+      /mode +imnt              apply to the current channel
+      /mode #chan +o alice     explicit channel
+      /mode # +b alice!*@*     '#' is the current channel (see _resolve_hash)
+      /mode alice +x           a user mode: the target is a nick
+
+    The first token is the target *unless* it starts with '+' or '-', which is
+    what tells `/mode +o alice` (channel implied, alice is a parameter) apart
+    from `/mode alice +o` (alice is the target). That is the rule every other
+    client uses, and it is unambiguous because no mode string starts with
+    anything else.
+
+    Everything past the target is passed through untouched. This command
+    deliberately does not parse or validate mode letters: which ones exist is
+    per-network (ISUPPORT CHANMODES/PREFIX), so a client that checked them
+    would reject exactly the modes this command exists to reach.
+    """
+    conn = window.client.conn if window.client else None
+    if not conn:
+      window.redmessage('[Not connected]')
+      return
+    text = (text or '').strip()
+
+    if not text:
+      # No arguments at all: ask what the current channel's modes are. There is
+      # nothing to ask about in a server or query window, so say so rather than
+      # sending a MODE with no target and letting the server complain.
+      chan = _current_channel(window)
+      if not chan:
+        window.redmessage('[Error: /mode needs a target outside a channel '
+                          'window -- try /mode #channel, or /mode %s +x]'
+                          % (conn.nickname or 'yournick'))
+        return
+      conn.sendLine('MODE %s' % chan)
+      return
+
+    parts = text.split(None, 1)
+    first = parts[0]
+    if first[0] in '+-':
+      target = _current_channel(window)
+      if not target:
+        window.redmessage('[Error: /mode %s has no channel to apply to -- run '
+                          'it in a channel window, or name one: '
+                          '/mode #channel %s]' % (first, text))
+        return
+      rest = text
+    else:
+      target = _resolve_hash(window, first)
+      if not target:
+        window.redmessage("[Error: '#' means the current channel, and this is "
+                          "not a channel window]")
+        return
+      rest = parts[1].strip() if len(parts) > 1 else ''
+
+    # A target and nothing else is a query: /mode #channel, /mode yournick.
+    conn.sendLine('MODE %s %s' % (target, rest) if rest else 'MODE %s' % target)
+
+  # The one-target mode shortcuts. Each is `/name [#channel] <target>`; the
+  # shared body is commands._channel_mode_command, and everything interesting
+  # about them is documented there. `/mode` is the general form when a
+  # shortcut will not do -- several modes at once, a mode with no shortcut, or
+  # a user mode.
   def op(window, text):
-    if window.type != "channel":
-      window.redmessage("[Error: /op only works in a channel window]")
-      return
-    target = text.strip()
-    if not target:
-      window.redmessage("[Error: /op requires a nick]")
-      return
-    window.client.conn.sendLine("MODE %s +o %s" % (window.channel.name, target))
+    """/op [#channel] <nick> -- give operator status (+o)."""
+    _channel_mode_command(window, text, '+o', 'op')
 
   def deop(window, text):
-    if window.type != "channel":
-      window.redmessage("[Error: /deop only works in a channel window]")
-      return
-    target = text.strip()
-    if not target:
-      window.redmessage("[Error: /deop requires a nick]")
-      return
-    window.client.conn.sendLine("MODE %s -o %s" % (window.channel.name, target))
+    """/deop [#channel] <nick> -- take operator status (-o)."""
+    _channel_mode_command(window, text, '-o', 'deop')
 
   def halfop(window, text):
-    if window.type != "channel":
-      window.redmessage("[Error: /halfop only works in a channel window]")
-      return
-    target = text.strip()
-    if not target:
-      window.redmessage("[Error: /halfop requires a nick]")
-      return
-    window.client.conn.sendLine("MODE %s +h %s" % (window.channel.name, target))
+    """/halfop [#channel] <nick> -- give halfop status (+h)."""
+    _channel_mode_command(window, text, '+h', 'halfop')
 
   def dehalfop(window, text):
-    if window.type != "channel":
-      window.redmessage("[Error: /dehalfop only works in a channel window]")
-      return
-    target = text.strip()
-    if not target:
-      window.redmessage("[Error: /dehalfop requires a nick]")
-      return
-    window.client.conn.sendLine("MODE %s -h %s" % (window.channel.name, target))
+    """/dehalfop [#channel] <nick> -- take halfop status (-h)."""
+    _channel_mode_command(window, text, '-h', 'dehalfop')
 
   def voice(window, text):
-    if window.type != "channel":
-      window.redmessage("[Error: /voice only works in a channel window]")
-      return
-    target = text.strip()
-    if not target:
-      window.redmessage("[Error: /voice requires a nick]")
-      return
-    window.client.conn.sendLine("MODE %s +v %s" % (window.channel.name, target))
+    """/voice [#channel] <nick> -- give voice (+v)."""
+    _channel_mode_command(window, text, '+v', 'voice')
 
   def devoice(window, text):
-    if window.type != "channel":
-      window.redmessage("[Error: /devoice only works in a channel window]")
-      return
-    target = text.strip()
-    if not target:
-      window.redmessage("[Error: /devoice requires a nick]")
-      return
-    window.client.conn.sendLine("MODE %s -v %s" % (window.channel.name, target))
+    """/devoice [#channel] <nick> -- take voice (-v)."""
+    _channel_mode_command(window, text, '-v', 'devoice')
 
   def quiet(window, text):
-    if window.type != "channel":
-      window.redmessage("[Error: /quiet only works in a channel window]")
-      return
-    target = text.strip()
-    if not target:
-      window.redmessage("[Error: /quiet requires a nick]")
-      return
-    window.client.conn.sendLine("MODE %s +q %s" % (window.channel.name, target))
+    """/quiet [#channel] <nick|mask> -- set +q.
+
+    Passed through unexpanded, unlike /ban, and that is deliberate rather than
+    an oversight: +q is a ban-style *mask* mode on Libera and friends but the
+    *owner* prefix mode on UnrealIRCd and InspIRCd, where it takes a nick.
+    Expanding "alice" to "alice!*@*" would be right on one and wrong on the
+    other, so this does what it has always done and passes on what was typed.
+    Same rule as /mode: the client does not interpret modes it cannot know the
+    meaning of.
+    """
+    _channel_mode_command(window, text, '+q', 'quiet')
 
   def unquiet(window, text):
-    if window.type != "channel":
-      window.redmessage("[Error: /unquiet only works in a channel window]")
-      return
-    target = text.strip()
-    if not target:
-      window.redmessage("[Error: /unquiet requires a nick]")
-      return
-    window.client.conn.sendLine("MODE %s -q %s" % (window.channel.name, target))
+    """/unquiet [#channel] <nick|mask> -- unset +q. See /quiet."""
+    _channel_mode_command(window, text, '-q', 'unquiet')
 
   def aop(window, text):
     """/aop [-lrw] <nick|mask> [#chan1,#chan2,...] [network]
@@ -2435,6 +2493,90 @@ class Commands:
       conn.sendLine('AWAY :%s' % msg)
     else:
       conn.sendLine('AWAY')
+
+
+def _current_channel(window):
+  """The channel this window is about, or '' if it is not about one."""
+  if getattr(window, 'type', '') == 'channel' and getattr(window, 'channel', None):
+    return window.channel.name
+  return ''
+
+
+def _resolve_hash(window, token):
+  """Turn a bare '#' argument into the current channel; pass anything else on.
+
+  `docs/reference.md` documents '#' as meaning the current channel *in
+  commands*, and `popups.show_popup` substitutes it before running one -- but
+  the /on hook path does not, and neither does a line typed by hand. Resolving
+  it at the command means the one spelling the documentation promises works
+  from all three. Returns '' when there is no current channel to resolve to,
+  which the caller must report rather than send.
+  """
+  if token == '#':
+    return _current_channel(window)
+  return token
+
+
+def _split_channel_arg(window, conn, text, name):
+  """Split an optional leading channel argument off *text*.
+
+  Returns ``(channel, rest)``, or ``(None, '')`` having already said why -- so
+  a caller checks for None and returns, and never has to word the error.
+
+  Accepting a channel is not decoration. `docs/reference.md` documents the
+  mIRC spelling (`/kick # $$1`, `/mode # +b ...`) in the popup and /on
+  examples, and without this the expanded channel name was read as the *nick*:
+  `/kick #chan alice` sent ``KICK #chan #chan :alice`` and reported nothing
+  wrong. It is safe to accept on any of these commands because **no valid nick
+  can begin with a channel prefix**, so no line that worked before can change
+  meaning.
+  """
+  parts = text.split(None, 1) if text else []
+  if parts and (parts[0] == '#' or conn.is_channel(parts[0])):
+    channel = _resolve_hash(window, parts[0])
+    if not channel:
+      window.redmessage("[Error: '#' means the current channel, and this is "
+                        "not a channel window]")
+      return None, ''
+    return channel, (parts[1] if len(parts) > 1 else '')
+  channel = _current_channel(window)
+  if not channel:
+    window.redmessage('[Error: /%s needs a channel -- run it in a channel '
+                      'window, or name one: /%s #channel ...]' % (name, name))
+    return None, ''
+  return channel, text
+
+
+def _channel_mode_command(window, text, modes, name, as_mask=False):
+  """Body of /op, /deop, /voice, /ban and the rest: one MODE, one target.
+
+  These were nine near-identical copies of the same twelve lines, and they
+  agreed on everything except the two things that mattered. None checked
+  whether there *was* a connection, so every one raised AttributeError on
+  ``None.sendLine`` while disconnected instead of saying "[Not connected]" --
+  and none accepted the channel argument the documentation hands them. Nine
+  copies is how that happens; one body is the fix.
+
+  *modes* is the mode string ('+o', '-v', ...), *name* is the command's own
+  name for its error messages, and *as_mask* expands a bare nick to
+  ``nick!*@*`` the way /ban has always done.
+  """
+  conn = window.client.conn if window.client else None
+  if not conn:
+    window.redmessage('[Not connected]')
+    return
+  channel, rest = _split_channel_arg(window, conn, text, name)
+  if channel is None:
+    return
+  target = rest.strip()
+  if not target:
+    window.redmessage('[Error: /%s requires a %s]'
+                      % (name, 'nick or mask' if as_mask else 'nick'))
+    return
+  if as_mask:
+    from config import ban_mask
+    target = ban_mask(target)
+  conn.sendLine('MODE %s %s %s' % (channel, modes, target))
 
 
 def _unquote(s):
