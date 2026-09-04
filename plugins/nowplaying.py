@@ -33,11 +33,25 @@
 
 import json
 import threading
-import urllib.error
-import urllib.parse
-import urllib.request
 
 import plugin
+
+# urllib is imported inside the two functions that use it, not here.
+#
+# `import urllib.request` drags in http.client, email.parser, ssl and the rest
+# of the stdlib HTTP stack: 4.8 seconds of the client's startup on the
+# reporter's machine, measured with `python -X importtime`. This plugin is in
+# `plugins.auto_load`, so every launch paid it -- to have a hotkey ready that
+# most launches never press.
+#
+# qtpyrc already learned this once. `qtpyrc._prewarm_imports` warms the very
+# same modules for link previews, and it was deliberately moved off the
+# startup path onto a 0ms timer so that it competes with neither the GUI
+# thread nor the disk while the first window is being built (see "Startup
+# cost" in CLAUDE.md). Importing them eagerly here undid that.
+#
+# Both call sites already run on a worker thread, so the first /np pays the
+# import where it costs nobody anything.
 
 from PySide6.QtCore import QObject, Signal
 
@@ -200,6 +214,8 @@ def _beefweb_columns(specs):
 
 def _beefweb_get(settings, path):
   """GET *path* from the configured beefweb and return the decoded JSON."""
+  import urllib.error
+  import urllib.request
   base = str(settings.get('beefweb_url') or DEFAULT_BEEFWEB_URL).rstrip('/')
   url = base + path
   req = urllib.request.Request(url, headers={'Accept': 'application/json'})
@@ -224,6 +240,7 @@ def _beefweb_get(settings, path):
 
 def _beefweb_player(settings, specs):
   """Return the `player` object from /api/player, asking for *specs*."""
+  import urllib.parse
   query = urllib.parse.urlencode({'columns': _beefweb_columns(specs)})
   data = _beefweb_get(settings, '/api/player?' + query)
   if not isinstance(data, dict):

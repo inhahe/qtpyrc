@@ -249,6 +249,212 @@ above; `SelfEchoTracker` has no notice list yet.
 
 ## Fixed, with a residue worth knowing
 
+### Everything said while the client was closed was drawn but never recorded (fixed 2026-09-04)
+
+**Where:** `irc_client._log_chat` and the `_history_save` call sites.
+**Reported as:** "you say bouncer replays aren't logged? they should be."
+
+They should, and this is the more serious half of that day's report. The rule
+was "record nothing inside a playback batch", added on 2026-08-31 because
+**ZNC** replays a fixed tail of every channel on each reconnect and logging it
+again appended a duplicate copy of the tail per reconnect. That is right for
+ZNC and wrong for a bouncer that replays *what you missed* -- which is what
+Wicket does, from a stored read position. There, the replay is the only time
+those lines ever reach the client.
+
+**Measured on the reporter's `history.db`:** 2026-09-04 has no rows at all for
+06:00, nor for 08:00 through 12:00 -- five hours, across some thirty channels
+on five networks, on a day whose 13:00 hour holds 645 rows. The client was
+closed; Wicket buffered; on reattach every line was drawn on screen and written
+to neither the log nor the database. That is also why the conversation the
+reporter quoted could not be found in either.
+
+Fixed by comparing instead of guessing, since a client cannot know which kind
+of bouncer it is attached to. `_should_record(hist_key)` is True for a live
+line, and for a replayed one only when its **server-time is newer than the
+newest timestamp already stored for that target**. ZNC's re-sent tail is older
+than what is stored, so it is still skipped; Wicket's backlog is newer, so it is
+kept.
+
+**Residue 1 — a replay with no server-time tag is still dropped.** There is
+nothing to compare it against, and of the two possible mistakes a duplicated
+log is the lesser. Every bouncer worth the name sends `server-time` (Wicket
+does, when the client negotiates it, which qtpyrc does).
+
+**Residue 2 — only the recording moved.** Notifications, link previews and
+activity marks remain gated on `_in_playback_batch()` outright: a five-hour
+backlog must not fire five hours of desktop alerts. In `privmsg` the history
+write and the notification shared one `if` block, so the change had to split it
+rather than widen it -- widening it is the obvious mistake here and it is
+invisible until somebody reattaches after a long absence.
+
+**Residue 3 — the cutoff is per target and one second granular.** `ts` stores
+whole seconds, so a replayed line in the same second as the newest stored one
+is treated as already recorded. That is the right way round: it is far more
+likely to be that line coming round again than a second line nobody recorded.
+
+**Residue 4 — the hole already made was filled by hand.**
+`tools/import_wicket_history.py` reads Wicket's `messages` table and imports
+what qtpyrc does not have. Three things about it are worth keeping in mind if
+it is ever run again:
+
+* **It respects the prune.** Anything older than the oldest row qtpyrc still
+  holds for that channel was deleted by `backscroll_limit`, deliberately, and
+  re-importing it would balloon the database and then be deleted again. On the
+  reporter's data that distinction is the difference between 10,982 rows to
+  import and 80,637: 69,655 of the "missing" lines were pruned by policy, not
+  lost by the bug.
+* **It rewrites the table in timestamp order.** qtpyrc reads a channel's
+  backlog by row id, so rows merely *appended* would show up as the newest
+  messages whenever they were actually said. Every row is renumbered.
+* **It refuses while the client is running**, tested by asking SQLite for an
+  exclusive lock rather than by matching process command lines — this machine
+  runs a tray minimiser whose arguments name `qtpyrc.py`, so the obvious check
+  would refuse every time.
+
+Verified against a copy before being offered: 84,029 rows in, 95,086 out, zero
+rows out of timestamp order, the 2026-09-04 gap filled (06:00 went 0 → 289,
+08:00 → 228, 09:00 → 330, 10:00 → 312, 11:00 → 302, 12:00 → 324), the reported
+conversation present, `HistoryDB` opens it and `get_last` reads it, and the 109
+merged log files came out fully stamped and in order.
+
+### A nick changed spelling with no nick-change line (fixed 2026-09-04)
+
+**Where:** `irc_client.userRenamed` and `userQuit`, `models.Channel`,
+`window.NicksList`.
+**Reported as:** a channel that showed `<rockwood>` for a while and then
+`<Rockwood>` — "it changed from rockwood to Rockwood without ever showing a
+nick change. don't know if it's a bug in qtpyrc or wicket".
+
+qtpyrc's. **IRC nick identity ignores case; the spelling is presentation
+only** — and `userRenamed` decided whether a channel was affected with
+
+```python
+if oldname not in chan.nicks:
+    continue
+```
+
+a case-*sensitive* test against a set holding whatever spelling the server had
+last used. When the two disagreed the whole body was skipped: no "is now known
+as" line, no nick-list update, no history row, no error. The messages either
+side were fine, because each one is drawn from the nick in its own PRIVMSG
+prefix — so the name simply changed, with nothing to say why.
+
+**Correction — this fix is real but it is not what the reporter saw.** The
+first diagnosis was that a bouncer replay delivers a *current* NAMES and then
+an old NICK, so the list holds one spelling while the event carries the other.
+That mismatch is real and the fix below is right, but checking Wicket settled
+it the other way: `_replay_backscroll` replays only PRIVMSG, NOTICE and TOPIC,
+and the separate activity replay (JOIN/PART/KICK/MODE/NICK/QUIT) is off in the
+reporter's config (`replay_activity: false`). **The NICK was never sent to the
+client at all**, so no client-side bug was needed to explain the missing line.
+
+The reporter's own reading was the correct one: rockwood really did `/nick`,
+and the differing spellings in the messages are simply the prefixes as the
+server sent them, rendered correctly. What they did not see was an event that
+never arrived.
+
+The case-sensitivity bug below is still a bug, and would bite the moment
+`replay_activity` were turned on — but it is fixed on its own merits, not as
+the explanation for this report. The evidence that decided it: the whole
+conversation is absent from both `me/logs/` and `history.db`, which is the
+*playback* signature, and Wicket's replay filter is in `user.py`
+`_replay_backscroll`.
+
+`userQuit` had the identical test, so a QUIT spelled differently was swallowed
+the same way — **no "has quit" line, and the row left in the nick list
+permanently**. Four widget scans compared `item._nick == nick` with the same
+blind spot.
+
+Fixed by giving the identity a single home. `Channel` keeps a
+`_nick_by_lower` index and exposes `has_nick` / `find_nick` / `rename_nick`;
+`NicksList.find_row` does the widget lookup. Everything that asks "is this nick
+here?" now goes through one of them, keyed by `irclower` — so it honours the
+server's CASEMAPPING rather than `str.lower`, which matters because `[]\` fold
+onto `{}|` on an rfc1459 network and `bob[away]` is an ordinary nick.
+
+**Residue 1 — `rename_nick` exists because `removenick` is not its building
+block.** A rename does not end the membership, so the mode prefix and the
+nick-list row must survive it; `removenick` drops both (deliberately — see the
+prefix comment there). Writing the rename as remove-then-add silently deopped
+everyone who changed their nick. The first draft of this fix did exactly that
+and the test caught it.
+
+**Residue 2 — `Channel.users` was keyed inconsistently**, `nick.lower()` going
+in and `irclower()` coming out, which I flagged as a residue on 2026-09-03. It
+is `_low()` on both sides now, so the two agree for the nicks RFC1459 folds.
+
+**Residue 3 — the first version of the test passed against the broken code.**
+It renamed `rockwood` → `Rockwood` in a channel whose set already held
+`rockwood`, which the old exact-match test handles perfectly well. Reproducing
+the report needs the *mismatch* — the set holding one spelling, the event
+carrying the other — which is what a replay produces and what the test now sets
+up. A test that recreates the tidy version of a bug is worse than none: it
+reports the bug as absent.
+
+**Residue 4 — Wicket had the same mistake, on the other side.** Its
+`ChannelState.members` is keyed by the server's spelling and PART/QUIT/KICK/NICK
+all did plain dict lookups against it, so a differently-spelled message left a
+ghost member that every attaching client is then handed in NAMES. Not the cause
+of this report, but the same shape and quieter, so it is fixed too
+(`UserSession._member_key`, `irc bouncer/bugs.txt`).
+
+### Startup regressed to tens of seconds, and showed a blank window (fixed 2026-09-04)
+
+**Where:** `plugins/nowplaying.py`, `qtpyrc._register_settings_paths`,
+`qtpyrc.makeapp`.
+**Reported as:** "qtpyrc takes about a *minute* between when i launch it and
+when it shows anything, and then once it shows up, it's blank for a while
+before any widgets load. it didn't used to take this long. and we'd actually
+improved the problem once before."
+
+Right on both counts. Two module-level imports had crept back onto the startup
+path, one of them into the exact stack the earlier fix existed to keep off it.
+Measured with `python -X importtime` against the reporter's own profile:
+
+| | cost | why it was there |
+|---|---|---|
+| `urllib.request` (+ http.client, email.\*, ssl) | **4.8s** | `plugins/nowplaying.py` imported it at module level when it gained its beefweb source. It is in `plugins.auto_load`, so every launch paid it — for a hotkey most launches never press. |
+| `settings.settings_dialog` (+ 16 page modules) | **2.4s** | `_register_settings_paths` imported it to enumerate the `settings.*` UI path *names*, and that module imports every page class. |
+
+The first is the one that undid earlier work: `_prewarm_imports` warms exactly
+those modules from a 0ms timer, *after* the window is up, precisely so they do
+not compete with the GUI thread and the disk during startup. A plugin importing
+them eagerly put them back.
+
+Fixed by deferring both — nowplaying imports urllib inside the two functions
+that use it (both already on a worker thread), and the settings path tables
+moved to `settings.page_registry`, which imports nothing heavy. `scripts +
+plugins load` went from 8.5s to 1.2s in the `--timing` breakdown.
+
+**The blank window was a separate bug in the same report.** `show()` only makes
+a window visible; nothing draws into it until a paint event is processed, and
+`makeapp()` returns several seconds before the event loop is entered — font
+validation, clients, tray and plugins all run in between. `makeapp()` now ends
+with `processEvents(ExcludeUserInputEvents)`, so the window it just showed is
+painted before that work starts.
+
+**Residue 1 — a stopwatch cannot test this.** On the reporter's machine the
+same build measured between 11.2s and 23.3s depending on load, so a startup-time
+assertion cannot fail on a fast machine and cannot pass on a busy one.
+`tests/test_startup_imports.py` asserts on `sys.modules` at the instant before
+the event loop is entered, which is deterministic. It caught both regressions
+when they were reintroduced on purpose, naming each module and why it is
+forbidden.
+
+**Residue 2 — what is left is mostly not ours.** After the fixes the `--timing`
+breakdown is dominated by `python imports + arg parsing`: asyncio (7.5s
+cumulative), `ruamel.yaml` (3.9s, needed to read the config at all), PySide6 and
+shiboken6 (which pulls `zipfile`, 1.25s, on its own account). Those are the
+floor for a Qt + asyncio + YAML application, and the absolute numbers above are
+inflated by a machine that was thrashing. If startup is chased again, that is
+where the remaining seconds are, and none of them is obviously removable.
+
+**Residue 3 — the general rule, now stated in `CLAUDE.md`.** An `import` at
+module level in anything on the startup path *is* startup cost, and it is
+invisible in review: nothing in the diff says "this adds four seconds". Both
+regressions here were added by changes that were correct in every other respect.
+
 ### `/mode` was documented but never implemented (fixed 2026-09-03)
 
 **Where:** `commands.py`.

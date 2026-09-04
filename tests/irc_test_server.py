@@ -27,6 +27,10 @@ The control socket accepts one-line text commands:
   KICK <kicker> <channel> <target> [reason] — kick a user
   NICK <oldnick> <newnick>            — nick change
   TOPIC <nick> <channel> <text>       — topic change
+  CHANMSGTIME <t|-> <nick> <chan> <text>
+                                      — a channel message with an explicit
+                                        server-time tag (or none), as a
+                                        bouncer replay sends
   MODE <nick> <channel> <modes> [args]— mode change
   INVITE <nick> <channel>             — invite the client
   CTCPREPLY <nick> <tag> [data]       — CTCP reply from nick
@@ -104,16 +108,25 @@ class IRCTestServer:
         if self._writer and not self._writer.is_closing():
             self._writer.write((line + "\r\n").encode("utf-8"))
 
-    def _send_from(self, prefix, command, *params):
+    def _send_from(self, prefix, command, *params, server_time=None):
         """Send a prefixed IRC message.
 
         While a batch is open every message is tagged as part of it, except the
         BATCH delimiters themselves -- which is what a real server does, and is
         why the rule lives here rather than in each control command.
+
+        *server_time* adds an IRCv3 `time` tag. A replay carries one on every
+        line, and it is the only thing that lets a client tell a line it has
+        already recorded from one it has not.
         """
         parts = [":%s" % prefix, command]
+        tags = []
         if self._batch_ref and command != "BATCH":
-            parts.insert(0, "@batch=%s" % self._batch_ref)
+            tags.append("batch=%s" % self._batch_ref)
+        if server_time:
+            tags.append("time=%s" % server_time)
+        if tags:
+            parts.insert(0, "@" + ";".join(tags))
         for i, p in enumerate(params):
             if i == len(params) - 1 and (" " in p or p.startswith(":")):
                 parts.append(":%s" % p)
@@ -363,6 +376,17 @@ class IRCTestServer:
             prefix = FAKE_USERS.get(src, "%s!%s@test.local" % (src, src))
             self._send_from(prefix, "PRIVMSG", channel, text)
             return "chanmsg sent"
+
+        if cmd == "CHANMSGTIME":
+            # CHANMSGTIME <iso-time|-> <nick> <channel> <text>
+            # A channel message carrying an explicit server-time tag, which is
+            # what a bouncer's replay looks like. "-" sends none, which is the
+            # case a client cannot date and so must not record.
+            when, src, channel, text = rest.split(None, 3)
+            prefix = FAKE_USERS.get(src, "%s!%s@test.local" % (src, src))
+            self._send_from(prefix, "PRIVMSG", channel, text,
+                            server_time=None if when == "-" else when)
+            return "chanmsg sent (time=%s)" % when
 
         if cmd == "PRIVMSG":
             src, text = rest.split(None, 1)

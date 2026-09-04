@@ -990,7 +990,10 @@ class _AppKeyFilter(QObject):
 def _register_settings_paths():
   """Populate ui_registry with all settings.* entries."""
   from dialogs import open_settings
-  from settings.settings_dialog import get_settings_ui_paths
+  # page_registry, not settings_dialog: this only needs the path *names*, and
+  # settings_dialog imports all seventeen page modules (2.57s of startup) to
+  # provide them. The dialog itself is still imported lazily, when opened.
+  from settings.page_registry import get_settings_ui_paths
   reg = state.ui_registry
   desc = state.ui_descriptions
   # Clear previous settings entries
@@ -1440,6 +1443,19 @@ def makeapp(args, profile_events=False):
   # manager we don't need to restart and run our fast, idempotent cleanup, so
   # the OS can proceed without waiting on us.
   app.commitDataRequest.connect(_on_commit_data, Qt.ConnectionType.DirectConnection)
+
+  # Paint the window now, before the caller goes on to validate fonts, build
+  # clients and load plugins -- several seconds of work that all happens
+  # *before* the event loop is entered. show() only makes the window visible;
+  # nothing draws into it until something processes the paint event, so
+  # without this the user gets a blank rectangle for the whole of that, which
+  # is the "it shows up, then it's blank for a while before any widgets load"
+  # half of the startup report.
+  #
+  # ExcludeUserInputEvents deliberately: a click or a keystroke that arrived
+  # during startup must wait for the real event loop rather than be delivered
+  # to an application whose clients and plugins do not exist yet.
+  app.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
   return app
 
 def _on_commit_data(session_manager):

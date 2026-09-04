@@ -52,15 +52,19 @@ class IRCLogger:
       fn = ('%s_%s.log' % (name, month)) if month else ('%s.log' % name)
     return os.path.join(d, fn)
 
-  def log(self, network, target, line):
+  def log(self, network, target, line, when=None):
     """Queue one line for *target*'s log file. Does no filesystem work.
 
     The timestamp is taken here rather than by the writer thread: it records
     when the line happened, which is not when the disk got round to accepting
     it, and under exactly the load this class exists to survive those two are
     seconds apart.
+
+    *when* overrides it with a datetime the caller knows better -- a line
+    replayed from a bouncer happened hours ago, and stamping it "now" dates
+    the whole backlog to the moment of reconnection.
     """
-    ts = _format_timestamp(self.cfg.log_timestamp_format)
+    ts = _format_timestamp(self.cfg.log_timestamp_format, when)
     self._writer.write(self._path(network, target), '[%s] %s' % (ts, line))
 
   def flush(self, timeout=5.0):
