@@ -381,11 +381,18 @@ def _on_treeview_splitter_moved(pos, index):
     return
   mw = state.app.mainwin
   mw._tree_user_set = True
+  mw._tree_splitter.user_set = True
   sizes = mw._tree_splitter.sizes()
   if len(sizes) >= 2:
     mw._tree_target_tw = sizes[0]
+    mw._tree_splitter.target_width = sizes[0]
     if state.ui_state:
       state.ui_state.treeview_width = sizes[0]
+      # Persist now (debounced), not only at shutdown: a width that is written
+      # to ui.yaml solely by quit() is lost whenever the process does not get
+      # to run quit(). See window.schedule_ui_state_save.
+      from window import schedule_ui_state_save
+      schedule_ui_state_save()
 
 _DEFAULT_TITLEBAR_FORMAT = (
   'qtpyrc{eval("'
@@ -1108,27 +1115,51 @@ def makeapp(args, profile_events=False):
 
   content = app.mainwin.workspace
 
+  from window import set_splitter_pane
   app.mainwin.network_tree = NetworkTree()
 
   class _TreeSplitter(QSplitter):
-    """QSplitter that re-applies saved tree width on resize until user drags."""
+    """QSplitter that re-applies the saved tree width on resize until dragged.
+
+    **The target lives on the splitter, not on the main window, and that is
+    the fix rather than a tidy-up.** This used to read
+    `state.app.mainwin._tree_target_tw` -- but `state.app` is assigned from the
+    *return value* of makeapp(), and makeapp() is what creates this splitter
+    and shows the window. So every resize during startup, including the one
+    that matters (the window being shown, or maximised to the full screen),
+    arrived with `state.app` still None and was skipped in silence.
+
+    Qt's own behaviour then took over: it scales the panes proportionally, so a
+    217px tree in a 640px splitter is 34%, and 34% of a maximised 2560px window
+    is about 870px. That is the "off by hundreds of pixels" report -- and the
+    wider the screen, the further out it lands.
+    """
+
+    def __init__(self, target_width):
+      super().__init__()
+      self.target_width = target_width
+      self.user_set = False        # True once the user drags the handle
+
     def resizeEvent(self, event):
       super().resizeEvent(event)
-      mw = state.app.mainwin if state.app else None
-      if mw and not mw._tree_user_set:
-        total = self.width()
-        tw = mw._tree_target_tw
-        if total > tw:
-          self.blockSignals(True)
-          self.setSizes([tw, total - tw])
-          self.blockSignals(False)
+      if self.user_set:
+        return
+      from window import set_splitter_pane
+      self.blockSignals(True)
+      set_splitter_pane(self, 0, self.target_width)
+      self.blockSignals(False)
 
-  app.mainwin._tree_splitter = _TreeSplitter()
+  _saved_tw = state.ui_state.treeview_width if state.ui_state else 180
+  app.mainwin._tree_splitter = _TreeSplitter(_saved_tw)
   app.mainwin._tree_splitter.addWidget(app.mainwin.network_tree)
   app.mainwin._tree_splitter.addWidget(content)
-  app.mainwin._tree_target_tw = state.ui_state.treeview_width if state.ui_state else 180
+  # Kept in sync for anything that still reads them off the main window.
+  app.mainwin._tree_target_tw = _saved_tw
   app.mainwin._tree_user_set = False
-  app.mainwin._tree_splitter.setSizes([app.mainwin._tree_target_tw, 600])
+  # Not setSizes([tw, 600]): 600 is not the width of anything, so Qt reads the
+  # pair as a ratio. resizeEvent re-applies this for every later geometry
+  # change until the user drags.
+  set_splitter_pane(app.mainwin._tree_splitter, 0, _saved_tw)
   app.mainwin._tree_splitter.splitterMoved.connect(_on_treeview_splitter_moved)
   app.mainwin.setCentralWidget(app.mainwin._tree_splitter)
 
