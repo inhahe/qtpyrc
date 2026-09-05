@@ -1022,6 +1022,57 @@ two separate windows: making a selection moves the cursor to it, near the
 bottom, which is exactly the state in which the scroll bug does not happen. The
 first version did both in one window and passed against the broken code.
 
+### Persisted UI sizes: `set_splitter_pane` and `schedule_ui_state_save`
+
+Two rules, both learned from the tree/chat splitter forgetting where it was.
+
+**A `UIState` property assignment does not save.** `state.ui_state.x = v`
+updates a dict; `ui.yaml` is written only by `save()`. Most setters in the class
+call it themselves (`saved_colors`, `recent_colors`, `plugins_order`,
+`hex_uppercase`, `add_recent_sound`); the splitter widths did not, and leaned on
+the single `ui_state.save()` in `quit()`. That makes a setting survive a clean
+shutdown and vanish to a crash — **and appear to work at random**, because any
+unrelated `UIState` mutation flushes the pending value with it. A value that
+persists as a side effect of something else is worse than one that never
+persists: it teaches the user the feature works. Anything that changes a
+persisted size calls `window.schedule_ui_state_save()`, which debounces (a drag
+emits `splitterMoved` continuously and each save is an atomic YAML write on the
+GUI thread).
+
+**`QSplitter.setSizes` does not take pixels unless you make it.** It divides the
+widget's width *minus one handle per gap*, and normalises anything that does not
+add up — so:
+
+- `setSizes([saved, 600])` is a **ratio**, not a width. On a 1200px window a
+  saved 217 came back as 318.
+- `setSizes([tw, total - tw])` over-allocates by the handle, and Qt takes the
+  difference out of a pane. It took it out of the tracked one: 217 → 216 → 215,
+  **a pixel narrower every launch**.
+
+`window.set_splitter_pane(splitter, index, size)` does the arithmetic once
+(`width - handleWidth * (count - 1)`) and **returns False rather than guessing**
+when there is no usable geometry yet — during construction the splitter has no
+width, and writing a ratio there is exactly the first bug. Both resize handlers
+already re-applied on resize, which is the retry.
+
+**A widget that restores a saved size must not reach through `state.app`.**
+`state.app` is assigned from the *return value* of `makeapp()`, and `makeapp()`
+is what builds the widgets and shows the window — so for the whole of startup it
+is still `None`. `_TreeSplitter.resizeEvent` read its target through it and was
+therefore skipped for every resize that happens while the window is being shown
+or maximised, which are exactly the ones that decide the final layout. Qt then
+scaled the panes proportionally and a 217px tree became 34% of whatever the
+screen was: **hundreds of pixels out on a maximised window**. The splitter owns
+its `target_width` and `user_set` now. Anything else that re-applies a geometry
+on resize wants the same treatment — the attribute has to live somewhere that
+exists as early as the widget does.
+
+Covered by `tests/test_ui_state_persist.py`, which asserts the *round trip* five
+times over rather than one comparison (a one-pixel error is invisible in a
+single check and unmistakable as a sequence), resizes the window across a wide
+range, and repeats one resize with `state.app` set to `None` — the assertion
+that isolates the startup case from everything else.
+
 ### View modes
 
 - **Tabbed**: TabbedWorkspace (tabbar.py) - multi-row tab bar + QStackedWidget

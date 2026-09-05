@@ -249,6 +249,98 @@ above; `SelfEchoTracker` has no notice list yet.
 
 ## Fixed, with a residue worth knowing
 
+### The tree/chat splitter forgot its position across runs (fixed 2026-09-05)
+
+**Where:** `qtpyrc._on_treeview_splitter_moved` and `_TreeSplitter.resizeEvent`,
+`window.Channelwindow._on_splitter_moved` / `resizeEvent`, `config.UIState`.
+**Reported as:** "qtpyrc isn't remembering the position of the slider between
+the channel window and the treeview properly across runs."
+
+*Properly* was the tell -- it half worked. **Four** separate defects, all
+measured rather than reasoned about. The fourth is the one that produced the
+symptom actually reported; the first three were real but small, and fixing only
+them left the report standing -- "still not saving the correct divider
+position... off by hundreds of pixels".
+
+**0. The re-apply on resize gave up whenever it could not see `state.app`.**
+`_TreeSplitter.resizeEvent` read the target from
+`state.app.mainwin._tree_target_tw` -- but `state.app` is assigned from the
+*return value* of `makeapp()`, and `makeapp()` is what builds the splitter and
+shows the window. So every resize during startup, **including the one that
+matters** (the window being shown, or maximised to the screen), arrived with
+`state.app` still None and was skipped without a word.
+
+What was left was Qt's own behaviour: QSplitter scales its panes
+*proportionally*, so a 217px tree in a 640px splitter is 34%, and 34% of a
+maximised 2560px window is about 870px. Traced on the reporter's own profile:
+`set_splitter_pane(0, 217) w=640 -> sizes=[217, 419]` at construction, then the
+window grows to 796 and the tree silently becomes **270** -- 34% again -- with
+no further attempt to correct it. The wider the screen, the further out it
+lands, which is why the error was hundreds of pixels rather than tens.
+
+Fixed by giving `_TreeSplitter` its own `target_width` and `user_set`, set
+immediately after construction, so the re-apply depends on nothing that is not
+yet assigned. `mainwin._tree_target_tw` / `_tree_user_set` are kept in sync for
+any other reader.
+
+**1. The width was only ever written to disk by `quit()`.** `UIState.treeview_width`
+and `.nicklist_width` are plain properties: assigning to one updates the
+in-memory dict and nothing else, and the splitter handlers only assigned. So the
+setting survived a clean shutdown and was lost to anything that skipped it -- a
+crash, a kill, a session that ended some other way. Worse, it appeared to work
+at random, because every *other* `UIState` mutation (`saved_colors`,
+`recent_colors`, `add_recent_sound`, `plugins_order`, `hex_uppercase`) calls
+`save()` and flushed the pending width along with it. **A value that persists
+only as a side effect of an unrelated action is worse than one that never
+persists: it teaches the user the feature works.** Fixed with
+`window.schedule_ui_state_save()`, a debounced write -- `splitterMoved` fires
+continuously during a drag and each save is an atomic YAML write on the GUI
+thread, so one write a second after the user stops is the same durability
+without the jank.
+
+**2. Restoring the width set a *ratio*, not pixels.** Startup called
+`setSizes([saved, 600])`, and 600 is not the width of anything. QSplitter
+normalises a size list that does not match its own width, so on a 1200px window
+a saved 217 came back as **318** -- out by a hundred pixels until some later
+resize happened to correct it.
+
+**3. Every restore lost exactly one pixel.** The resize handler used
+`setSizes([tw, total - tw])`, which sums to the full width -- but a splitter
+divides *width minus one handle per gap*, so Qt took the 4px handle back out of
+a pane, and out of that one. Measured: restore 217 → read back 216 → save 216 →
+restore → 215 → 214 → 213. **The divider crept a pixel narrower on every single
+launch.** With the handles subtracted it round-trips unchanged indefinitely.
+
+All three now go through `window.set_splitter_pane(splitter, index, size)`,
+which does the handle arithmetic once and *declines* rather than guessing when
+the splitter has no usable geometry yet -- the caller retries on resize, which
+is what both resize handlers already did.
+
+**Residue 1 — `input_history`, `window_geometry`, `window_maximized` and
+`window_minimized` still do not save on assignment.** The three geometry ones
+are deliberate: they are set together in `quit()` and followed by an explicit
+`save()`, so they have exactly the crash-loses-it property described above but
+nothing better is available at that point. `input_history` is the one worth
+looking at if command history ever goes missing after a crash.
+
+**Residue 2 — the measurement is the useful part of the test.**
+`tests/test_ui_state_persist.py` asserts the round trip (restore *n*, read back
+*n*) five times over rather than checking a single number, because a one-pixel
+error looks like nothing in a single comparison and is obvious as a sequence.
+Against the old code it prints the drift line by line. It also resizes the
+window to 900/1400/2560/1024 and asserts the pane does not move, and repeats one
+of those **with `state.app` set to None** -- which is the state it is in
+throughout `makeapp`, and the one assertion that isolates defect 0 from the
+rest.
+
+**Residue 3 — three plausible fixes are not one correct fix.** Defects 1-3 were
+all real, all measurable, and all wrong; fixing them changed the symptom not at
+all, because the re-apply that would have shown the improvement was never
+running. The lesson is the order: this should have started by tracing what
+actually happens to the splitter during a real startup with the reporter's own
+config, which took one probe and answered it immediately. Reading the code
+found three bugs and missed the one that mattered.
+
 ### Everything said while the client was closed was drawn but never recorded (fixed 2026-09-04)
 
 **Where:** `irc_client._log_chat` and the `_history_save` call sites.

@@ -188,6 +188,84 @@ class NetworkTree(QTreeWidget):
 first_chat_paint_hook = None
 
 
+# ---------------------------------------------------------------------------
+# Persisting a UI size
+# ---------------------------------------------------------------------------
+
+def set_splitter_pane(splitter, index, size):
+    """Give pane *index* exactly *size* pixels, leaving the rest to the other.
+
+    **The arithmetic has to account for the handles, and that is the whole
+    point of this function existing.** QSplitter.setSizes() distributes the
+    widget's *usable* width -- total width minus one handle per gap -- so
+    passing sizes that add up to the full width over-allocates by the handle,
+    and Qt takes the difference back out of a pane. It took it out of this one:
+    a saved width of 217 came back as 216, was saved as 216, came back 215...
+    the divider crept a pixel narrower on every single run. Measured exactly
+    that way; with the handles subtracted it round-trips unchanged forever.
+
+    Worse is what happens when the sizes do *not* look like a width at all.
+    Startup used to call setSizes([saved, 600]), and 600 is not the width of
+    anything -- so Qt read the pair as a **ratio** and a saved 217 came back as
+    318 on a 1200px window, off by a hundred pixels until some later resize
+    happened to correct it.
+
+    Returns True if it was applied; False when the splitter has no useful
+    geometry yet (during construction, before the first layout), where the
+    caller should try again on resize rather than write a nonsense ratio.
+    """
+    if size <= 0 or splitter.count() < 2:
+        return False
+    usable = splitter.width() - splitter.handleWidth() * (splitter.count() - 1)
+    if usable <= size:
+        return False
+    other = usable - size
+    sizes = [other] * splitter.count()
+    sizes[index] = size
+    splitter.setSizes(sizes)
+    return True
+
+
+
+_ui_state_save_timer = None
+
+
+def schedule_ui_state_save(delay_ms=1000):
+    """Write ui.yaml shortly, coalescing repeated calls into one write.
+
+    **Anything that changes a persisted UI size must call this**, because
+    assigning to a UIState property only updates the in-memory dict. The
+    splitter widths did not, and relied entirely on the `ui_state.save()` in
+    qtpyrc.quit() -- so they survived a clean exit and were silently lost to
+    anything else: a crash, a kill, a session that ends without quit() running.
+    Reported as the tree/chat splitter "not remembering its position properly
+    across runs", where *properly* is the tell: it worked whenever the app
+    happened to shut down cleanly, and whenever some *other* UIState mutation
+    (a colour picked, a sound chosen) flushed the file first.
+
+    Debounced rather than immediate because `splitterMoved` fires continuously
+    while the handle is dragged, and each save is an atomic YAML write -- temp
+    file, rename -- on the GUI thread. One write a second after the user stops
+    is the same durability with none of the jank.
+    """
+    global _ui_state_save_timer
+    if not state.ui_state:
+        return
+    if _ui_state_save_timer is None:
+        _ui_state_save_timer = QTimer()
+        _ui_state_save_timer.setSingleShot(True)
+        _ui_state_save_timer.timeout.connect(_flush_ui_state)
+    _ui_state_save_timer.start(delay_ms)
+
+
+def _flush_ui_state():
+    try:
+        if state.ui_state:
+            state.ui_state.save()
+    except Exception:
+        state.dbg(state.LOG_ERROR, '[ui] could not save ui.yaml')
+
+
 class ChatOutput(QTextEdit):
   """QTextEdit subclass that supports right-clicking on nick anchors and clickable URLs."""
   def __init__(self, parent_window):
@@ -2356,7 +2434,11 @@ class Channelwindow(Window):
     self._target_nw = state.ui_state.nicklist_width if state.ui_state else 150
     self._nw_user_set = False  # True once the user drags the splitter
     self._splitter_dirty = False  # True while dragging, propagate on release
-    self.splitter.setSizes([600, self._target_nw])
+    # Not setSizes([600, nw]) -- 600 is not the width of anything, so Qt reads
+    # the pair as a ratio (see set_splitter_pane). The splitter has no geometry
+    # yet here, so this is expected to decline; resizeEvent applies it for real
+    # once there is a width to divide.
+    set_splitter_pane(self.splitter, 1, self._target_nw)
     self.splitter.splitterMoved.connect(self._on_splitter_moved)
     # Install event filter on the splitter handle to detect drag end
     self.splitter.handle(1).installEventFilter(self)
@@ -2367,12 +2449,9 @@ class Channelwindow(Window):
   def resizeEvent(self, event):
     super().resizeEvent(event)
     if not self._nw_user_set:
-      total = self.splitter.width()
-      nw = self._target_nw
-      if total > nw:
-        self.splitter.blockSignals(True)
-        self.splitter.setSizes([total - nw, nw])
-        self.splitter.blockSignals(False)
+      self.splitter.blockSignals(True)
+      set_splitter_pane(self.splitter, 1, self._target_nw)
+      self.splitter.blockSignals(False)
 
   def _on_splitter_moved(self, pos, index):
     self._nw_user_set = True
@@ -2384,6 +2463,7 @@ class Channelwindow(Window):
     self._target_nw = nw
     if state.ui_state:
       state.ui_state.nicklist_width = nw
+      schedule_ui_state_save()
 
   def _propagate_nicklist_width(self):
     """Apply nicklist width to all other channel windows (debounced)."""
@@ -2393,11 +2473,9 @@ class Channelwindow(Window):
         w = chan.window
         if w and w is not self and hasattr(w, 'splitter'):
           w._target_nw = nw
-          total = w.splitter.width()
-          if total > nw:
-            w.splitter.blockSignals(True)
-            w.splitter.setSizes([total - nw, nw])
-            w.splitter.blockSignals(False)
+          w.splitter.blockSignals(True)
+          set_splitter_pane(w.splitter, 1, nw)
+          w.splitter.blockSignals(False)
 
   # --- Typing indicator ---
 
