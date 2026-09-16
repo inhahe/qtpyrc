@@ -1604,7 +1604,7 @@ def _show_about():
   QMessageBox.about(state.app.mainwin, 'About %s' % APP_NAME,
     '<h2>%s %s</h2>'
     '<p>A cross-platform PySide6 IRC client.</p>'
-    '<p>By Richard Albert Nichols III (Inhahe)<br>'
+    '<p>By Inhahe<br>'
     'with Claude Opus 4.6 via Claude Code (Anthropic)</p>'
     '<p><b>Current environment (not minimum requirements):</b><br>'
     'Python %s<br>'
