@@ -78,69 +78,6 @@ entry treated it as though it did.**
   measurement of the residual: every earlier number is contaminated by the
   watchdog's own suspensions, and the log says by how much on each report.
 
-### History and logs are keyed by a network name that changes spelling mid-session
-
-**Where:** `irc_client.IRCClient._log_network` (irc_client.py:750).
-**Status:** open. Found 2026-09-03 while investigating the missing "@" in
-`#ops`; not caused by it and not fixed with it, because the fix needs a
-decision about existing data.
-
-```python
-return self.client.network or self.client.network_key or self.client.hostname or 'unknown'
-```
-
-`client.network` is the ISUPPORT `NETWORK=` value, which is not known until the
-005 burst arrives. Anything written before that falls back to the config key,
-so **the same network is written under two different names depending on when a
-line happened**, and the history table is keyed by that name.
-
-Measured on `me/history.db`:
-
-| network value | rows |
-|---|---|
-| `Libera.Chat` | 41,117 |
-| `undernet` | 20,325 |
-| `UnderNet` | 14,067 |
-| `EFNet` | 3,933 |
-| `DALnet` | 3,149 |
-| `EFnet` | 863 |
-| `irc.undernet.org` | 139 |
-| `dalnet` | 48 |
-| `libera` | 40 |
-| `efnet` | 30 |
-| `''` | 9 |
-
-Five spellings of Undernet, three of EFnet, two each of DALnet and Libera. The
-two Undernet spellings interleave by hours, not by era — `UnderNet` at
-2026-09-02 11:14, `undernet` at 14:37, `UnderNet` again on 09-01 06:12 — so
-this is a race with registration, not a rename. At least eight channels
-(`#anxiety`, `#cinema`, `#forum`, `#life`, `#mentalhealth`, …) have rows under
-both.
-
-**Why it matters: a replay reads one key.** `_history_replay` looks up
-`(network, channel)`, so a channel whose history is split across two spellings
-replays only the half that matches whichever name is current *now*. Lines are
-not lost from the table, but they are invisible in the window, which is
-indistinguishable from lost. The log files split the same way
-(`UnderNet_#Philosophy_2026-09.log` beside `undernet_#philosophy_2026-09.log`),
-which is at least visible in a directory listing.
-
-**The fix is not just "normalise the key",** because that leaves 14,067 rows
-unreadable under the new key. It needs both:
-
-1. A stable key — the config's `network_key` is the only name known before
-   registration and the only one that cannot change under us. `NETWORK=` is
-   still the right thing to *display*.
-2. A migration that folds existing rows onto it, case-insensitively, plus the
-   hostname spellings (`irc.undernet.org`) — and the same for the log tree,
-   where the merge has to interleave by timestamp rather than concatenate.
-
-Both halves are the user's call, hence open rather than done. Note the bouncer
-project's `bugs.txt` carries a report — "I sent some stuff in a channel maybe
-in another irc client and rejoined the channel using a client connecting to
-Wicket and my latest messages aren't there" — that has the same shape as this,
-and it is worth checking whether some of it is this rather than a bouncer bug.
-
 ### `ChatOutput.paintEvent` lays out the whole backscroll when the view is at the bottom
 
 **Where:** `window.py`, `ChatOutput.paintEvent` — inherent to `QTextEdit`.
@@ -248,6 +185,636 @@ above; `SelfEchoTracker` has no notice list yet.
 ---
 
 ## Fixed, with a residue worth knowing
+
+### History and logs were keyed by a network name that changed at registration (fixed 2026-09-17)
+
+**Where:** `irc_client.IRCClient._log_network`; migration in
+`tools/fold_network_names.py`.
+**Open from 2026-09-03**, when it was found while investigating the missing "@"
+in `#ops`. It stayed open because the fix needed a decision about existing data.
+
+```python
+return self.client.network or self.client.network_key or ...   # was
+return self.client.network_key or self.client.network or ...   # is
+```
+
+`client.network` is the ISUPPORT `NETWORK=` value, which does not exist until
+the 005 burst arrives. So every line written before registration went under the
+config key and every line after it under the server's spelling — **not a
+rename, an alternation, decided per line by whether 005 had landed yet.** By
+2026-09-17 the reporter's database held:
+
+| spelling | rows | | spelling | rows |
+|---|---|---|---|---|
+| `Libera.Chat` | 41,362 | | `libera` | 770 |
+| `undernet` | 22,011 | | `UnderNet` | 14,530 |
+| `EFNet` | 3,967 | | `EFnet` / `efnet` | 863 / 30 |
+| `DALnet` | 3,607 | | `dalnet` | 48 |
+
+50 channels and queries double-booked, most as two near-full buckets —
+`UnderNet/#anxiety` holding 09-12..09-16 while `undernet/#anxiety` held
+09-11..09-17.
+
+**Why it survived months of use.** A replay reads one key, so you see one
+bucket — but `backscroll_limit` prunes each bucket to 1000 rows
+*independently*, so both stayed full and the window still showed a thousand
+lines. It showed a thousand lines **with holes in them**, and nothing says
+which are missing. The only visible trace was two log files side by side.
+
+**It was also mistaken for a different bug.** Re-running
+`tools/import_wicket_history.py` on 2026-09-17 reported 6,527 lines "missing",
+every range dated after the previous import and running to minutes earlier —
+which reads exactly like an ongoing recording failure. It was not: those lines
+were present under the other spelling, and the import tool compares per
+`(network, channel)`. Running it would have written 6,527 duplicates into the
+other bucket and deepened the split. Checking before advising is the only
+reason that did not happen.
+
+**The migration refuses to guess, and that is the interesting part.** Two
+automatic mappings were tried and both were wrong on this database:
+
+- *Channel-set overlap* mapped `Libera.Chat` (41,362 rows) onto `efnet` on the
+  strength of one shared channel, because the denominator was the smaller set.
+- *Config autojoin lists* resolved nothing — there are none, since the channels
+  come from the bouncer.
+
+So the tool automates exactly one rule, case-insensitive equality to a
+configured key, and requires `--map OLD=NEW` for everything else. A rule that is
+right four times and silently wrong the fifth is worse than no rule when the
+fifth is a table rewrite. The remaining mappings came from the bouncer's config
+and its 005 traffic — evidence, not inference:
+
+```
+libera   irc.libera.chat    NETWORK=Libera.Chat
+undernet irc.undernet.org   NETWORK=UnderNet
+efnet    irc.prison.net     NETWORK=EFNet
+dalnet   irc.dal.net        NETWORK=DALnet
+binias   irc.binkiewka.org  NETWORK=Binkiewka-Labs
+```
+
+`GeekShed` (342 rows) and `''` (9) are left alone: no configured key matches and
+nothing justifies a target.
+
+**Residue worth keeping.**
+
+- **A key and a label are different things, and the prettier name belongs to the
+  label.** `_net_label` had the stable chain and `_log_network` the unstable one
+  — exactly backwards. Anything that names a row, a file or a directory must be
+  derived from something known before the first line is written; anything
+  learned from the server is a display string.
+- **Independent pruning hid the symptom.** Had `backscroll_limit` applied to the
+  union, one bucket would have starved and someone would have noticed in a week.
+  A quota applied per-bucket makes a split self-concealing — worth remembering
+  anywhere data is partitioned by a key that might be wrong.
+- **The fold buys contiguity, not depth.** Merging gives ~2,000-row channels
+  against a 1000 limit, so 14,019 rows sit above it and are pruned on that
+  channel's next message unless the limit is raised first. Said plainly before
+  applying, because "I recovered your history" followed by a silent prune is
+  worse than not offering.
+
+### The render-audit test read a log the writer thread had not written yet (fixed 2026-09-17)
+
+**Where:** `tests/test_render_audit.py`, `reports_in()`.
+
+Three checks failed in a full-suite run — "rendering the same line twice
+produced 0 reports, expected 1", and two more of the same shape — while the
+console output of that very run showed the reports being generated. They were
+generated. They were not yet on disk.
+
+`render_audit._write` hands its line to `bgwriter.shared()`, which appends on
+its own thread and flushes when the queue drains (that is the whole point of
+`bgwriter`: no filesystem syscall on the GUI thread). `reports_in()` opened the
+file and read it directly, so it was racing the writer thread rather than
+measuring anything. It won on an idle machine and lost on a busy one.
+
+It now calls `bgwriter.shared().flush()` first — a **barrier, not a delay**, the
+same shape as the `HistoryDB.flush_pending()` that precedes every history read,
+and the sanctioned use of `flush()` per the bgwriter section of `CLAUDE.md`
+("it is for shutdown and for tests"). Three consecutive runs clean afterwards.
+
+**Residue worth keeping.**
+
+- **Moving a write off the calling thread moves it off every reader's thread
+  too.** The `bgwriter` change was reviewed for what it did to the GUI thread
+  and not for what it did to everything that had been reading those files
+  synchronously. When an operation becomes asynchronous, every existing
+  observer of its result becomes a race — and the ones in tests fail
+  intermittently, months later, looking like something else entirely.
+- **A sleep would have "fixed" this and left it broken.** The same file already
+  carries the lesson from 2026-09-02 ("Six tests assumed they were the only
+  thing running on the machine"): the answer to a race with a worker is the
+  barrier the worker already provides, never a guess at how long it needs.
+
+### The client quit itself whenever a popup closed with Alt held down (fixed 2026-09-17)
+
+**Where:** `qtpyrc._AppKeyFilter.eventFilter`, the Close branch.
+**Reported as:** "it seems that it always disappears when i accidentally press
+some random key combination."
+
+It was never a crash, and the *absence* of evidence is what identified it. When
+it vanished on 2026-09-17 there was no `Application Error` in the Windows event
+log, and `me/crash.log` had not been written since 1 September — no traceback,
+no faulthandler dump, no SEH record, and **no "Unexpected exit (no quit()
+called)" atexit marker**. That marker is what an externally killed process
+leaves behind, so its absence rules out a kill just as firmly as the empty event
+log rules out a fault. Everything was consistent with one thing: `quit()` ran,
+normally, because something asked it to.
+
+`_AppKeyFilter` is installed on the **QApplication**, so it sees Close events
+for every object in the process. The last branch read:
+
+```python
+if (event.type() == QEvent.Type.Close
+    and isinstance(obj, QWidget) and obj.isWindow()
+    and obj is not state.app.mainwin):
+  if QApplication.queryKeyboardModifiers() & Qt.KeyboardModifier.AltModifier:
+    obj.close()
+    QTimer.singleShot(0, QApplication.instance().quit)
+```
+
+`queryKeyboardModifiers()` polls **the keyboard at the instant it is called**.
+It knows nothing about the event being handled — a `QCloseEvent` carries no
+modifiers, which is presumably why it was reached for in the first place. So the
+condition is not "the user pressed Alt+F4" but "some top-level window closed
+while Alt happened to be down", and both halves of that are far broader than
+they look:
+
+- **Every menu, popup and tooltip is a top-level window.** `QMenu.isWindow()` is
+  True, and so is the nick-completion popup's. They open and close constantly.
+- **Alt is held for many things that are not Alt+F4**: reaching the menu bar,
+  Alt+Tab, mnemonics — and **AltGr, which Windows reports as Ctrl+Alt**, so
+  typing `@ \ | ~ €` on a non-US layout holds it.
+
+Put together: press Alt to reach the menu bar while any popup is open, the popup
+closes because Alt was pressed, and the close is read as a request to terminate
+the client. "Some random key combination" was exactly right.
+
+Fixed by removing the guess rather than narrowing it. The filter already sees
+`KeyPress`/`ShortcutOverride`, so it now **records an actual Alt+F4 key event**
+and correlates the Close with it inside half a second; and `_is_transient_window`
+excludes popups, menus, tooltips and splash screens outright.
+
+**Residue worth keeping.**
+
+- **Ask the event, never the world.** A handler that cannot get what it needs
+  from the event it was given, and reaches for global state instead, is not
+  reading a worse copy of the same fact — it is answering a different question
+  that happens to agree most of the time. The gap is the bug, and it will be
+  intermittent and unreproducible by construction.
+- **It degrades safely now, which the old version did not.** If Qt never
+  delivers the Alt+F4 key event (the comment's premise was that Windows sends
+  WM_CLOSE instead), the branch simply never fires and Alt+F4 closes the focused
+  window — the Windows convention. The old version's failure mode was to quit
+  the client.
+- **A test cannot hold Alt down, and production should not be asking.**
+  `tests/test_alt_f4_quit.py` stubs `queryKeyboardModifiers` to report Alt for
+  its whole duration, because that is the reporter's condition; without that it
+  passes against the very bug it exists for, since the poll reads the test
+  machine's keyboard and nobody is holding Alt. Verified against the original:
+  10 failures, headed by "closing a QMenu quit the client".
+- **This is the third time in two weeks that "no evidence anywhere" was itself
+  the evidence.** A missing atexit marker, a missing WER record and a missing
+  traceback are each a fact. Enumerating what *should* have been written and
+  finding which one is absent narrowed this to "clean quit" before a single line
+  of code was read.
+
+### `CacheOverflowException` was DirectWrite's font cache, and it is noise (identified 2026-09-17)
+
+**Where:** nowhere in qtpyrc. Inside `DWrite.dll`, reached through Qt's font
+fallback.
+**Open since 2026-09-05**, when four of these appeared on the console during
+startup with no Python traceback and no reproduction in any offscreen run:
+
+```
+[17:21:10]Exception: E06D7363.?AVCacheOverflowException@@
+```
+
+The cdb trap set for it on 2026-09-06 caught it 35 times over the following
+days, and the stack is the same every time:
+
+```
+Qt6Gui!QTextCursor::insertText
+Qt6Gui!QTextDocumentPrivate::insert -> finishEdit -> documentChanged -> doLayout
+Qt6Gui!QTextLine::setLineWidth -> layout_helper
+Qt6Gui!QTextEngine::shape -> shapeText
+Qt6Gui!QFontEngineMulti::stringToCMap -> loadEngine
+Qt6Gui!QFontDatabasePrivate::findFont -> loadEngine -> loadSingleEngine
+Qt6Gui!QWindowsDirectWriteFontDatabase::fontEngine
+Qt6Gui!QWindowsFontDatabase::createEngine
+DWrite!DWriteGdiInterop::CreateFontFaceFromHdc          <-- throws
+DWrite!...catch$24 -> DWrite!MapExceptionToHresult      <-- catches
+```
+
+It is **DirectWrite's own font cache overflowing, thrown and caught inside
+DWrite and turned into an HRESULT**, during Qt's *font fallback* while shaping
+a chat line. Nothing escapes; Qt takes the failed candidate as "this font
+cannot render that character" and tries the next one. The user-visible effect
+is none — which is why it never reproduced offscreen (no DirectWrite) and never
+correlated with anything.
+
+Font fallback is what makes it appear in bursts: `note_chat_text` registers a
+substitution the first time an uncovered character is seen (see the **Chat
+font** section of `CLAUDE.md`), so a chat line with an unusual glyph walks the
+fallback list, and each candidate DWrite cannot satisfy is one throw.
+
+**The trap is disarmed again, and that is the point of recording this.** The
+first-chance filter in `D:\utils\qtpyrc-cdb.txt` is commented out; cdb still
+catches *unhandled* exceptions through the default second-chance break. Leaving
+it armed is the mistake `render_audit` already taught this project — an
+instrument that has answered its question and stays switched on is pure cost —
+and here the cost is not theoretical: **every throw froze the whole process
+while cdb walked 24 frames and resolved symbols**, and it fires on ordinary
+chat text.
+
+**Residue worth keeping.**
+
+- **"Unexplained" and "harmful" are different questions, and the cheap one to
+  answer first is the second.** This sat open for twelve days looking
+  suspicious. One stack settled it as noise. The instrument was worth setting
+  precisely because the alternative was continuing to wonder — but the outcome
+  of an investigation is allowed to be "nothing to fix", and a finding of
+  *benign* is only worth having if it is written down, or the next person to
+  see those four lines starts over.
+- **Two cdb scripting traps, both silent, both found by checking the log rather
+  than by trusting the file.** A `$$` comment **ends at the first semicolon**,
+  and cdb runs the remainder as commands: the original script had a semicolon
+  in a prose comment from the day it was written, and commenting out the
+  re-arm line with `$$` left `kb 24` and — much worse — `gn` live, so the
+  target resumed before the rest of the script ran and the filter table was
+  never printed. `*` comments take the whole line. The script prints its own
+  filter table for exactly this reason, and that is the only thing that showed
+  either problem.
+
+### The Wicket import defaulted to 30 days and lost a fifth of what it could recover (fixed 2026-09-06)
+
+**Where:** `tools/import_wicket_history.py`, the `--days` default.
+**Noticed when** the user asked why I had suggested `--days 14` — a number I had
+picked because it sounded safe, with nothing behind it.
+
+`--days` narrows the *scan*. It does not bound the *result*: the import already
+skips, per channel, anything older than the oldest row qtpyrc still keeps for
+it, because `backscroll_limit` prunes to the newest N and an older row inserted
+now is deleted by the next pass. So a day count is the wrong instrument in both
+directions at once. Measured on the reporter's databases (`backscroll_limit:
+1000`, Wicket holding 180 days):
+
+| `--days` | recovered | channels |
+|---|---|---|
+| 14 (what I suggested) | 10,741 | 58 |
+| 30 (the old default) | 12,112 | 69 |
+| 60 | 13,213 | 79 |
+| unlimited | **15,485** | **112** |
+
+A busy channel is capped at 1000 rows and reaches back only hours —
+`##programming` held less than a day — so nothing older is recoverable however
+much you ask for. A quiet channel never hits the cap and still holds March, and
+that is exactly what a small window discards. Defaulting to 30 days threw away
+a fifth of the recoverable lines and more than half the channels, in the
+conversations least likely to be missed by anyone watching.
+
+The default is now unlimited; `--days` remains for narrowing the scan
+deliberately. Scanning everything costs 648k rows instead of 189k, of which
+608k are skipped by the floor — seconds, once.
+
+**Residue worth keeping.** This is the failure this file keeps recording, in a
+tool written to fix an earlier instance of it: a default that answers a narrower
+question than the one asked, and says nothing about having done so. The floor
+was the right bound all along and was already implemented — the day count was a
+second, worse bound layered on top of it, and the only thing it added was loss.
+When a limit already exists for a good reason, a second limit "to be safe" is
+not caution.
+
+### The GUI froze for over an hour inside a scroll-bar paint — Qt's parallel image scale (fixed 2026-09-06)
+
+**Where:** `qtpyrc.py`, `QT_NO_GUI_THREADPOOL` set beside the other Qt
+environment variables, before PySide6 is imported.
+**Reported as:** "i think qtpyrc is currently hung ... it hasn't responded to
+anything in many minutes."
+
+It was hung, and had been for **64 minutes** when it was caught. `me/hangs.log`:
+
+```
+[2026-09-06 07:59:00] *** GUI STALL detected: no heartbeat for 2.21s ***
+...
+[2026-09-06 09:03:16]   ... still stalled (3858.7s). GUI thread stack now:
+  qtpyrc.py:2931 loop.run_forever()
+  qasync/__init__.py:404 rslt = self.__app.exec()
+  (no Python frame below the event loop)
+```
+
+A full dump (`procdump -ma`, taken without disturbing the process) gave the
+native stack:
+
+```
+ntdll!NtWaitForAlertByThreadId
+ntdll!RtlWaitOnAddress
+KERNELBASE!WaitOnAddress
+Qt6Core!QSemaphore::acquire+0x64
+Qt6Gui!...                          (threaded segment wait)
+Qt6Gui!QRasterPaintEngine::drawImage+0x40a
+Qt6Gui!QRasterPaintEngine::drawPixmap+0x1c1
+Qt6Gui!QPainter::drawPixmap+0x6d
+Qt6Widgets!QCachedPainter::~QCachedPainter+0x7d
+qmodernwindowsstyle!...
+Qt6Widgets!QScrollBar::paintEvent+0xe5
+... QWidgetPrivate::paintSiblingsRecursive x14 ...
+```
+
+**Qt parallelises a large smooth image scale across its private *Gui* thread
+pool**: it queues N segments and blocks the caller on `QSemaphore::acquire(N)`.
+There is no timeout and no serial fallback. The dump's thread list is the whole
+diagnosis — 18 threads, and **not one of them is a Qt thread-pool thread**:
+
+```
+"log-writer"  "hang-watchdog"  "_EventWorker"  "history-write_0"
+"history-reader_0"  "_QThreadWorker" x10   winmm!timeThread   TppWorkerThread
+```
+
+The `_QThreadWorker` threads are qasync's Python executor, not Qt's. So the
+segments the GUI thread was waiting for were never going to run, and it waited
+for ever — inside a paint, holding the event loop.
+
+**Not a regression, and not the cdb launcher.** The first suspicion was the
+debugger added the day before, and it was wrong: the identical
+`QSemaphore::acquire` stack is in `me/hangs.log` on **2026-08-31** and
+**2026-09-01**, and the longest stall on record — **7077s, just under two
+hours** — is **2026-08-16**, which is where the log begins. It has been
+happening for as long as there has been a log. Every occurrence was on a
+machine pinned at 100% CPU by other work, which is the condition that starves
+the pool.
+
+**The fix is Qt's own switch.** `QT_NO_GUI_THREADPOOL` (found by scanning
+`Qt6Gui.dll` for `QT_*` strings, since it is not in the documentation) makes
+the same code take the serial path. Verified rather than assumed — a
+4000×4000 → 1500×1500 `SmoothTransformation` scale, three runs, best of:
+
+| | time | output sha256 |
+|---|---|---|
+| with the Gui pool | 0.011s | `815c9906570a96da` |
+| without it | 0.056s | `815c9906570a96da` |
+
+Both halves matter. The **5× time difference proves the variable is
+recognised** — a name that Qt ignored would have changed nothing, and
+"I set an environment variable and the hang stopped" is not evidence when the
+hang is intermittent. The **identical hash proves rendering is unchanged**:
+the serial path is the same algorithm, not a cheaper one.
+
+45 ms of extra time on a 16-megapixel scale, against a client whose largest
+scaled images are scroll-bar and style pixmaps, is not a cost anyone can
+observe. Set with `setdefault`, so an environment that sets it explicitly wins.
+
+**Residue worth keeping.**
+
+- **"No Python frame below the event loop" is not a dead end, it is a
+  signpost.** The watchdog says the GUI thread is inside Qt/Win32, and from
+  there only a native stack can help. py-spy's guess named the right shape but
+  mis-symbolised half the frames (`QVulkanDeviceFunctions::vkWaitSemaphores` at
+  +0x208e9 is not vkWaitSemaphores); the dump plus `cdb -z` gave real offsets,
+  and — far more usefully — **the thread list**, which is what actually
+  identified the bug. The absence of a thread was the evidence, not any stack.
+- **Dump first, ask questions after.** `procdump -ma <pid>` on a hung process
+  costs 38 seconds and does not disturb it, and the alternative is that the
+  only copy of the evidence dies with the next restart. The 951 MB is worth it
+  for the minutes it exists; delete it afterwards.
+- **The first suspect was the thing that changed most recently, and checking
+  that took one grep.** `grep -n QSemaphore::acquire me/hangs.log` with dates
+  ruled out the day-old launcher change immediately. Do that before reasoning
+  about mechanism — a plausible story about a recent change will otherwise
+  absorb an afternoon.
+- **This is a Qt defect, not a qtpyrc one, and the workaround is deliberately
+  not a config option.** It is not a preference anybody could hold an opinion
+  about; it is a switch that trades an invisible amount of throughput for the
+  removal of a hard hang. It stays overridable through the environment, which
+  is the right amount of escape hatch. If a future Qt gives the parallel path a
+  timeout or a fallback, this line can go.
+
+### `plugins/secret.py` warned on every launch and did nothing (fixed 2026-09-05)
+
+`[WARN] Plugin "secret" has no Class or Script attribute`, once per launch.
+`plugins/secret.py` was a one-line file — `import plugin` — with no `Class`
+and no `Script`, so the loader could only ever refuse it. `/secret` is
+registered by `rotate` (`plugins/rotate.py` `_register()`, at module level, so
+unconditionally on load), which was already in `auto_load` beside it. The stub
+is deleted and the `- secret` line removed from `plugins.auto_load`; deleting
+only one of the two would have swapped the warning for a different one.
+
+Worth noting because it is the shape of thing that survives for months: it was
+not wrong enough to break anything, so nobody chased it, and a warning that
+prints every single launch is a warning people stop reading — including the
+next one, which might matter.
+
+### PySide6 read the source of every module qtpyrc imports — 6.65s of every startup (fixed 2026-09-05)
+
+**Where:** `qtpyrc._disable_pyside_feature_scan`, called immediately after the
+first PySide6 submodule import.
+**Found in:** a console trace the reporter pasted, in which the GUI-stall stacks
+during startup were *all* inside importlib, and one of them showed why:
+
+```
+File "d:\...\plugins\triviabot\__init__.py", line 21, in <module>
+  import json
+File "d:\python314\Lib\json\__init__.py", line 106, in <module>
+  from .decoder import JSONDecoder, JSONDecodeError
+File "shibokensupport/signature/loader.py", line 71, in feature_imported
+File "shibokensupport/feature.py", line 158, in _mod_uses_pyside
+File "d:\python314\Lib\inspect.py", line 1161, in getsource
+File "d:\python314\Lib\linecache.py", line 187, in updatecache
+File "d:\python314\Lib\tokenize.py", line 461, in open
+  buffer = _builtin_open(filename, 'rb')
+```
+
+Importing PySide6 replaces `builtins.__import__` with shiboken's
+`__feature_import__`, which calls `feature_imported` for **every module imported
+from then on**. That calls `_mod_uses_pyside(mod)` — whose entire body is
+
+```python
+try:
+    src = inspect.getsource(mod)
+except (TypeError, OSError, SyntaxError):
+    return False
+return "PySide6" in src
+```
+
+— so importing `json` opens and reads `json/decoder.py` in full, to answer a
+question the import machinery never asked. Every module qtpyrc pulls in pays it.
+
+**Measured over a real startup: 96 modules, 2.0 MB read, 6.65 s**, of which 16
+answered yes. After the fix: **11 modules, 0.46 s** — the 11 being PySide6's own
+bootstrap, imported before qtpyrc can act.
+
+`_disable_pyside_feature_scan()` replaces `_mod_uses_pyside` with a constant
+`False`. The scan only *pre-classifies* a module as eligible for
+`from __feature__ import ...`; an actual `from __feature__ import` sets that
+module's entry itself, which was verified by importing a module that uses
+`snake_case` with the replacement in place — it still worked. qtpyrc uses the
+classic camelCase API throughout and has no `__feature__` import anywhere.
+
+**Residue worth keeping.**
+
+- **This was invisible to the tool that found the last two import regressions.**
+  `-X importtime` attributes cost per module, and this inflates *every* module
+  by roughly its own source size — so the profile says "imports are slow" and
+  names nobody. The previous two regressions (`urllib.request` at 4.8s,
+  `settings.settings_dialog` at 2.4s) were each one line in one file; this is
+  bigger than either and has no line to point at. When a profile shows a cost
+  spread evenly over everything, suspect something wrapped around the operation
+  rather than something inside it.
+- **The assumption is now asserted, not just written down.**
+  `tests/test_startup_imports.py` checks both halves: that the replacement is
+  still installed at the instant the event loop starts, and that no file in the
+  tree uses `from __feature__ import`. The second is what the first rests on,
+  and an assumption nobody re-checks is how it stops being true — the symptom
+  would be a feature silently not applying, which nothing else would catch.
+- **It is a vendor monkeypatch and is guarded accordingly**: the module is
+  looked up under both names it has gone by and the attribute checked, so a
+  future PySide6 that does this differently gets a slow startup rather than a
+  crash.
+
+### The end of a history replay froze the GUI for seconds (fixed 2026-09-05)
+
+**Where:** `window.Window._flush_replay_queue`.
+**Found in:** the same console trace — two stalls, 3.16s and 8.31s, both here:
+
+```
+*** GUI STALL detected: no heartbeat for 2.16s ***
+  qtpyrc.py:658  _bg_replay_loop -> window._flush_replay_queue()
+  window.py:1556 _flush_replay_queue
+  window.py:1672 addline_msg -> _render_text -> _insert_with_urls
+  window.py:1703 cur.insertText(text[pos:], fmt)
+*** GUI recovered after 3.16s ***
+```
+
+A window whose backlog is still loading holds live output in `_replay_queue`.
+The backlog itself is drip-fed across turns of the event loop precisely so that
+loading it does not lock the GUI — and then the flush rendered the entire
+held-back queue in one synchronous loop at the end, undoing that for the live
+half. On a busy channel during a slow replay that queue is hundreds of lines,
+each an insert into a document that already has thousands of blocks.
+
+Now chunked (`Window.FLUSH_CHUNK`, 50 per turn), returning True only when fully
+drained. A queue that fits in one chunk still drains synchronously, so callers
+that flush and then read the document are unaffected.
+
+**Residue worth keeping — the trap is ordering, not speed.** The unchunked
+version could afford to close the queue before rendering, because nothing else
+ran until it finished. A chunked one returns to the event loop between chunks,
+so closing the queue first lets a line arriving in that gap render
+*immediately*, ahead of everything still waiting: the conversation comes back
+scrambled, which is worse than the freeze and far harder to notice. The queue
+therefore stays open until empty, and `_in_replay` is what lets a chunk render
+through the same `addline_*` methods without re-queuing itself.
+
+`tests/test_replay_flush.py` was verified against **two** broken versions, which
+is the point of it: the original unchunked one (7 failures) and a naive chunked
+one that closes the queue first (5 failures, including seven lines lost
+outright). A test that only asserted "everything eventually renders" would pass
+against the second.
+
+### `/join <channel> <key>` did nothing, and a channel window opened for a channel nobody was in (fixed 2026-09-05)
+
+**Where:** `commands.py` `Commands.join`; and, in
+`D:\visual studio projects\irc bouncer`, `upstream.py`
+(`_handle_target_too_fast`, `join_channels`, `_cleanup`) and `user.py`
+(`_persist_autojoin`).
+**Reported as:** "i tried `/join #forum <key>` in undernet, and it opens the
+channel window and says can't join because it's +k, even though that's the
+correct password. it worked before. i don't know if the problem is in qtpyrc or
+`..\irc bouncer`. also, it shouldn't make a channel window if it can't join."
+
+Four bugs, two on each side of the socket, and each one hid the next. The
+reporter's key was correct throughout and was never once sent.
+
+**1. qtpyrc: `/join` swallowed the command whole.** `Commands.join` treated the
+existence of a `Channel` object *with a window* as "already in the channel" and
+returned — no JOIN, no key, and nothing printed. A window is the wrong
+question: it deliberately outlives the membership (`_deactivate_channel` keeps
+it and clears `Channel.active`), so **every** `/join` meant to rejoin a channel
+whose window was still open was dropped, whatever the reason it was open. This
+is the direct cause of the report: the user typed the right key several times
+and it never reached the bouncer. Confirmed from Wicket's own log, where the
+only client-originated JOINs in the whole session are `#life` and `#movieclub`.
+Now gated on `chan.active`, and a key handed to a `/join` that genuinely has
+nothing to use it for is reported rather than discarded.
+
+**2. Wicket: the channel table outlived the connection it described.**
+`ChannelState.joined` is set by our own JOIN echo and cleared by our own PART or
+KICK — all three are *messages*, and a dropped connection sends none of them, so
+nothing cleared it. Undernet dropped at `10:44:50`; the table still claimed
+every channel from before, and when qtpyrc attached at `17:21:13` it was handed
+a synthesised join for a channel nobody was in:
+
+```
+17:21:17 [client inhahe_/undernet] >>> :inhahe_!inhahe@Wicket JOIN #forum
+```
+
+That is the "it shouldn't make a channel window if it can't join" half — and it
+is also what made bug 1 fire, since the window it created is what `/join` then
+mistook for a membership. `UpstreamConnection._cleanup` (the single funnel every
+disconnect goes through) now calls `User.mark_network_parted`, which clears
+`joined` **and** the member list: who is in a channel is a fact about a
+connection we no longer have, and keeping it is what feeds a stale NAMES to the
+next client that attaches — the same shape as the "no ops for the user
+themselves" entry below.
+
+**3. Wicket: the key was thrown away on the way into the config.**
+`_persist_autojoin` runs when the upstream confirms a JOIN and wrote the key
+only for a channel it had never seen; anything already listed took the
+`else: return  # No change needed` path. `#forum` was already listed — from a
+join made before it went `+k` — so the key that had just *worked* was dropped,
+and the config kept `'#forum':` with nothing after it, for good.
+
+**4. Wicket: every re-JOIN asked the config, which is a different question.**
+Both `_handle_target_too_fast` (the 439 retry) and `join_channels` (the rejoin
+after a reconnect) looked the key up in `network_config.autojoin` rather than
+remembering what the JOIN actually went out with. Given bug 3 the answer was
+`None`, so the JOIN was re-sent bare — and a `+k` channel answers a bare JOIN
+with 475 forever:
+
+```
+10:50:05 <<< 439 inhahe_ #forum :Target change too fast. Please wait 121 seconds.
+...
+17:24:20 upstream: Retrying JOIN #forum on undernet
+17:24:20 >>> JOIN #forum
+17:24:20 <<< 475 inhahe_ #forum :Cannot join channel (+k)
+```
+
+seven hours of it, every five minutes. `UpstreamConnection._note_join` now
+records the key from any JOIN on its way out (hooked in `send`/`send_now`, the
+single funnels, so a new call site cannot bypass it), and `key_for` prefers it
+over the config.
+
+**Why "it worked before" was true.** Nothing about the channel or the key
+changed. The first join, whenever it happened, carried the key from the user's
+hand and succeeded. Everything after it was a *re*-JOIN — by the retry loop or
+by a reconnect — and those were the paths with no key.
+
+**Residue worth keeping.**
+
+- **A cached object is not a fact about the present.** Three of these four are
+  the same mistake at different scales: a window that outlives a membership, a
+  member table that outlives a connection, an autojoin entry read back as
+  though it recorded what happened. Anything derived from a connection should
+  be invalidated by that connection ending, and anything asked at the point of
+  use should be asked of the thing that acted, not of the thing that was
+  configured.
+- **A no-op still owes an answer when part of the request cannot be honoured.**
+  `/join #chan` is answered completely by bringing the window forward;
+  `/join #chan <key>` is not.
+- **"Which program is at fault?" can be answered from the wire, and should be
+  before either is touched.** The client-side JOIN lines in Wicket's traffic log
+  settled it in one grep: `#forum` never appeared among them, which is the
+  entire proof that the key never left qtpyrc — and no amount of reading either
+  codebase would have said so, since both looked correct in isolation.
+- **Two of these were only reachable because the other side was broken.** A
+  test suite for either program alone passes against all four. What is missing
+  is an end-to-end check that qtpyrc and Wicket agree about a `+k` channel;
+  until there is one, this pair is worth re-reading when either side's join
+  path changes.
+
+Covered by `tests/test_join_command.py` (qtpyrc, wire-level) and
+`irc bouncer/tests/test_join_keys.py` (Wicket, 25 cases). Both were verified
+against the reverted code: the first reports `sent []` for every rejoin case,
+the second fails 9 of 25.
 
 ### The tree/chat splitter forgot its position across runs (fixed 2026-09-05)
 

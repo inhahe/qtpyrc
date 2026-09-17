@@ -168,7 +168,23 @@ def now_hhmm():
 
 
 def reports_in(path):
-  """Every duplicate report in the audit log, as blocks of text."""
+  """Every duplicate report in the audit log, as blocks of text.
+
+  **Drains the background writer first.** `render_audit._write` hands its line
+  to `bgwriter.shared()`, which appends on its own thread and flushes when the
+  queue empties -- so reading the file straight after a render is a race with
+  that thread, not a measurement. It won on an idle machine and lost on a busy
+  one, which is the worst way for a test to be wrong: three checks here failed
+  on 2026-09-17 reporting "produced 0 reports, expected 1" while the very
+  reports they wanted were sitting in the queue.
+
+  `flush()` is the sanctioned answer (see the bgwriter section of CLAUDE.md:
+  it exists for shutdown and for tests) and it is a barrier, not a delay -- the
+  same shape as `HistoryDB.flush_pending()` before every history read. A sleep
+  here would only move the flake.
+  """
+  import bgwriter
+  bgwriter.shared().flush()
   if not os.path.exists(path):
     return []
   with open(path, encoding='utf-8') as f:

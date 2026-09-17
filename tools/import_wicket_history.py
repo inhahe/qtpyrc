@@ -35,7 +35,35 @@ Usage
 -----
   python tools/import_wicket_history.py                   # dry run, reports
   python tools/import_wicket_history.py --apply           # do it
-  python tools/import_wicket_history.py --days 60 --apply
+  python tools/import_wicket_history.py --days 60 --apply # only the last 60 days
+
+How far back to go
+------------------
+All of it, which is the default. `--days` narrows the *scan*, not the result,
+because the result is already bounded by something better: for each channel the
+import skips anything older than the oldest row qtpyrc still keeps for it, since
+`backscroll_limit` prunes to the newest N and an older row inserted now would be
+deleted by the next pass.
+
+That floor is much tighter than any sensible `--days` for the channels where it
+binds, and much looser for the ones where it does not, so a day count is the
+wrong instrument in both directions. Measured on the reporter's databases
+(backscroll_limit 1000, Wicket holding 180 days):
+
+    --days  14 ->  10741 lines across  58 channels
+    --days  30 ->  12112 lines across  69 channels   (the old default)
+    --days  60 ->  13213 lines across  79 channels
+    all 180    ->  15471 lines across 112 channels
+
+A busy channel is capped at 1000 rows and so only reaches back a few hours --
+##programming had less than a day -- and nothing older than that is recoverable
+whatever you ask for. A quiet channel never hits the cap and still holds March,
+so it is recoverable in full, and it is exactly what a small window cuts off.
+Defaulting to 30 days silently discarded a fifth of what was there, in the
+channels least likely to be noticed missing.
+
+The cost of scanning further is scanning: 648k Wicket rows instead of 189k, of
+which 608k are skipped by the floor. That is seconds, once.
 
 Close qtpyrc first. It holds history.db open, and this rewrites it.
 """
@@ -184,8 +212,10 @@ def main():
     ap.add_argument('--wicket-db', default=DEFAULT_WICKET)
     ap.add_argument('--history-db', default=os.path.join(ROOT, 'me', 'history.db'))
     ap.add_argument('--log-dir', default=os.path.join(ROOT, 'me', 'logs'))
-    ap.add_argument('--days', type=int, default=30,
-                    help='how far back to look (default 30)')
+    ap.add_argument('--days', type=int, default=0,
+                    help='limit the scan to the last N days (default: no '
+                         'limit -- the per-channel prune floor already bounds '
+                         'what can be imported; see the module docstring)')
     ap.add_argument('--apply', action='store_true',
                     help='actually write; without it nothing is changed')
     ap.add_argument('--no-logs', action='store_true',
@@ -196,7 +226,7 @@ def main():
         if not os.path.exists(path):
             sys.exit('not found: %s' % path)
 
-    since = time.time() - args.days * 86400
+    since = (time.time() - args.days * 86400) if args.days > 0 else 0.0
     print('reading qtpyrc history ...')
     existing, spellings = load_qtpyrc(args.history_db, since)
     print('  %d (network, channel) pairs, %d chat rows'
@@ -212,8 +242,9 @@ def main():
     fallback = {low: max(v.items(), key=lambda kv: kv[1])[0]
                 for low, v in per_net.items()}
 
-    print('reading Wicket (%s, last %d days) ...'
-          % (os.path.basename(args.wicket_db), args.days))
+    print('reading Wicket (%s, %s) ...'
+          % (os.path.basename(args.wicket_db),
+             ('last %d days' % args.days) if args.days > 0 else 'everything'))
     con = sqlite3.connect('file:%s?mode=ro' % args.wicket_db.replace('\\', '/'),
                           uri=True)
     con.execute('PRAGMA query_only=1')

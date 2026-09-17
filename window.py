@@ -1545,15 +1545,54 @@ class Window(QWidget):
     """Execute a queued callback."""
     callback()
 
+  # How many held-back lines to render per turn of the event loop. Small
+  # enough that a chunk is imperceptible; large enough that the ordinary case
+  # (a handful of lines) finishes in one call, so a caller that flushes and
+  # then looks at the document still sees it.
+  FLUSH_CHUNK = 50
+
   def _flush_replay_queue(self):
-    """Flush queued live messages after replay finishes."""
+    """Render everything held back during a replay, then reopen to live output.
+
+    Chunked across turns of the event loop. The queue holds whatever arrived
+    while the backlog was loading, which for a busy channel during a slow
+    drip-feed replay is hundreds of lines, and rendering them in one loop is a
+    GUI freeze of exactly that length -- 3.2s and 8.3s in `me/hangs.log` on
+    2026-09-05, both stacks landing in `insertText` under this function. The
+    drip-feed exists to spread the *backlog* over time; the flush at the end of
+    it was undoing that for the live half.
+
+    **The queue stays open until it is empty**, which is the part that is easy
+    to get wrong. Closing it first -- as the unchunked version could afford to
+    -- would let a line arriving between two chunks render immediately and so
+    jump ahead of lines still waiting, reordering the conversation. `_in_replay`
+    is what lets a chunk render through the same `addline_*` methods without
+    re-queuing itself; it is saved and restored rather than forced, since it
+    belongs to whoever is driving a replay.
+
+    Returns True when the queue is fully drained.
+    """
     if self._replay_queue is None:
-      return
+      return True
+    # No _widget_alive() guard here: every addline_* already returns early on
+    # a dead widget, so a closing window drains to nothing on its own. Asking
+    # here as well would add a second answer to the same question.
     queue = self._replay_queue
+    chunk = queue[:self.FLUSH_CHUNK]
+    del queue[:self.FLUSH_CHUNK]
+    was_in_replay = self._in_replay
+    self._in_replay = True
+    try:
+      for method_name, args, kwargs in chunk:
+        getattr(self, method_name)(*args, **kwargs)
+    finally:
+      self._in_replay = was_in_replay
+    if queue:
+      QTimer.singleShot(0, self._flush_replay_queue)
+      return False
     self._replay_queue = None
     self._replay_cutoff_id = None   # the next hold-back takes its own snapshot
-    for method_name, args, kwargs in queue:
-      getattr(self, method_name)(*args, **kwargs)
+    return True
 
   def addline(self, line, fmt=None, timestamp_override=None):
     if not self._widget_alive(): return

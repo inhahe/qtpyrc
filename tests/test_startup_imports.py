@@ -120,6 +120,8 @@ _real_run_forever = qasync.QEventLoop.run_forever
 
 def _capturing_run_forever(self):
   snapshot['modules'] = set(sys.modules)
+  feat = sys.modules.get('shibokensupport.feature')
+  snapshot['scan'] = getattr(feat, '_mod_uses_pyside', None)
   QTimer.singleShot(0, lambda: QCoreApplication.instance().quit())
   return _real_run_forever(self)
 
@@ -148,6 +150,51 @@ else:
     if mod in loaded:
       failures.append('%s was imported before the event loop turned -- %s'
                       % (mod, why))
+
+  # PySide6 replaces builtins.__import__ and reads the *whole source file* of
+  # every module imported afterwards, to see whether it mentions "PySide6"
+  # (shibokensupport.feature._mod_uses_pyside -> inspect.getsource). Measured
+  # over a real startup: 96 modules, 2.0 MB, 6.65s. qtpyrc replaces that scan
+  # immediately after its first PySide6 import.
+  #
+  # Unlike the modules above, this one cannot be seen in a profile: it makes
+  # every import slower rather than one of them slow, so -X importtime names
+  # nothing. The only durable check is that the replacement is still in place.
+  import qtpyrc as _q
+  if 'shibokensupport.feature' not in sys.modules:
+    pass          # a PySide6 that does not install the hook; nothing to do
+  elif snapshot.get('scan') is not _q._no_feature_scan:
+    failures.append(
+        'the PySide6 per-import source scan was still active when the event '
+        'loop started (_mod_uses_pyside is %r). That reads the entire source '
+        'of every module qtpyrc imports -- 6.65s of startup, measured.'
+        % (snapshot.get('scan'),))
+
+  # ...and the assumption the replacement rests on: the scan only decides
+  # whether a module is *eligible* for `from __feature__ import ...`, which
+  # qtpyrc does not use. An assumption nobody re-checks is how this stops
+  # being true, and the symptom would be a feature silently not applying.
+  import re
+  users = []
+  for dirpath, dirnames, filenames in os.walk(ROOT):
+    dirnames[:] = [d for d in dirnames
+                   if d not in ('junk', '__pycache__', '.git', 'me')]
+    for fn in filenames:
+      if not fn.endswith('.py'):
+        continue
+      full = os.path.join(dirpath, fn)
+      try:
+        text = open(full, encoding='utf-8', errors='replace').read()
+      except OSError:
+        continue
+      if re.search(r'^\s*from\s+__feature__\s+import', text, re.M):
+        users.append(os.path.relpath(full, ROOT))
+  if users:
+    failures.append(
+        'these use `from __feature__ import`, which qtpyrc disables the '
+        'pre-scan for: %s. The explicit import still works, but the claim in '
+        '_disable_pyside_feature_scan that nothing uses it is no longer true '
+        'and needs re-checking.' % ', '.join(sorted(users)))
 
 if failures:
   print('FAILED (%d):' % len(failures))

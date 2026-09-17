@@ -851,10 +851,27 @@ class IRCClient(asyncirc.IRCClient):
 
   @property
   def _log_network(self):
-    """Network name for log file paths.  Prefers the server-reported name
-    (keeps existing log filenames stable) but falls back to the config key
-    or hostname so logs never land in 'unknown'."""
-    return self.client.network or self.client.network_key or self.client.hostname or 'unknown'
+    """The key a line is filed under, in the history table and the log path.
+
+    **The config key first, because it is the only part of this chain that
+    exists before registration.** `client.network` is the ISUPPORT `NETWORK=`
+    value and does not arrive until the 005 burst, so preferring it -- as this
+    did until 2026-09-17 -- filed everything written before 005 under the
+    config key and everything after it under the server's spelling. Not once,
+    per connect: the same channel ends up as two buckets, `undernet/#anxiety`
+    and `UnderNet/#anxiety`, interleaved by hours.
+
+    A replay reads one key, so half the backscroll becomes invisible, and
+    `backscroll_limit` then prunes each bucket to 1000 rows independently, so
+    the halves stay balanced and the loss is not even obvious. Measured on the
+    reporter's database before the fix: 23 channels and queries double-booked,
+    five spellings of Undernet, three of EFnet.
+
+    This is a *key*, not a label. It has to be the same for the first line of a
+    session and the last, which rules out anything learned from the server --
+    the prettier name belongs in `_net_label`, which is what titles use.
+    """
+    return self.client.network_key or self.client.network or self.client.hostname or 'unknown'
 
   def _log_chat(self, target, line):
     """Write one incoming chat line to *target*'s log file.

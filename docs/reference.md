@@ -93,7 +93,7 @@ Parameters that accept arbitrary text (messages, reasons, titles) must be quoted
 | `/quit` | `/quit [message]` | Disconnect from the server (default message: "Leaving") |
 | `/away` | `/away ["message"]` | Set away status with message, or clear away if no message |
 | `/nick` | `/nick <newnick>` | Change your nickname |
-| `/join` | `/join <channel> [key]` | Join a channel, optionally with a key |
+| `/join` | `/join [-n] [-z] <channel> [key]` | Join a channel, optionally with a key. Also accepts `/join <network>/<channel>` (`-n` disables that reading, for a channel whose name contains `/`); `-z` joins without switching to the window. A channel window stays open after a part, a kick or a disconnect, so `/join` sends a JOIN whenever you are not actually in the channel, whether or not its window is still there. If you *are* already in it, `/join` just brings the window forward -- and says so if you supplied a key, since it has nothing to use it for |
 | `/part` | `/part [message]` | Leave the current channel (channel windows only) |
 | `/hop` | `/hop` | Part and immediately rejoin the current channel (preserves key) |
 | `/msg` | `/msg <target> <message>` | Send a private message to a user or channel |
@@ -1594,6 +1594,42 @@ channel are left alone: `backscroll_limit` removed those on purpose.
 It is written for Wicket's schema. Another bouncer's archive would need the
 `messages` query and `parse_line` adjusting, which is most of an hour's work,
 not a rewrite.
+
+### Folding split network names
+
+Versions before 2026-09-17 filed a line under the server's `NETWORK=` name once
+registration had finished and under the config key before it, so the same
+channel accumulated two buckets — `undernet/#anxiety` and `UnderNet/#anxiety`.
+A replay reads one key, so roughly half the backscroll became invisible, and
+because `backscroll_limit` prunes each bucket separately both stayed full and
+nothing looked wrong.
+
+New lines always use the config key now. `tools/fold_network_names.py` folds
+what is already split:
+
+```
+python tools/fold_network_names.py                     # dry run: reports, writes nothing
+python tools/fold_network_names.py --map Libera.Chat=libera --apply
+```
+
+It maps a spelling automatically **only** when it equals a configured network
+key case-insensitively (`UnderNet` → `undernet`, `EFNet` → `efnet`). Anything
+else — a display name like `Libera.Chat`, a hostname like `irc.undernet.org` —
+must be named with `--map OLD=NEW`, and is otherwise listed and left alone. That
+is deliberate: guessing wrong here rewrites a table.
+
+Close qtpyrc first. It backs up `history.db` (`history.db.pre-fold-*`),
+renumbers every row into timestamp order — required, because qtpyrc reads a
+channel's backlog by row id and merging two id ranges otherwise interleaves two
+conversations by when they were written rather than when they were said — drops
+rows that become exact duplicates, re-keys the `urls` table, and merges the
+matching log files by timestamp.
+
+**It restores contiguity, not depth.** Two 1000-row buckets merge into one
+2000-row channel, which `backscroll_limit` then prunes back to 1000 on that
+channel's next message. What you gain is a thousand *consecutive* lines instead
+of a thousand with holes in them. Raise `backscroll_limit` before restarting if
+you want to keep the extra.
 
 ## Duplicate-message detection (render audit)
 

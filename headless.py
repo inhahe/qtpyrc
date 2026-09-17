@@ -159,7 +159,9 @@ class StubWindow:
         return False
 
     def _flush_replay_queue(self):
-        pass
+        # True = "fully drained", the same contract as Window's chunked one.
+        # Nothing is ever held back here, so it is always already true.
+        return True
 
     # render_history_rows() -- the one renderer both the on-open replay and the
     # background drip-feed go through -- turns auto-scroll off around a replay

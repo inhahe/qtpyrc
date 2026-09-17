@@ -270,11 +270,22 @@ class Commands:
     if conn:
       chan_name = target if target[0:1] in '#&!+' else '#' + target
       chnlower = conn.irclower(chan_name)
-      # If already in the channel, just switch to it
+      # A window is not a membership.  The window deliberately outlives a
+      # part, a kick and a disconnect -- its backscroll is worth keeping -- and
+      # a bouncer can hand us one for a channel it only *believes* it is in.
+      # Testing for the window therefore swallowed every /join meant to rejoin
+      # one of those: no JOIN, no key, and nothing said.  Ask whether we are
+      # actually in it.
       chan = conn.client.channels.get(chnlower)
-      if chan and chan.window:
-        if not no_activate:
+      if chan and chan.active:
+        if not no_activate and chan.window:
           state.app.mainwin.workspace.setActiveSubWindow(chan.window.subwindow)
+        # Switching to the window answers "/join #chan" completely -- but not
+        # when a key came with it.  A key means the user believes they are not
+        # in the channel, and discarding it in silence is how they conclude
+        # the server rejected it.
+        if key:
+          window.redmessage('[Already in %s -- the key was not sent]' % chan.name)
         return
       # Mark as user-initiated so persist_autojoins only fires for /join
       conn._user_joins.add(chnlower)

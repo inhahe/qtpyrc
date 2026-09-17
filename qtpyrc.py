@@ -44,6 +44,80 @@ if sys.platform == 'win32':
 
 os.environ.setdefault('QT_LOGGING_RULES', 'qt.text.font.db=false;qt.qpa.fonts=false;qt.gui.imageio=false')
 
+# Qt parallelises a large smooth image scale across its private *Gui* thread
+# pool: it queues N segments and then blocks the calling thread on
+# QSemaphore::acquire(N).  There is no timeout and no serial fallback, so if
+# the pool does not run those segments the caller waits for ever -- and when
+# the caller is the GUI thread inside a paint, the whole client is frozen with
+# no Python frame below the event loop to say why.
+#
+# That is a real hang, not a theory: me/hangs.log has it on 2026-08-16 (7077s),
+# 2026-08-31, 2026-09-01 and 2026-09-06 (64 minutes and still going when it was
+# dumped).  The dump shows the GUI thread parked in
+#   QScrollBar::paintEvent -> qmodernwindowsstyle -> QPainter::drawPixmap
+#   -> QRasterPaintEngine::drawImage -> QSemaphore::acquire
+# with **no Qt thread-pool thread anywhere in the process** -- the segments it
+# is waiting for were never going to run.  Every occurrence was on a machine
+# pinned at 100% CPU, which is the condition that starves the pool.
+#
+# QT_NO_GUI_THREADPOOL is Qt's own switch for this: with no Gui pool, the same
+# code takes the serial path.  The cost is that one big smooth scale uses one
+# core instead of twelve, which for a client whose largest scaled images are
+# scroll-bar and style pixmaps is not a cost anyone can see.  setdefault, so an
+# environment that sets it explicitly still wins.
+os.environ.setdefault('QT_NO_GUI_THREADPOOL', '1')
+
+def _no_feature_scan(module):
+  """Stands in for shibokensupport.feature._mod_uses_pyside.
+
+  See _disable_pyside_feature_scan for why this answers without looking.
+  """
+  return False
+
+
+def _disable_pyside_feature_scan():
+  """Stop PySide6 reading the source of every module qtpyrc imports.
+
+  Importing PySide6 replaces `builtins.__import__` with `__feature_import__`,
+  which calls `shibokensupport.feature.feature_imported` for *every* module
+  imported from then on. That calls `_mod_uses_pyside(mod)`, whose entire job
+  is to answer "does this module's source contain the string 'PySide6'?" --
+  by way of `inspect.getsource` -> `linecache` -> `tokenize.open`, which opens
+  and reads the whole file. Nothing in the import machinery needed that file;
+  the scan asked for it.
+
+  Measured over a real startup: **96 modules, 2.0 MB read, 6.65 s**, of which
+  16 answered yes. That is the same order as the two import regressions in
+  CLAUDE.md, it is paid on every launch, and it is invisible in a profile taken
+  per-module because it is spread evenly across all of them -- it shows up as
+  every import being slow rather than as one culprit.
+
+  The scan only *pre-classifies* a module as eligible for `from __feature__
+  import ...`. An actual `from __feature__ import` sets that module's entry
+  itself, so switching the scan off does not switch the feature off -- verified
+  by importing a module that uses `snake_case` with this in place. qtpyrc uses
+  the classic camelCase API throughout and has no `__feature__` import
+  anywhere; `tests/test_startup_imports.py` asserts both halves, because the
+  second is the assumption this rests on.
+
+  Returns True if the scan was found and replaced.
+  """
+  for name in ('shibokensupport.feature', 'PySide6.support.feature'):
+    feat = sys.modules.get(name)
+    if feat is not None and hasattr(feat, '_mod_uses_pyside'):
+      feat._mod_uses_pyside = _no_feature_scan
+      return True
+  return False
+
+
+# Importing any PySide6 submodule installs the hook, so this is the earliest
+# point it can be turned off. Deliberately *not* a star import: the three below
+# are ordered so that QtCore wins the name collisions, and reordering them
+# would silently change which QAction/QFont/... the rest of the file gets.
+import PySide6.QtCore as _pyside_bootstrap  # noqa: F401
+_disable_pyside_feature_scan()
+del _pyside_bootstrap
+
 from PySide6.QtWidgets import *
 from PySide6.QtGui import *
 from PySide6.QtCore import *
@@ -925,8 +999,35 @@ def _close_window(widget, force=False):
     if client in state.clients:
       state.clients.remove(client)
 
+def _is_transient_window(w):
+  """True for a menu, popup, tooltip or splash -- a window only in Qt's sense.
+
+  These are top-level widgets (`isWindow()` is True) and they open and close
+  constantly during ordinary use, so anything that reads meaning into a window
+  closing has to exclude them or it fires on a right-click menu going away.
+  """
+  t = w.windowFlags() & Qt.WindowType.WindowType_Mask
+  transient = [Qt.WindowType.Popup, Qt.WindowType.ToolTip,
+               Qt.WindowType.SplashScreen]
+  drawer = getattr(Qt.WindowType, 'Drawer', None)
+  if drawer is not None:
+    transient.append(drawer)
+  return t in transient
+
+
 class _AppKeyFilter(QObject):
   """Application-level event filter for global key bindings."""
+
+  # How long a Close event may still be attributed to an Alt+F4 key event.
+  # Windows delivers the WM_CLOSE in the same input batch, so this only has to
+  # be long enough to cover that and short enough not to reach an unrelated
+  # close seconds later.
+  _ALT_F4_WINDOW = 0.5
+
+  def __init__(self, parent=None):
+    super().__init__(parent)
+    self._alt_f4_at = 0.0
+
   def eventFilter(self, obj, event):
     if event.type() in (QEvent.Type.KeyPress, QEvent.Type.ShortcutOverride):
       key = event.key()
@@ -937,6 +1038,10 @@ class _AppKeyFilter(QObject):
       # Alt+F4: let Windows handle it natively.
       # On the main window: closes it → lastWindowClosed → quit.
       # On a dialog: closes it → closeEvent → reject (unsaved check).
+      # Recorded here so the Close branch at the bottom can tell an Alt+F4
+      # from any other window closing. See there for why that matters.
+      if key == Qt.Key.Key_F4 and alt:
+        self._alt_f4_at = _time.monotonic()
 
       # Ctrl+F4: close the active in-app window (part channel, close query)
       # If a dialog (modal or non-modal) has focus, close it instead
@@ -980,13 +1085,36 @@ class _AppKeyFilter(QObject):
           ws.cycle_tab(forward=False)
           return True
 
-    # On Windows, Alt+F4 sends WM_CLOSE directly — arrives as QCloseEvent,
-    # not a key event. Intercept close on child windows when Alt is held.
+    # On Windows, Alt+F4 sends WM_CLOSE directly — it arrives as a QCloseEvent,
+    # not a key event — so quitting on Alt+F4 over a child window means reading
+    # a Close event and deciding whether Alt+F4 caused it.
+    #
+    # This used to ask `QApplication.queryKeyboardModifiers()`, which polls the
+    # *keyboard right now* and has nothing to do with the event being handled.
+    # A Close event carries no modifiers, so that looked like the only way to
+    # ask — but it makes **any** top-level window closing while Alt happens to
+    # be down quit the whole client. Alt is down for all sorts of ordinary
+    # reasons: reaching the menu bar, Alt+Tab, and AltGr (which Windows reports
+    # as Ctrl+Alt) for typing @ \ | ~ € on a non-US layout. Reported as "it
+    # always disappears when i accidentally press some random key combination",
+    # and it left no trace of a crash because it was not one: `quit()` ran
+    # normally, so even the atexit "Unexpected exit" marker stayed silent.
+    #
+    # Two things fix it, and they are independent:
+    #   * Correlate with an actual Alt+F4 **key event** seen by this same
+    #     filter, rather than with live hardware state. If Qt never delivers
+    #     that key event, this branch simply never fires and Alt+F4 closes the
+    #     focused window — the Windows convention, and a safe way to fail.
+    #   * Ignore menus, popups and tooltips outright. They are top-level
+    #     windows that open and close constantly, and no reading of "the user
+    #     asked to quit" survives a right-click menu going away.
     if (event.type() == QEvent.Type.Close
         and isinstance(obj, QWidget)
         and obj.isWindow()
-        and obj is not state.app.mainwin):
-      if QApplication.queryKeyboardModifiers() & Qt.KeyboardModifier.AltModifier:
+        and obj is not state.app.mainwin
+        and not _is_transient_window(obj)):
+      if _time.monotonic() - self._alt_f4_at < self._ALT_F4_WINDOW:
+        self._alt_f4_at = 0.0     # one close per Alt+F4, never a second
         obj.close()
         QTimer.singleShot(0, QApplication.instance().quit)
         return True
