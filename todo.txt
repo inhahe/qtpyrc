@@ -1,5 +1,67 @@
 
+for some reason, clicking on active channels' tabs suddenly stopped causing them to be minimized. it will still go back to showing the previously shown non-minimized channel if there is one, but if there are none, it's no longer replacing the current channel with the background color.
 
+--
+
+
+opened two windows in the same network for the same handle again
+
+i sent a prvmsg to someone in a window that was already open, and at the time i sent the message, it was disconnected from the server, but it didn't show me any error message saying my message didn't go through
+
+/msg dumb_bot config supybot.drivers.minReconnectWait 300
+to prevent dumb_bot and qtpyrc's combined reconnect attempts after a network glitch from triggering undernet's g-line for excessive connections.
+
+--
+
+make sure you make it so that searching a channel history works too even though it wasn't all loaded already even when the channel currently has focus
+
+qtpyrc was holding up a restart, i guess it doesn't handle the system message to quit very well or very quickly.
+
+every time i start qtprcy, i get the same private messages over and over again that i have to click out of. like all the last private messages i got in the last couple of days maybe. i don't know if it's a qtpyrc bug or a ..\wicket bug. figure out which one it is and fix it.
+
+/query doesn't reload conversation history. also, it loads a second window for the same nick even if it's already open (maybe only if the case of the nick is different?)
+
+there's a bug: userhost-in-names.png (when connecting to an Ergo ircd, nicks in the nicks list show full hostmasks)
+-included in  qtpyrc Code Review.html
+
+--
+^ doing
+
+i'm getting '[06:38] [Notify] list is already online (undernet)' in the current window. that's noise, that should be in the status window. 
+also, it indicates that qtpyrc is redundantly trying to put the notify list online twice after connect. actually, that's probably because it's connecting to a bouncer, so that part is probably fine.
+
+since the new updates trying to make typing less slow, now it intermittently hangs for several seconds at a time. though it could be a coincidence, there were a lot of netsplits at that time.
+
+katia opped a lot of people like this:
+"""
+[08:39] * katia sets mode +oooo Atque Bahhumbug BypassingCC Catty
+[08:39] * katia sets mode +oooo Delf Forlorn Juest JustinSanity
+[08:39] * katia sets mode +oooo LohanG LooCfur Sario She
+[08:39] * katia sets mode +oooo SnoopyOnZNCNow Tobbi VanUnamed Xanderephalus
+[08:39] * katia sets mode +oooo _qw alip aruns bcmiller
+[08:39] * katia sets mode +oooo bin bozo16 brokkoli_origin cashlin
+[08:39] * katia sets mode +oooo catte coco_ de-facto enyc
+[08:39] * katia sets mode +oooo eqw flygirl fury999io gAy_Dragon
+[08:39] * katia sets mode +oooo inhahe_ jonesy320 kerm|t litharge
+[08:39] * katia sets mode +oooo ryjen sb583 xs yang3
+[08:39] * katia sets mode +oooo zarabeth zerotime zyme Panther
+[08:39] * katia sets mode +oooo zxrom olle Digit Lord_of_Life
+[08:39] * katia sets mode +oo DunceCotus coolnickname
+"""
+and the ops weren't reflected in my nick list.
+^^ fixing
+
+rewrite the entire thing in C++ with *every* feature, not using Qt.
+^^ done
+
+qtpyrc minimized while it was out of focus and wouldn't restore/maximize when i clicked on it on the taskbar so i right-clicked and clicked close application and it eventually did but it took a while. i was running python under procdump in case of any Qt crashes and it didn't seem to make any .dmp files.
+
+was hanging a lot on startup, i think because it was receiving a lot of messages at once from the bouncer playback
+
+test history playback doesn't highlight
+test /dcc chat and files
+test /server parameters
+check context menus
 Claude for a list of all /commands supported
 and a list of all parameters supported by /on
 tell claude to make a document about all the variables in the irc object or IrcProxy (seem to be more or less the same thing, maybe they should be named the same)
@@ -19,7 +81,6 @@ test lots of things
 test ident server - port 113 may be blocked by ISP - include notes on that that are included in the irc bouncer yaml.
 test example plugin Claude said he made
 test /exec
-test /on
 test storing channel keys into the yaml when you /join with one
 test that all configuration options save to the yaml
 ask how i can design the configuration dialogs in pyside6-designer
@@ -40,7 +101,6 @@ test 'save configuration as' confirms before overwrite if file exists
 test future changes are saved to the new configuration file
 test notifications, including /notify 
 test highlight/notify on regex patterns
-test /on features
 test /notify on a server that supports MONITOR
 then go to a server without it and test /notify. asyncirc.py has "Make a mutable copy so ISUPPORT can update per-connection"
 test popups.ini
@@ -50,6 +110,10 @@ test list and play sounds
 test tab completion
 test MDI mode - requires restart
 test irc color picker
+test plugin configuration registration
+test web link preview
+test web link preview proxy
+test input history persistance
 
 why isn't it showing that i joined the channel when i join?
 - i think that's a bug in Wicket, since it worked in mIRC.
@@ -332,11 +396,227 @@ Go through this list and tell me which capabilities are already available to plu
 
 if we ever get more {functions}, consider adding a dummy /command that expands a string and throws away the return value.
 
-
-
-
-
 find a copy of triviabot somewhere, preferably the one the bot already refactored 
 
+ask claude how I could get people to know that I have this great IRC client repository. 
+
+Here are some good places to share it:
+
+  IRC-specific
+  - Post in IRC channels about IRC clients — #irc on Libera, relevant channels on other networks
+  - Add it to the https://github.com/davisonio/awesome-irc GitHub list (submit a PR)
+  - Post on IRC-related subreddits: r/irc
+
+  Python/Qt communities
+  - r/Python, r/QtFramework
+  - Python Discord servers
+  - PySide6/Qt forums
+
+  General
+  - Hacker News (Show HN post)
+  - r/opensource
+  - Add topic tags on the GitHub repo (Settings > Topics): irc, irc-client, python, pyside6, qt
+
+  AI-assisted development angle
+  - The "written mostly with Claude Code" angle is interesting — r/ClaudeAI, r/LocalLLaMA, Twitter/X AI communities
+  might find it noteworthy as a case study
+
+  The GitHub topics are the easiest first step — they make the repo discoverable in GitHub search.
+
+use the syntax language class in cc2html.py to highlight, if that means using text color spans that were in the claude code window. 
+
+maybe we should be able to restore config.yaml?
+
+i also think that doing the same thing as --init should be an option in the dialog. it's okay if there's two different ways to do it. 
+
+also, there should be a button to create a new file with a stub for each default file like i think there is, but also a button to create the full default file from _DEFAULT_TEMPLATES.
+also, since there's apparenly also default templates for stub files, they should be stored only in _DEFAULT_TEMPLATES with the full defaults or in a similar variable in the same place. 
+
+should file dialog have an option to apply without saving? -done?
+
+yep, the program just stopped again with no error. 
+
+tabs bar wrapping too early. -done?
+
+whet i change the splitter value between channel text and nick list, it should automatically apply to all channels. -done?
+
+
+
+edit files dialog takes a while to close. is there any unnecessary stuff going on when it closes?
+save project before fixing this. 
+
+entering characters in the internal editor is slow. is there anything unnecessary going on there?
+
+it keeps saying the file has been modified outside the editor when i'm editing config.yaml. maybe it's because the bouncer was joining channels which was changing config.yaml's autojoins? does it 
+
+when i click to 'save as & reload' when the file has been modified by an external program, the default filename to save as is config.yaml.bak.*
+i think * needs to be removed
+when i try to save as config.yaml.bak, Windows' file save dialog says the filename is not valid. something must be being passed wrong to the file save dialog.
+-done?
+
+when it says the file has been modified outside the editor and i click reload, qtpyrc becomes not the active app on the desktop.
+when i click okay and the file has been modifoud outside the editor, there should be an option to cancel and go back to the edit window.
+-done?
+
+i changed tls to false in a server setting, and it's still trying to connect via tls every 30 seconds. i think it's not immediately applying it to the auto reconnect. is that ideal behavior? -done?
+
+the 'channels' page isn't really working right. sometimes it shows the channels in auto-join, sometimes it shows 'enable sasl,' 'mechanism', 'username' and 'password'. and when it shows all the channels from autojoin, i don't see any way to configure them. and i think 'channels' and 'autojoin' should be the same page. -done?
+
+the per-channel lists configuration isn't quite right. it says one per line, but the fields don't allow for very many lines. there's a lot of empty space above them, so they should just take up all that space. -done?
+
+not a lot of room for ignores, auto-ops, highlights and notify in the server-level settings. what can we do about that? -done?
+
+change persist_autojoins in my settings.
+
+i don't think it asked me about overwriting enough files when i picked the init option from the file dialog..
+
+whois and ping only work sometimes. 
+
+
+
+
+
+Here's a test set. Run these in any channel window:
+
+  /on chanmsg test_greet * /echo [GREET] {nick} said: {message}
+  Test: Anyone says anything → echo to your window. Verify {nick} and {message} expand.
+
+  /on chanmsg test_hello *hello* /say Hello back, {nick}!
+  Test: Someone says "hello" (anywhere in message) → sends "Hello back, nick!" to the channel.
+
+  /on chanmsg test_nick -n friend* *hi* /echo [FRIEND] {nick} said hi
+  Test: Only fires if nick starts with "friend" AND message contains "hi".
+
+  /on chanmsg test_chan -c #coding * /echo [CODING] {nick}: {message}
+  Test: Only fires in #coding, not other channels.
+
+  /on chanmsg test_net -k dalnet * /echo [DALNET] {nick}: {message}
+  Test: Only fires on dalnet network.
+
+  /on chanmsg test_sound -s beep *alert*
+  Test: Someone says "alert" → system beep. No command needed, just the sound flag.
+
+  /on chanmsg test_desktop -d *urgent*
+  Test: Someone says "urgent" → desktop notification.
+
+  /on chanmsg test_highlight -h *important*
+  Test: Someone says "important" → highlights the channel tab.
+
+  /on chanmsg test_combo -s beep -d -h *emergency* /echo [EMERGENCY] {nick}: {message}
+  Test: All three flags plus a command, fires on "emergency".
+
+  /on chanmsg test_regex /^\d{3}\s/ /echo [REGEX] {nick} sent a number-prefixed message
+  Test: Message starts with 3 digits + space (e.g. "404 not found").
+
+  /on chanmsg test_exec * /exec echo("Last message from %s: %s" % (nick, message))
+  Test: Anyone speaks → runs Python that calls echo(). Verify nick and message are available as Python variables.
+
+  /on join test_welcome * /echo [JOIN] {nick} joined {channel}
+  Test: Someone joins any channel → echo.
+
+  /on part test_bye * /echo [PART] {nick} left {channel}
+  Test: Someone parts → echo.
+
+  /on quit test_quit * /echo [QUIT] {nick} quit
+  Test: Someone quits → echo.
+
+
+  /on nick test_rename * /echo [NICK] {oldnick} is now {newnick}
+  Test: Someone changes nick → echo.
+
+  /on topic test_topic * /echo [TOPIC] {nick} changed topic in {channel}: {topic}
+  Test: Topic changes → echo.
+
+  /on connect test_conn /echo [CONNECTED] We're online!
+  Test: Connect to a server → echo.
+
+  /on disconnect test_disc /echo [DISCONNECTED] Lost connection: {reason}
+  Test: Disconnect → echo.
+
+  To list all your test hooks:
+  /on -l
+
+  To remove them all when done:
+  /on -r chanmsg test_greet
+  /on -r chanmsg test_hello
+  /on -r chanmsg test_nick
+  /on -r chanmsg test_chan
+  /on -r chanmsg test_net
+  /on -r chanmsg test_sound
+  /on -r chanmsg test_desktop
+  /on -r chanmsg test_highlight
+  /on -r chanmsg test_combo
+  /on -r chanmsg test_regex
+  /on -r chanmsg test_exec
+  /on -r join test_welcome
+  /on -r part test_bye
+  /on -r quit test_quit
+  /on -r nick test_rename
+  /on -r topic test_topic
+  /on -r connect test_conn
+  /on -r disconnect test_disc
+
+emojis show up too big when falling back to another font 
+- this is apparently a common problem and hard to fix
+
+now alt-f4 clicked from within a config window just closes the config window instead of the whole app. we had this fixed before.
+-seems to work now, but doesn't confirm on unsaved change
+-claude wasn't able to solve the problem.
+
+test nick list colors and see if they're the same for the same nicks across channels
+
+change ctrl+up in the input box so that if i press any key other than home, end, up, down, pageup, or pagedown, the input history popup disappears and the input field processes the character. including if i hit backspace. is this possible?
+-claude kept failing at making the input process the key, so just replaced the popup with mIRC-style ctrl-up/ctrl-down. but he seemed to do fine when it came to the color picker, so maybe we should revisit this sometime and tell him to do it the same way the color picker is done.
+- was fixed again, withouut insgight about the color picker. test.
+
+ctrl+end, ctrl+home should work in channel scrollback
+-done again. test.
+
+og:image times don't seem to be showing - check
+show ages like "1 year, 2 months and 3 days ago" if there's some library function we can use for this
+nevermind, ages are never being detected anyway.
+
+dies if using MDI mode according to fixion
+-couldn't reproduce. ask him if he still has the traceback or can reproduce it
+
+fixion tried to disconnect from one that autoconnected and qtpyrc "died"
+
+"IRCv3 group now recommends SCRAM-SHA-256 as the preferred mechanism going forward, but adoption is still low."
+should probably support that sometime, add it as the SCRAM /server -l method
+
+test settings dialogs under laptop because it has a different PPI. claude probably needs to make a lot of the fields detect their size rather than hardcode a number of pixels. or at least use a more dynamic unit than pixels.
+
+here's an example of glyphs that aren't showing up correctly. all the apostrophes in the above.
+
+i typed /join #znc from a server window, first time it didn't join it and only said 
+[08:07] No text to send
+[08:53] #znc https://znc.in
+[08:53] #znc 1621427378
+second time, it joined it
+^^ claude couldn't figure it out, wanted to add debug statements in case it happens again, which it may never.
+
+make the users count above the nick list darker (either dark gray or black) and also bigger. 
+
+setup dialogs still extending too far down, below the end of the app
+
+it still crashes occasionally with no error message.
+
+  Option 2: procdump (captures full native dump)
+
+  If you want the full native stack including Qt internals:
+
+  procdump -e -ma -w python.exe
+
+  Then in another terminal, run python qtpyrc.py. When it crashes, procdump writes a .dmp file you can open in VS. (Get
+  procdump from Sysinternals.)
+
+  Option 3: VS 2022 native debugger
+
+  devenv /debugexe python.exe qtpyrc.py 
+^^ where do i find devenv?
+
+  This opens VS with Python as the debugee. Hit F5 to start. When it crashes, VS breaks and shows the native call stack.
+   You won't get Python-aware frames unless you enable mixed-mode debugging (which requires the Python workload
+  installed in VS), but you'll see which Qt function crashed.
 
 

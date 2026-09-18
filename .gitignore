@@ -1,0 +1,49 @@
+
+# Local-only. We publish straight from this directory now instead of copying
+# a filtered subset into D:\github, so these are excluded here instead.
+me/
+dist/
+test/
+test2/
+test3/
+test4/
+test5/
+test6/
+temp3/
+__pycache__/
+tests/
+debug/
+logs/
+settings/
+.idea/
+.claude/
+.orchestrator_history
+qtpyrc Code Review_files/
+*.txt
+*.log
+
+# Present in this project directory but never published from the staging
+# copy; keep them local.
+2357a495-151b-4a31-bf01-b301010b60d3.html
+cc2html.2.py
+cc2html.py
+cclist.py
+config.yaml
+debug.bat
+debug_crash.bat
+docs/
+go.bat
+history.db
+junk/
+popups.ini
+pyspy_dump.bat
+pyspy_record.bat
+pyspy_record_fast.bat
+pyspy_top.bat
+qtpyrc Code Review.html
+sample_profile.bat
+toolbar.ini
+ui.yaml
+update.bat
+userhost-in-names.png
+variables.ini

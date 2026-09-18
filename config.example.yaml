@@ -93,7 +93,8 @@ tab_rows: 0
 # Initial state for new tabs:
 #   "active"  — switch to the new tab immediately (default)
 #   "normal"  — tab appears but doesn't become active
-#   "skipped" — tab appears in skipped state (Ctrl+Tab skips it)
+#   "skipped" — tab appears in skipped state: the window is not put on screen,
+#               and Ctrl+Tab passes over it
 new_tab_state: active
 
 # Navigation panel: "tabs" (tab bar only), "tree" (tree view only),
@@ -345,6 +346,10 @@ ident:
 
 # Maximum number of lines kept in each channel window's backscroll buffer.
 # Older lines are discarded as new ones arrive.  0 = unlimited.
+# SQLite database for session history replay.
+# Relative paths are resolved from the config file directory.
+history_file: history.db
+
 backscroll_limit: 10000
 
 # Lines of history to replay from the database when opening a window.
@@ -362,7 +367,7 @@ history_replay:
 # ---------------------------------------------------------------------------
 
 logging:
-  dir: logs                # directory for log files (relative to qtpyrc.py)
+  dir: logs                # directory for log files (relative to config file)
   use_subdirs: false       # create per-network subdirectories
   separate_by_month: false # create per-month log files
   debug: false             # enable debug-level logging
@@ -374,13 +379,13 @@ logging:
 # ---------------------------------------------------------------------------
 
 plugins:
-  dir: plugins             # directory for Python plugins (relative to qtpyrc.py)
+  dir: plugins             # directory for Python plugins (relative to config file)
   auto_load:               # Python plugins to load automatically on startup
-    - triviabot            # plain name or wildcard pattern (*, ?, [abc])
+    # - myplugin           # plain name or wildcard pattern (*, ?, [abc])
     # - "*"                # load all .py plugins in the plugins dir
 
 scripts:
-  dir: scripts             # directory for command scripts (relative to qtpyrc.py)
+  dir: scripts             # directory for command scripts (relative to config file)
   startup: startup.rc      # startup commands file (runs first, gets quick-edit button)
   auto_load:               # additional command scripts to run on startup
     # - "*.rc"             # run all .rc scripts

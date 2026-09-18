@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2024 Inhahe - http://inhahe.com
+Copyright (c) 2024 Richard Albert Nichols III (Inhahe) - http://inhahe.com
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
