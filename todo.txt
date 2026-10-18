@@ -1,5 +1,10 @@
-
-for some reason, clicking on active channels' tabs suddenly stopped causing them to be minimized. it will still go back to showing the previously shown non-minimized channel if there is one, but if there are none, it's no longer replacing the current channel with the background color.
+qtpyrc won't connect on any of my networks. i got "[INFO] [irc] connection lost: 127.0.0.1 [WinError 64] The specified network name is no longer available
+[INFO] [irc] connection lost: 127.0.0.1 [WinError 64] The specified network name is no longer available
+[INFO] [irc] connection lost: 127.0.0.1 [WinError 64] The specified network name is no longer available
+[INFO] [irc] connection lost: 127.0.0.1 [WinError 64] The specified network name is no longer available
+[INFO] [irc] connection lost: 127.0.0.1 [WinError 64] The specified network name is no longer available"
+update: i rebooted, and now i'm not getting those messages anymore, but it's still not connecting.
+my profile for qtpyrc is under ',\me', and my profile for the irc bouncer is under '..\irc bouncer\me'.
 
 --
 

@@ -186,6 +186,70 @@ above; `SelfEchoTracker` has no notice list yet.
 
 ## Fixed, with a residue worth knowing
 
+### F12 froze the client — it is the Windows debugger hotkey, and a debugger was attached (fixed 2026-09-23)
+
+**Where:** not in qtpyrc. `D:\utils\qtpyrc.bat`, which since 2026-09-06 had
+launched qtpyrc under cdb.
+**Reported as:** "i pressed F12 and now qtpyrc is hanging."
+
+Every thread in the process was `Wait` / **`Suspended`**, at zero CPU, and
+`me/hangs.log` had not been written in five hours. A hung GUI thread leaves the
+watchdog running; a whole process with every thread suspended at once is what a
+**debugger breaking in** looks like, and the watchdog's silence is the other half
+of the same fact. The last event in `me/cdb.log`:
+
+```
+(1a88.66a8): Break instruction exception - code 80000003 (first chance)
+ntdll!DbgBreakPoint:
+00007fff`2f543ab0 cc              int     3
+```
+
+`0x1a88` is 6792, the qtpyrc PID; `0x66a8` is a thread nobody in qtpyrc
+created. `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AeDebug`
+`UserDebuggerHotKey` is `0`, which is **F12**, and it means: *when a debugger is
+attached, pressing this key in the application breaks it into the debugger.*
+Windows injects a thread that executes `DbgBreakPoint`; cdb's default for a break
+instruction is to stop and wait at its prompt; the prompt was in a console
+minimised to the tray. `nowplaying` binds F12. Nothing was wrong with qtpyrc or
+the plugin — F12 worked for weeks before the debugger went on, and would have
+announced a track here too if Windows had let the key through.
+
+**Recovery that loses nothing:** restore that console and type `g` Enter. The
+process resumes exactly where it stopped. (It is still under cdb afterwards, so
+the next F12 does it again — restart through the fixed launcher.)
+
+**Fixed** by making `:plain` — no debugger — the launcher's default again. The
+cdb trap was set on 2026-09-06 to answer one question (who throws
+`?AVCacheOverflowException@@`), and it answered it on 2026-09-17. Since then it
+had cost:
+
+1. **qtpyrc as a child of cdb** — anything that ends cdb ends qtpyrc instantly:
+   no atexit, no `crash.log`, no drain of the bgwriter queue or the history DB.
+2. **The `py` launcher**, which spawns Python as a child, so cdb sat on a
+   process that only waits and the trap caught nothing for eleven days.
+3. **This.**
+
+**Residue worth keeping.**
+
+- **An instrument that has answered its question must come off, not just be
+  quietened.** Disarming the first-chance C++ filter on 2026-09-17 addressed the
+  cost that had been *measured* and left the one that had not: being a debugger
+  at all changes how the process behaves, in ways the instrument's author did
+  not enumerate. The render audit taught this with a log file; this taught it
+  with a key.
+- **A reserved key only misbehaves in the configuration that reserves it.** F12
+  is harmless without a debugger and a trap with one, so no amount of testing
+  the plugin — and no amount of testing qtpyrc outside a debugger — could have
+  found this. The collision was between two things chosen separately, months
+  apart, by the same person (me: the hotkey default and the launcher).
+- **"Every thread Suspended" is a diagnosis in itself.** Deadlocked threads wait
+  for each other (`UserRequest`, `Unknown`); a debugger stops them all at once.
+  `Get-Process | .Threads | WaitReason` answered this before a line of code was
+  read.
+- **If cdb is ever put back**, rebind nowplaying off F12 first — or change
+  `UserDebuggerHotKey`, which is system-wide and affects every debugger on the
+  machine, so is the worse choice.
+
 ### History and logs were keyed by a network name that changed at registration (fixed 2026-09-17)
 
 **Where:** `irc_client.IRCClient._log_network`; migration in
@@ -425,6 +489,10 @@ instrument that has answered its question and stays switched on is pure cost —
 and here the cost is not theoretical: **every throw froze the whole process
 while cdb walked 24 frames and resolved symbols**, and it fires on ordinary
 chat text.
+
+(Six days later the launcher stopped running qtpyrc under cdb at all — see
+"F12 froze the client" above. Disarming the one filter was not enough; the
+debugger being attached was the hazard.)
 
 **Residue worth keeping.**
 
